@@ -1,0 +1,7 @@
+.DS_Store
+*.log
+*.tsv
+*.tsv.gz
+# Sampled data lives in ~/.claude-watch, never in the repo — this is a guard
+# in case CLAUDE_WATCH_HOME is ever pointed here during testing.
+data/

@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Resource sampler for claude-watch. Installed by ./install.sh, which
+     substitutes __REPO__ for the clone path.
+
+     StartInterval rather than a resident daemon on purpose: launchd starts a
+     short-lived sampler, it exits, and nothing stays running between samples.
+     A monitor whose job is detecting leaked background processes should not be
+     one. -->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.turbokach.claudewatch</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>__REPO__/tools/sample.sh</string>
+  </array>
+
+  <!-- launchd's PATH is minimal; add Homebrew so anything shelled out to resolves. -->
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+  </dict>
+
+  <key>StartInterval</key>
+  <integer>10</integer>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/claudewatch.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/claudewatch.err.log</string>
+</dict>
+</plist>

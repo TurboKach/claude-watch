@@ -1,0 +1,331 @@
+#!/usr/bin/env bash
+# claude-watch — daily digest of what actually used this machine.
+#
+# The sampler (tools/sample.sh) writes append-only facts; everything here is
+# derived at read time, so report logic can change without re-collecting data.
+set -u
+
+DATA="${CLAUDE_WATCH_HOME:-$HOME/.claude-watch}"
+RAW="$DATA/raw"
+STATE="$DATA/state"
+KEEP_RAW_DAYS="${CLAUDE_WATCH_KEEP_DAYS:-30}"
+GZIP_AFTER_DAYS=2
+
+usage() {
+  cat <<'EOF'
+claude-watch — what actually used this machine today
+
+usage: claude-watch [report [DATE]] | status | hook | doctor
+
+  report [DATE]   digest for DATE: today (default), yesterday, or YYYY-MM-DD
+  status          is sampling alive, how recent, how much data
+  hook            print yesterday's digest once on the first shell of a new day
+                  (add to .zshrc; returns in ~2ms on every other shell)
+  doctor          check the install end to end
+
+Environment:
+  CLAUDE_WATCH_HOME       data directory (default ~/.claude-watch)
+  CLAUDE_WATCH_KEEP_DAYS  raw retention in days (default 30)
+EOF
+}
+
+# Colour only when writing to a terminal, so redirected reports stay clean.
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
+  C_HEAD=$'\033[1;38;5;51m'; C_DIM=$'\033[38;5;245m'; C_KEY=$'\033[38;5;252m'
+  C_HOT=$'\033[38;5;208m'; C_RED=$'\033[38;5;196m'; C_OK=$'\033[38;5;46m'
+  C_SEC=$'\033[1m'; C_RST=$'\033[0m'
+else
+  C_HEAD=""; C_DIM=""; C_KEY=""; C_HOT=""; C_RED=""; C_OK=""; C_SEC=""; C_RST=""
+fi
+
+resolve_date() {
+  case "${1:-today}" in
+    today|"")  date +%F ;;
+    yesterday) date -v-1d +%F ;;
+    *)         printf '%s' "$1" ;;
+  esac
+}
+
+# Raw files are gzipped once they are a couple of days old.
+read_day() {
+  local d=$1
+  if   [ -f "$RAW/$d.tsv" ];    then cat "$RAW/$d.tsv"
+  elif [ -f "$RAW/$d.tsv.gz" ]; then gzcat "$RAW/$d.tsv.gz"
+  fi
+}
+
+report() {
+  local d; d=$(resolve_date "${1:-today}")
+  local data; data=$(read_day "$d")
+  if [ -z "$data" ]; then
+    printf '%sno samples recorded for %s%s\n' "$C_DIM" "$d" "$C_RST"
+    return 0
+  fi
+  printf '%s' "$data" | LC_ALL=C awk -F'\t' -v D="$d" -v HOME_DIR="$HOME" \
+    -v C_HEAD="$C_HEAD" -v C_DIM="$C_DIM" -v C_KEY="$C_KEY" -v C_HOT="$C_HOT" \
+    -v C_RED="$C_RED" -v C_OK="$C_OK" -v C_SEC="$C_SEC" -v C_RST="$C_RST" '
+    function dur(s,   d, h, m) {
+      d = int(s / 86400); h = int((s % 86400) / 3600); m = int((s % 3600) / 60)
+      if (d) return sprintf("%dd%02dh", d, h)
+      if (h) return sprintf("%dh%02dm", h, m)
+      if (m) return sprintf("%dm", m)
+      return sprintf("%ds", s)
+    }
+    # Apps like Firefox run many identically-named processes. Fold them into one
+    # figure per sample before aggregating, otherwise each extra content process
+    # counts as another observation and "seen % of day" exceeds 100.
+    #
+    # CPU is summed: two processes at 50% genuinely cost one core. RSS is NOT —
+    # it counts shared pages in every process that maps them, so summing eight
+    # Firefox content processes claimed 13.1G on a 24G machine. We keep the
+    # largest single process and how many there were; ps cannot give a true
+    # shared/private split without `footprint` or root.
+    function flush(   k) {
+      for (k in cs) {
+        pn[k]++; psum[k] += cs[k]
+        if (cs[k] > ppeak[k]) ppeak[k] = cs[k]
+        if (crm[k] > prss[k]) prss[k] = crm[k]
+        if (ccnt[k] > pcnt[k]) pcnt[k] = ccnt[k]
+        if (!(k in pkeys)) { pkeys[k] = 1; pk[++pkn] = k }
+      }
+      split("", cs); split("", crm); split("", ccnt)
+    }
+    function memlabel(key,   s) {
+      s = gb(prss[key])
+      return (pcnt[key] > 1) ? sprintf("%s ×%d", s, pcnt[key]) : s
+    }
+    function seenpct(key,   p) {
+      p = pn[key] * 100 / sysn
+      return (p < 1) ? "<1%" : sprintf("%d%%", int(p + 0.5))
+    }
+    function gb(kb) {
+      if (kb >= 1048576) return sprintf("%.1fG", kb / 1048576)
+      return sprintf("%dM", int(kb / 1024))
+    }
+    function cores_col(c) { return (c >= 4) ? C_RED : (c >= 1) ? C_HOT : C_OK }
+    function tilde(p) { sub("^" HOME_DIR, "~", p); return p }
+
+    {
+      ep = $1; kind = $2; key = $3; cores = $4 + 0; rss = $5 + 0
+      # Rows are append-only and time-ordered, so a change of epoch closes the
+      # previous sample.
+      if (ep != cur_ep) { flush(); cur_ep = ep }
+      if (kind == "sys") {
+        if (!(ep in sysseen)) { sysseen[ep] = 1; sysn++; eps[sysn] = ep }
+        if (cores > peakload) peakload = cores          # $4 is load average on sys rows
+        if (minfree == 0 || $6 + 0 < minfree) minfree = $6 + 0
+        if ($7 + 0 > maxswap) maxswap = $7 + 0
+        if ($5 + 0 > maxused) maxused = $5 + 0
+        ncpu = $8 + 0
+        next
+      }
+      if (kind == "session") {
+        sn[key]++; ssum[key] += cores
+        if (cores > speak[key]) speak[key] = cores
+        if (rss > srss[key]) srss[key] = rss
+        if ($7 != "") slabel[key] = $7
+        if ($6 != "-" && $6 != "") {
+          split($6, hh, "@")
+          if (hh[2] + 0 > shotc[key]) { shotc[key] = hh[2] + 0; shot[key] = hh[1] }
+        }
+        if (!(key in skeys)) { skeys[key] = 1; sk[++skn] = key }
+        next
+      }
+      if (kind == "proc") {
+        cs[key] += cores; ccnt[key]++
+        if (rss > crm[key]) crm[key] = rss
+        next
+      }
+      if (kind == "orphan") {
+        if ($6 + 0 > oage[key]) oage[key] = $6 + 0
+        if (rss > orss[key]) orss[key] = rss
+        olast[key] = ep
+        if (!(key in okeys)) { okeys[key] = 1; ok[++okn] = key }
+        if (ep > lastep) lastep = ep
+        next
+      }
+    }
+
+    END {
+      flush()   # close the final sample
+      if (sysn == 0) { print "no system samples for " D; exit }
+
+      # Derive the sampling interval from the data rather than assuming it, so
+      # coverage stays honest if the interval was changed or launchd was paused.
+      for (i = 1; i < sysn; i++) for (k = i + 1; k <= sysn; k++)
+        if (eps[k] < eps[i]) { t = eps[i]; eps[i] = eps[k]; eps[k] = t }
+      dn = 0
+      for (i = 2; i <= sysn; i++) { gap = eps[i] - eps[i-1]; if (gap > 0 && gap < 600) dl[++dn] = gap }
+      for (i = 1; i < dn; i++) for (k = i + 1; k <= dn; k++)
+        if (dl[k] < dl[i]) { t = dl[i]; dl[i] = dl[k]; dl[k] = t }
+      iv = (dn > 0) ? dl[int(dn / 2) + 1] : 10
+      covered = sysn * iv
+
+      printf "%sclaude-watch%s  %s%s%s   %s%d cores · %d samples · %s observed%s\n",
+             C_HEAD, C_RST, C_SEC, D, C_RST, C_DIM, ncpu, sysn, dur(covered), C_RST
+
+      # --- Claude sessions ---
+      printf "\n%sCLAUDE SESSIONS%s\n", C_SEC, C_RST
+      if (skn == 0) printf "  %snone recorded%s\n", C_DIM, C_RST
+      for (i = 1; i < skn; i++) for (k = i + 1; k <= skn; k++)
+        if (speak[sk[k]] > speak[sk[i]]) { t = sk[i]; sk[i] = sk[k]; sk[k] = t }
+      for (i = 1; i <= skn; i++) {
+        key = sk[i]
+        printf "  %s%-28.28s%s %speak%s %s%5.1f×%s  %savg%s %4.1f×  %sactive%s %s  %s\n",
+               C_KEY, tilde(key), C_RST, C_DIM, C_RST,
+               cores_col(speak[key]), speak[key], C_RST,
+               C_DIM, C_RST, ssum[key] / sn[key],
+               C_DIM, C_RST, dur(sn[key] * iv), gb(srss[key])
+        if (slabel[key] != "")
+          printf "      %s%s%s\n", C_DIM, slabel[key], C_RST
+        if (shot[key] != "")
+          printf "      %s└ hottest child:%s %s %s%.1f×%s\n",
+                 C_DIM, C_RST, shot[key], cores_col(shotc[key]), shotc[key], C_RST
+      }
+
+      # --- Machine-wide ---
+      # Two separate questions, so two separate rankings. Sorting one combined
+      # list by peak let a system daemon that spiked once for 10 seconds outrank
+      # something burning quietly all day, and buried the memory holders entirely.
+      printf "\n%sMACHINE-WIDE%s %s(outside every Claude tree)%s\n", C_SEC, C_RST, C_DIM, C_RST
+      if (pkn == 0) printf "  %snothing crossed the floor%s\n", C_DIM, C_RST
+      else {
+        # By total CPU time consumed = sum of per-sample cores × interval. This
+        # is the honest "what burned the machine today" measure.
+        for (i = 1; i <= pkn; i++) bk[i] = pk[i]
+        for (i = 1; i < pkn; i++) for (k = i + 1; k <= pkn; k++)
+          if (psum[bk[k]] > psum[bk[i]]) { t = bk[i]; bk[i] = bk[k]; bk[k] = t }
+        printf "  %sby CPU time burned%s\n", C_DIM, C_RST
+        for (i = 1; i <= pkn && i <= 6; i++) {
+          key = bk[i]
+          if (psum[key] <= 0) break
+          printf "    %s%-26.26s%s %s%8s%s total  %speak%s %s%4.1f×%s  %savg%s %4.1f×  %sseen %s%s\n",
+                 C_KEY, key, C_RST, cores_col(ppeak[key]), dur(psum[key] * iv), C_RST,
+                 C_DIM, C_RST, cores_col(ppeak[key]), ppeak[key], C_RST,
+                 C_DIM, C_RST, psum[key] / pn[key], C_DIM, seenpct(key), C_RST
+        }
+        # By memory held. Distinct list because a 4G process at 0% CPU never
+        # appears in a CPU ranking, and is exactly what you want to know about.
+        for (i = 1; i <= pkn; i++) mk[i] = pk[i]
+        for (i = 1; i < pkn; i++) for (k = i + 1; k <= pkn; k++)
+          if (prss[mk[k]] > prss[mk[i]]) { t = mk[i]; mk[i] = mk[k]; mk[k] = t }
+        printf "  %sby memory held%s %s(largest single process; RSS double-counts shared pages)%s\n",
+               C_DIM, C_RST, C_DIM, C_RST
+        for (i = 1; i <= pkn && i <= 4; i++) {
+          key = mk[i]
+          if (prss[key] <= 0) break
+          printf "    %s%-26.26s%s %10s  %sseen %s%s\n",
+                 C_KEY, key, C_RST, memlabel(key), C_DIM, seenpct(key), C_RST
+        }
+      }
+
+      # --- System ---
+      printf "\n%sSYSTEM%s\n", C_SEC, C_RST
+      printf "  peak load %s%.2f%s/%d · peak mem used %s · min free %s%s%s · max swap %s%dM%s\n",
+             (peakload > ncpu ? C_RED : C_OK), peakload, C_RST, ncpu, gb(maxused),
+             (minfree < 524288 ? C_RED : C_OK), gb(minfree), C_RST,
+             (maxswap > 1024 ? C_RED : C_DIM), maxswap, C_RST
+
+      # --- Orphans ---
+      if (okn > 0) {
+        printf "\n%s⚠ ORPHANED DEV PROCESSES%s %s(no parent — still holding memory and ports)%s\n",
+               C_RED, C_RST, C_DIM, C_RST
+        for (i = 1; i <= okn; i++) {
+          key = ok[i]
+          alive = (olast[key] >= lastep) ? "still alive" : "gone by end of day"
+          printf "  %s%-28.28s%s %s  %6s  %s%s%s\n",
+                 C_KEY, key, C_RST, dur(oage[key]), gb(orss[key]),
+                 (olast[key] >= lastep ? C_RED : C_DIM), alive, C_RST
+        }
+      }
+    }'
+}
+
+status() {
+  local latest count
+  latest=$(ls -t "$RAW"/*.tsv 2>/dev/null | head -n1)
+  printf '%sclaude-watch status%s\n' "$C_HEAD" "$C_RST"
+  if [ -z "$latest" ]; then
+    printf '  %sno samples yet%s — is the launchd job loaded? try: claude-watch doctor\n' "$C_RED" "$C_RST"
+    return 1
+  fi
+  local last_ep now age
+  last_ep=$(tail -n1 "$latest" | cut -f1)
+  now=$(date +%s); age=$((now - last_ep))
+  count=$(wc -l < "$latest" | tr -d ' ')
+  if [ "$age" -lt 120 ]; then
+    printf '  %s● sampling%s   last sample %ss ago\n' "$C_OK" "$C_RST" "$age"
+  else
+    printf '  %s● stalled%s    last sample %ss ago\n' "$C_RED" "$C_RST" "$age"
+  fi
+  printf '  %s rows today · %s on disk · %s days retained\n' \
+    "$count" "$(du -sh "$DATA" 2>/dev/null | cut -f1)" "$KEEP_RAW_DAYS"
+}
+
+# Runs on EVERY shell start, so the no-op path must stay trivial: one file read
+# and a string compare. Anything heavier is a tax on opening a terminal.
+hook() {
+  local today marker
+  today=$(date +%F)
+  marker="$STATE/last-shown"
+  [ "$(cat "$marker" 2>/dev/null)" = "$today" ] && return 0
+  mkdir -p "$STATE" 2>/dev/null
+  printf '%s' "$today" > "$marker"
+  local y; y=$(date -v-1d +%F)
+  [ -n "$(read_day "$y")" ] || return 0
+  report "$y"
+  printf '\n%srun `claude-watch` for today, `claude-watch report %s` to re-read this%s\n' \
+    "$C_DIM" "$y" "$C_RST"
+  retention
+}
+
+retention() {
+  find "$RAW" -name '*.tsv' -type f -mtime +$GZIP_AFTER_DAYS -exec gzip -q {} \; 2>/dev/null
+  find "$RAW" -name '*.tsv.gz' -type f -mtime +"$KEEP_RAW_DAYS" -delete 2>/dev/null
+  return 0
+}
+
+doctor() {
+  local plist="$HOME/Library/LaunchAgents/com.turbokach.claudewatch.plist" ok=0
+  printf '%sclaude-watch doctor%s\n' "$C_HEAD" "$C_RST"
+  chk() { if [ "$1" = 0 ]; then printf '  %s✓%s %s\n' "$C_OK" "$C_RST" "$2"; else printf '  %s✗%s %s\n' "$C_RED" "$C_RST" "$2"; ok=1; fi; }
+
+  [ -f "$plist" ]; chk $? "launchd plist installed"
+  launchctl list 2>/dev/null | grep -q com.turbokach.claudewatch; chk $? "launchd job loaded"
+  [ -d "$RAW" ]; chk $? "data directory exists ($DATA)"
+  [ -n "$(ls -A "$RAW" 2>/dev/null)" ]; chk $? "samples present"
+
+  local latest; latest=$(ls -t "$RAW"/*.tsv 2>/dev/null | head -n1)
+  if [ -n "$latest" ]; then
+    local age=$(( $(date +%s) - $(tail -n1 "$latest" | cut -f1) ))
+    [ "$age" -lt 120 ]; chk $? "last sample is recent (${age}s ago)"
+  fi
+
+  local errlog="$HOME/Library/Logs/claudewatch.err.log"
+  [ ! -s "$errlog" ]; chk $? "error log is empty"
+  [ -s "$errlog" ] && printf '      %slast error: %s%s\n' "$C_DIM" "$(tail -n1 "$errlog")" "$C_RST"
+
+  # A monitor that leaves processes behind would be the very thing it detects.
+  # One sampler may legitimately be in flight when this runs (a sample takes
+  # ~0.1s, and RunAtLoad fires one the instant the job loads), so only a pileup
+  # is a fault — that would mean samples are outlasting the interval.
+  local nsamp; nsamp=$(pgrep -f 'tools/sample.sh' 2>/dev/null | wc -l | tr -d ' ')
+  [ "$nsamp" -le 1 ]; chk $? "no sampler pileup (${nsamp} in flight; stateless by design)"
+
+  grep -q 'claude-watch hook' "$HOME/.zshrc" 2>/dev/null
+  chk $? "new-day hook installed in .zshrc"
+
+  return $ok
+}
+
+case "${1:-report}" in
+  report)          shift 2>/dev/null || true; report "${1:-today}" ;;
+  today)           report today ;;
+  yesterday)       report yesterday ;;
+  status)          status ;;
+  hook)            hook ;;
+  doctor)          doctor ;;
+  -h|--help|help)  usage ;;
+  20[0-9][0-9]-*)  report "$1" ;;
+  *)               usage >&2; exit 2 ;;
+esac
