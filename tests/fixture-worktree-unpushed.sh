@@ -4,10 +4,11 @@
 # The shebang is load-bearing (handoff §4.15): zsh does not word-split unquoted
 # variables, so this must be a FILE run under bash, never pasted into a shell.
 #
-# Hermetic. Builds a throwaway repo with a LOCAL bare repo standing in for
-# `origin` — no network, nothing outside its own mktemp -d is read or written.
-# CLAUDE_WATCH_REPO_ROOTS scopes the scan to the sandbox, which also stops
-# repo_candidates from enumerating ~/conductor.
+# Hermetic. Builds throwaway repos with LOCAL bare repos standing in for
+# remotes — no network, nothing outside its own mktemp -d is read or written,
+# and no configuration the machine happens to carry is honoured (see
+# "isolation" below). CLAUDE_WATCH_REPO_ROOTS scopes each scan to one sandbox,
+# which also stops repo_candidates from enumerating ~/conductor.
 #
 # What it pins:
 #   - a branch merged and pushed but with NO tracking configuration reports
@@ -33,6 +34,39 @@ command -v python3 >/dev/null 2>&1 || { echo "fixture-worktree-unpushed: python3
 
 TMP=$(mktemp -d) || exit 1
 trap 'rm -rf "$TMP"' EXIT
+
+# ---------------------------------------------------------------- isolation --
+# Hermetic has to mean hermetic. Without this block, every `git commit` below
+# runs whatever the machine has configured in `core.hooksPath` — the user's own
+# hooks, arbitrary code that can read or write real data or reach the network —
+# during a plain `tests/smoke.sh` run. `init.templateDir` is the same exposure
+# by another route: it installs hooks into each repo as it is created.
+#
+# GIT_CONFIG_GLOBAL and GIT_CONFIG_SYSTEM (git >= 2.32) redirect the global and
+# system config files wholesale, which covers ~/.gitconfig, ~/.config/git/config
+# and /etc/gitconfig in one move; GIT_CONFIG_NOSYSTEM is the older belt to that
+# brace. The replacement global file is not empty — it points core.hooksPath and
+# init.templateDir at directories this fixture created and left empty, so even a
+# future git that consults some other config still finds nothing to run.
+#
+# These are EXPORTED rather than passed as `git -c`, because the git commands
+# that matter most are not the ones written here: claude-watch runs its own
+# (rev-list, status, worktree remove) as child processes, and only the
+# environment reaches those. HOME moves too — plenty of tools read it directly,
+# and it keeps the scan away from the real ~/.claude.
+export HOME="$TMP/home"
+export XDG_CONFIG_HOME="$TMP/home/.config"
+mkdir -p "$TMP/home" "$TMP/empty-hooks" "$TMP/empty-template" || exit 1
+cat > "$TMP/gitconfig" <<EOF || exit 1
+[core]
+	hooksPath = $TMP/empty-hooks
+[init]
+	templateDir = $TMP/empty-template
+EOF
+export GIT_CONFIG_GLOBAL="$TMP/gitconfig"
+export GIT_CONFIG_SYSTEM=/dev/null
+export GIT_CONFIG_NOSYSTEM=1
+export GIT_TEMPLATE_DIR="$TMP/empty-template"
 
 ORIGIN="$TMP/origin.git"
 MAIN="$TMP/repo"
@@ -170,6 +204,7 @@ case "$merged_reason" in
       || bad "removal kept the branch"
     ;;
 esac
+
 
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ]
