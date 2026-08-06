@@ -127,6 +127,12 @@ pure $(( 524288000 - 52428800 )) 52428800 0 < /dev/null
 eq "10.0% and exactly 50 GiB -> ok"    "$(S 3)" ok
 pure $(( 524288000 - 52428799 )) 52428799 0 < /dev/null
 eq "one KB under 50 GiB -> warn"       "$(S 3)" warn
+# warn percent line, both sides. On a 200 GiB volume 20% is 40 GiB, so the
+# GiB half of the AND passes and the percent half is the one under test.
+pure $(( G200 - G200 / 5 )) $(( G200 / 5 )) 0 < /dev/null
+eq "avail exactly 20% -> ok"           "$(S 3)" ok
+pure $(( G200 - G200 / 5 + 1 )) $(( G200 / 5 - 1 )) 0 < /dev/null
+eq "avail one KB under 20% -> warn"    "$(S 3)" warn
 
 # ============================================================ group findings ==
 echo "reclaimable groups"
@@ -212,13 +218,19 @@ has "  unverified says why"            "$A" "matched on name alone, no marker fi
 has "  cache age prints beside it"     "$A" "cache is 1h old;"
 eq "  group confidence is the best"    "$(F disk.reclaimable.rebuildable 11)" confirmed
 
-# The tool's own cleaner is preferred over rm -rf where one exists.
+# A Rust target gets the quoted rm -rf, NOT `(cd <parent> && cargo clean)`:
+# that form is not bound to the target directory we measured, because
+# CARGO_TARGET_DIR or a .cargo/config.toml target-dir key redirects it, and
+# §3c also accepts pom.xml as the marker for `target`, where cargo is the wrong
+# tool outright. DerivedData keeps its named cleaner: it is a UI affordance,
+# so no command argument is being guessed.
 pure_body "$V_USED" "$V_AVAIL" "$V_DF" "group	rebuildable	26738688	57	0
 dir	/Users/x/Dev/rs/target	20000000	rebuildable	confirmed
 dir	/Users/x/Library/Developer/Xcode/DerivedData/App-abc	6000000	rebuildable	confirmed"
 A=$(F disk.reclaimable.rebuildable 14)
-has "confirmed target -> cargo clean"  "$A" "(cd '/Users/x/Dev/rs' && cargo clean)"
-hasnt "  and not a blind rm -rf"       "$A" "rm -rf '/Users/x/Dev/rs/target'"
+has "target -> rm -rf, path-bound"     "$A" "rm -rf '/Users/x/Dev/rs/target'"
+hasnt "  never an unbound cargo clean" "$A" "cargo clean"
+hasnt "  and never a bare cd parent"   "$A" "cd '/Users/x/Dev/rs'"
 has "DerivedData names Xcode first"    "$A" "Xcode > Settings > Locations > Derived Data"
 
 # A path with a shell metacharacter: no command at all, second layer of §3b.
@@ -291,31 +303,174 @@ printf 'epoch\t-\t%s\t-\t-\nvol\t/x\t%s\t%s\t0\nfuture\ta\tb\tc\td\ngroup\trebui
 from_cache "$TMP/fwd.tsv"
 eq "unknown row kind is tolerated"     "$(S 3)" critical
 
+# The affected flag gates the per-group severity cap, so an unrecognised value
+# must not fail open into "not affected" — that is the path from one malformed
+# row to an inherited-critical finding with a removal command attached.
+good_cache "$TMP/aff2.tsv" "group	rebuildable	26738688	57	2"
+from_cache "$TMP/aff2.tsv"
+eq "affected=2 -> cache_malformed"     "$(S 5)" cache_malformed
+eq "  and no finding escapes"          "$(nfind)" 0
+good_cache "$TMP/affdash.tsv" "group	rebuildable	26738688	57	-"
+from_cache "$TMP/affdash.tsv"
+eq "affected='-' is the legacy field"  "$(S 3)" critical
+# ...and the pure half caps rather than releases if one ever reaches it.
+pure_body "$V_USED" "$V_AVAIL" "$V_DF" "scan	1	0	3	3
+note	depth_capped	1	-	-
+group	rebuildable	26738688	57	2"
+eq "unknown affected fails closed"     "$(F disk.reclaimable.rebuildable 4)" info
+
+printf 'epoch\t-\t%s\t-\t-\nvol\t/x\t%s\t%s\tbogus\n' "$NOW" "$V_USED" "$V_AVAIL" > "$TMP/df.tsv"
+from_cache "$TMP/df.tsv"
+eq "non-numeric df_size_kb -> bad"     "$(S 5)" cache_malformed
+printf 'epoch\t-\t%s\t-\t-\nvol\t/x\t%s\t%s\t-\n' "$NOW" "$V_USED" "$V_AVAIL" > "$TMP/dfdash.tsv"
+from_cache "$TMP/dfdash.tsv"
+eq "df_size_kb '-' is accepted"        "$(S 3)" critical
+hasnt "  and no container claim made"  "$(F disk.volume_low 13)" "APFS container"
+
+printf 'epoch\t-\t%s\t-\t-\nscan\t0\t0\t3\t3\nscan\t1\t0\t1\t3\nvol\t/x\t%s\t%s\t0\n' "$NOW" "$V_USED" "$V_AVAIL" > "$TMP/dup.tsv"
+from_cache "$TMP/dup.tsv"
+eq "duplicate scan rows -> malformed"  "$(S 5)" cache_malformed
+
+printf 'epoch\t-\t%s\t-\t-\nvol\t/x\t%s\t%s\t0\t42\n' "$NOW" "$V_USED" "$V_AVAIL" > "$TMP/wide.tsv"
+from_cache "$TMP/wide.tsv"
+eq "a sixth field -> malformed"        "$(S 5)" cache_malformed
+printf 'epoch\t-\t%s\t-\t-\nvol\t/x\t%s\t%s\t0\ngroup\treb	uildable\t100\t1\t0\n' "$NOW" "$V_USED" "$V_AVAIL" > "$TMP/tabbed.tsv"
+from_cache "$TMP/tabbed.tsv"
+eq "a tab inside a field -> malformed" "$(S 5)" cache_malformed
+
+printf 'epoch\t-\t%s\t-\t-\nepoch\t-\t%s\t-\t-\nvol\t/x\t%s\t%s\t0\n' "$NOW" "$NOW" "$V_USED" "$V_AVAIL" > "$TMP/dupe.tsv"
+from_cache "$TMP/dupe.tsv"
+eq "duplicate epoch rows -> malformed" "$(S 5)" cache_malformed
+
 # =========================================================== the re-stat gate ==
-echo "re-stat before printing a command"
-mkdir -p "$TMP/cold/target" "$TMP/hot/target"
-: > "$TMP/cold/target/artifact"
-: > "$TMP/hot/target/artifact"
-touch -t "$(date -v-60d +%Y%m%d%H%M.%S)" "$TMP/cold/target/artifact"
-good_cache "$TMP/cold.tsv" "group	rebuildable	26738688	57	0
-dir	$TMP/cold/target	20000000	rebuildable	confirmed"
-from_cache "$TMP/cold.tsv"
-has "still-idle confirmed keeps cmd"   "$(F disk.reclaimable.rebuildable 14)" "cargo clean)"
+# This is the one section that touches a real filesystem, because the gate it
+# tests is about the filesystem. Each case below is built so that exactly ONE
+# reason to downgrade is present: the tree is otherwise cold and the marker is
+# otherwise there, so a passing assertion pins that specific reason.
+echo "revalidation before printing a command"
+OLD=$(date -v-60d +%Y%m%d%H%M.%S)
+# TMP is under /var, which is a symlink to /private/var on macOS, so the
+# command must name the resolved object rather than the cached string.
+TMPR=$(cd -P -- "$TMP" && pwd -P)
+
+mk_target() {  # <parent> — a cold Rust target tree with its marker in place
+  mkdir -p "$1/target/debug/deps"
+  : > "$1/Cargo.toml"
+  : > "$1/target/debug/deps/libfoo.rlib"
+  : > "$1/target/marker"
+  # Children before parents: writing a child bumps the parent's mtime.
+  touch -t "$OLD" "$1/target/debug/deps/libfoo.rlib" "$1/target/marker" \
+                  "$1/target/debug/deps" "$1/target/debug" "$1/target" \
+                  "$1/Cargo.toml" "$1"
+}
+probe_cache() {  # <name> <dir> -> runs advise_disk over a cache naming <dir>
+  good_cache "$TMP/$1.tsv" "group	rebuildable	26738688	57	0
+dir	$2	20000000	rebuildable	confirmed"
+  from_cache "$TMP/$1.tsv"
+}
+
+mk_target "$TMP/cold"
+probe_cache cold "$TMP/cold/target"
+has "cold + marker: command printed"   "$(F disk.reclaimable.rebuildable 14)" "rm -rf '$TMPR/cold/target'"
 eq "  confidence stays confirmed"      "$(F disk.reclaimable.rebuildable 11)" confirmed
+has "  command names the resolved path" "$(F disk.reclaimable.rebuildable 14)" "$TMPR/cold/target"
 
-good_cache "$TMP/hot.tsv" "group	rebuildable	26738688	57	0
-dir	$TMP/hot/target	20000000	rebuildable	confirmed"
-from_cache "$TMP/hot.tsv"
+# NESTED activity. Every depth-1 mtime is still 60 days old; only a file three
+# levels down was written. A depth-1 probe calls this idle and authors a
+# deletion for a live build cache.
+mk_target "$TMP/nested"
+touch "$TMP/nested/target/debug/deps/libfoo.rlib"
+touch -t "$OLD" "$TMP/nested/target/debug/deps" "$TMP/nested/target/debug" "$TMP/nested/target"
+probe_cache nested "$TMP/nested/target"
 A=$(F disk.reclaimable.rebuildable 14)
-hasnt "touched since the scan: no cmd" "$A" "cargo clean"
-hasnt "  and no rm"                    "$A" "rm -rf"
+hasnt "nested write: no command"       "$A" "rm -rf"
 has "  downgraded to likely"           "$A" "in active use, rebuilt on next build"
-eq "  group confidence downgraded"     "$(F disk.reclaimable.rebuildable 11)" likely
+eq "  and the group says so"           "$(F disk.reclaimable.rebuildable 11)" likely
 
-good_cache "$TMP/gone.tsv" "group	rebuildable	26738688	57	0
-dir	$TMP/vanished/target	20000000	rebuildable	confirmed"
-from_cache "$TMP/gone.tsv"
-hasnt "vanished dir gets no command"   "$(F disk.reclaimable.rebuildable 14)" "cargo clean"
+# MARKER gone: the tree is cold, but the Cargo.toml that made it `confirmed`
+# has been deleted, so the cached verdict describes something absent.
+mk_target "$TMP/nomarker"
+rm -f "$TMP/nomarker/Cargo.toml"
+probe_cache nomarker "$TMP/nomarker/target"
+hasnt "marker deleted: no command"     "$(F disk.reclaimable.rebuildable 14)" "rm -rf"
+eq "  downgraded"                      "$(F disk.reclaimable.rebuildable 11)" likely
+
+# §3c also accepts pom.xml as the marker for `target`. Still confirmed, and
+# still an rm -rf rather than a Rust cleaner pointed at a Maven directory.
+mk_target "$TMP/maven"
+rm -f "$TMP/maven/Cargo.toml"
+: > "$TMP/maven/pom.xml"; touch -t "$OLD" "$TMP/maven/pom.xml" "$TMP/maven"
+probe_cache maven "$TMP/maven/target"
+eq "pom.xml is a valid marker too"     "$(F disk.reclaimable.rebuildable 11)" confirmed
+hasnt "  and cargo is not invoked"     "$(F disk.reclaimable.rebuildable 14)" cargo
+
+# A kind with no re-derivable marker gets no command however cold it is.
+mkdir -p "$TMP/mystery/blob"; touch -t "$OLD" "$TMP/mystery/blob" "$TMP/mystery"
+probe_cache mystery "$TMP/mystery/blob"
+hasnt "unknown kind: no command"       "$(F disk.reclaimable.rebuildable 14)" "rm -rf"
+
+# The final component being a symlink: rm -rf would remove the link, not the
+# tree, so the command would not do what its text says.
+mk_target "$TMP/real"
+ln -s "$TMP/real/target" "$TMP/linked-target"
+probe_cache symlink "$TMP/linked-target"
+hasnt "symlinked dir: no command"      "$(F disk.reclaimable.rebuildable 14)" "rm -rf"
+
+mkdir -p "$TMP/hot/target"; : > "$TMP/hot/Cargo.toml"; : > "$TMP/hot/target/artifact"
+probe_cache hot "$TMP/hot/target"
+A=$(F disk.reclaimable.rebuildable 14)
+hasnt "touched since the scan: no cmd" "$A" "rm -rf"
+has "  downgraded to likely"           "$A" "in active use, rebuilt on next build"
+
+probe_cache gone "$TMP/vanished/target"
+hasnt "vanished dir gets no command"   "$(F disk.reclaimable.rebuildable 14)" "rm -rf"
+
+# Both probe bounds must fail CLOSED. Each is forced by shrinking its constant.
+save_e=$DISK_PROBE_ENTRIES; DISK_PROBE_ENTRIES=1
+probe_cache budget "$TMP/cold/target"
+hasnt "entry budget exhausted: no cmd" "$(F disk.reclaimable.rebuildable 14)" "rm -rf"
+DISK_PROBE_ENTRIES=$save_e
+save_s=$DISK_PROBE_SECONDS; DISK_PROBE_SECONDS=0
+probe_cache clock "$TMP/cold/target"
+hasnt "wall-clock budget spent: no cmd" "$(F disk.reclaimable.rebuildable 14)" "rm -rf"
+DISK_PROBE_SECONDS=$save_s
+probe_cache cold2 "$TMP/cold/target"
+has "  and the bounds are restored"    "$(F disk.reclaimable.rebuildable 14)" "rm -rf"
+
+# The 14d boundary, pinned without a wall-clock race. `find -newer` is strict,
+# so an entry sitting exactly on the stamp reads as idle — which is precisely
+# why disk_body builds the stamp at `date -v-14d -v-1S`, one second BEFORE the
+# cutoff, so that "exactly 14 days old" comes out active.
+BT=$TMP/boundary; mkdir -p "$BT/tree"; : > "$BT/tree/entry"
+touch -t "$OLD" "$BT/tree/entry" "$BT/tree"
+: > "$BT/at"; : > "$BT/before"
+touch -r "$BT/tree/entry" "$BT/at"                    # stamp == entry mtime
+# Derived from the entry itself, not from `date`: anything wall-clock based
+# here races the fixture's own runtime and the test flakes by a second.
+EM=$(stat -f %m "$BT/tree/entry")
+touch -t "$(date -r $((EM - 1)) +%Y%m%d%H%M.%S)" "$BT/before"  # stamp == entry - 1s
+if disk_probe_idle "$BT/tree" "$BT/at"; then ok "entry exactly at the stamp reads idle"
+else bad "entry exactly at the stamp reads idle"; fi
+if disk_probe_idle "$BT/tree" "$BT/before"; then bad "one second of slack makes it active"
+else ok "one second of slack makes it active"; fi
+# The two above pin the semantics; this pins the WIRING — that disk_body really
+# builds its stamp with DISK_IDLE_SLACK_S applied. Widening the slack to 100
+# days must drag the 60-day-old cold tree onto the active side of the cutoff.
+save_k=$DISK_IDLE_SLACK_S; DISK_IDLE_SLACK_S=$(( 100 * 86400 ))
+probe_cache slack "$TMP/cold/target"
+hasnt "slack is wired into the stamp"  "$(F disk.reclaimable.rebuildable 14)" "rm -rf"
+DISK_IDLE_SLACK_S=$save_k
+
+# E4 material: the age prints beside every command and names staleness past 6h.
+NOW6=$(( NOW - 30000 ))
+printf 'epoch\t-\t%s\t-\t-\nscan\t0\t0\t3\t3\nvol\t/System/Volumes/Data\t%s\t%s\t%s\ngroup\trebuildable\t26738688\t57\t0\ndir\t%s\t20000000\trebuildable\tconfirmed\n' \
+  "$NOW6" "$V_USED" "$V_AVAIL" "$V_DF" "$TMP/cold/target" > "$TMP/stale.tsv"
+from_cache "$TMP/stale.tsv"
+has "stale cache is named as stale"    "$(F disk.reclaimable.rebuildable 14)" "cache is 8h old (stale, refreshed every 6h);"
+from_cache "$TMP/cold.tsv"
+A=$(F disk.reclaimable.rebuildable 14)
+has "fresh cache still prints an age"  "$A" "cache is "
+hasnt "  but does not call it stale"   "$A" "(stale, refreshed every 6h)"
 
 # ================================================================== thresholds ==
 echo "threshold overrides"

@@ -71,8 +71,32 @@ disk_default_for() {
 
 # Not a §5 threshold and deliberately not a knob: it fires no severity. It is
 # the scanner's own idle rule (§3c), restated here only so the re-stat below
-# asks the same question the scan asked.
+# asks the same question the scan asked. NOTE FOR U3: the probe below is
+# RECURSIVE and treats an entry whose mtime is exactly at the cutoff as active.
+# The scanner-side probe has to ask the identical question or this re-check is
+# theatre — a depth-1 probe calls a live Rust build idle, because a write to
+# target/debug/deps/foo leaves every depth-1 mtime untouched.
 DISK_IDLE_DAYS=14
+# The idle probe is bounded twice, and both bounds fail CLOSED (downgrade to
+# `likely`, no command) rather than open: a per-directory entry budget, because
+# a self-enforced deadline cannot preempt a find already inside a huge tree
+# (the plan's own E-F7 lesson), and a wall-clock budget across all probes,
+# checked before each one starts.
+#
+# Measured on this machine: an ACTIVE tree costs 8ms however large it is,
+# because -quit fires on the first recent entry (~/Library/Caches, 39k+
+# entries, and ~/Dev, 60k+, both 8ms). Only a fully idle tree pays for the
+# whole walk — /usr/share, 20k entries, 88ms — so the entry budget below is
+# roughly a quarter-second of worst case per directory.
+DISK_PROBE_ENTRIES=50000
+DISK_PROBE_SECONDS=2
+# The idle stamp is built this many seconds BEFORE the cutoff, because
+# `find -newer` is a strict comparison: without the offset an entry sitting
+# exactly on the 14d line reads as idle, and "older than 14d" would include
+# "exactly 14d". Reading that boundary the wrong way authors a deletion.
+DISK_IDLE_SLACK_S=1
+# §3e's disk_scan TTL, used only to mark a stale cache beside a command.
+DISK_CACHE_TTL_S=21600
 # The scanner's documented hard deadline (§1), quoted in the E5 string.
 DISK_SCAN_DEADLINE_S=120
 # Descriptive buckets for the transcripts age breakdown. Not thresholds.
@@ -184,27 +208,91 @@ disk_group_cost() {
   esac
 }
 
-# Prefer the tool's own cleaner over rm -rf where one exists (§6 U4): it cannot
-# mistake the directory. `confirmed` for a `target` means the scanner saw a
-# Cargo.toml beside it, so cargo clean is safe and exact; DerivedData has no
-# supported CLI cleaner, so we name Xcode's own path first and keep rm -rf as
-# the fallback.
+# §6 U4 asks us to prefer the tool's own cleaner over rm -rf "since it cannot
+# mistake the directory". For Rust that turned out to be false: `(cd <parent>
+# && cargo clean)` is NOT bound to the target directory we measured — a
+# CARGO_TARGET_DIR in the environment or a target-dir key in .cargo/config.toml
+# points it somewhere else entirely, so the command frees a directory other
+# than the one whose size we just quoted. §3c also accepts pom.xml as the
+# marker for `target`, so a confirmed `target` may be Maven's, where cargo is
+# simply the wrong tool. `cargo clean --target-dir` would bind it, but there is
+# no cargo on this machine to verify the flag against and an unverified flag in
+# an authored command is exactly what this gate exists to prevent. So: the
+# quoted, charset-gated `rm -rf` names the object we inspected and nothing else.
+#
+# DerivedData keeps a named cleaner because it is a UI affordance, not a CLI
+# flag: nothing is guessed about its arguments. The test is on the whole path,
+# because what a user deletes is one per-project folder inside DerivedData.
 disk_command_for() {
-  local p=$1 base parent
-  base=${p##*/}
-  parent=${p%/*}
-  [ -n "$parent" ] || parent=/
-  # The DerivedData test is on the whole path, not the basename: the scanner
-  # matches the DerivedData directory, but what a user actually deletes is one
-  # per-project folder inside it.
+  local p=$1
   case $p in
     */DerivedData|*/DerivedData/*)
-      printf 'Xcode > Settings > Locations > Derived Data (the arrow opens it), or: rm -rf %s' "$(disk_shq "$p")"; return ;;
+      printf 'Xcode > Settings > Locations > Derived Data (the arrow opens it), or: rm -rf %s' "$(disk_shq "$p")" ;;
+    *)
+      printf 'rm -rf %s' "$(disk_shq "$p")" ;;
   esac
+}
+
+# The §3c marker table, re-checked at PRINT time rather than trusted from the
+# scan. A cached `confirmed` says "there was a Cargo.toml beside this target
+# two hours ago"; if the directory has since been replaced, or the marker
+# deleted, the verdict describes something that is no longer there.
+disk_marker_present() {
+  local d=$1 base parent
+  base=${d##*/}
+  parent=${d%/*}
+  [ -n "$parent" ] || parent=/
+  # DerivedData's §3c marker is an *.xcodeproj/*.xcworkspace somewhere else on
+  # disk, which is not re-derivable from the DerivedData path. What is
+  # re-checkable is identity: the path lies inside a directory Xcode owns.
+  # Weaker than the scan-time test, and deliberately recorded as such.
+  case $d in */DerivedData|*/DerivedData/*) return 0 ;; esac
   case $base in
-    target) printf '(cd %s && cargo clean)' "$(disk_shq "$parent")" ;;
-    *)      printf 'rm -rf %s' "$(disk_shq "$p")" ;;
+    target)             [ -f "$parent/Cargo.toml" ] || [ -f "$parent/pom.xml" ] ;;
+    node_modules|.next) [ -f "$parent/package.json" ] ;;
+    .venv|venv)         [ -f "$d/pyvenv.cfg" ] ;;
+    # A kind whose marker we cannot re-derive gets no command, ever.
+    *)                  return 1 ;;
   esac
+}
+
+# Recursive, bounded idle probe. 0 = idle (safe to offer a command), 1 = active
+# OR the walk could not be completed inside its budget. Both non-idle answers
+# collapse to the same conservative outcome by design.
+disk_probe_idle() {
+  local d=$1 stamp=$2 sent out n
+  sent="${stamp##*/}-hot"
+  # One walk. An entry newer than the cutoff prints the sentinel and quits, so
+  # the active case is O(1); every other entry prints its path, so `head`
+  # bounds the idle case, which is the one that has to walk the whole tree.
+  # The sentinel is derived from the mktemp stamp name, so a file that could
+  # forge it does not realistically exist — and a forgery downgrades anyway.
+  out=$(find "$d" \( -newer "$stamp" -exec printf '%s\n' "$sent" \; -quit \) -o -print 2>/dev/null \
+        | head -n "$DISK_PROBE_ENTRIES")
+  printf '%s\n' "$out" | grep -qxF "$sent" && return 1
+  n=$(printf '%s\n' "$out" | grep -c '')
+  [ "$n" -ge "$DISK_PROBE_ENTRIES" ] && return 1
+  return 0
+}
+
+# The whole print-time gate for one confirmed directory. On success it prints
+# the path the command must name — the fully resolved one, so the command is
+# bound to the object we actually inspected rather than to a cached string
+# whose ancestors may since have been repointed.
+disk_confirm_still_valid() {
+  local d=$1 stamp=$2 resolved
+  # rm -rf on a symlink removes the link and not the tree, so the command would
+  # not do what its text says.
+  [ -L "$d" ] && return 1
+  [ -d "$d" ] || return 1
+  resolved=$(cd -P -- "$d" 2>/dev/null && pwd -P) || return 1
+  [ -n "$resolved" ] || return 1
+  # Re-check kind and idleness against the resolved object, not the cache string.
+  disk_marker_present "$resolved" || return 1
+  disk_probe_idle "$resolved" "$stamp" || return 1
+  # The resolved form has to clear the §3b charset gate on its own account.
+  disk_path_safe "$resolved" || return 1
+  printf '%s' "$resolved"
 }
 
 # --------------------------------------------------------- the pure analyzer --
@@ -265,7 +353,14 @@ disk_findings() {
         # U3 added a 5th column, `affected` ∈ 0|1: was THIS group's own
         # measurement hit by whatever made the scan partial. A cache written by
         # an older scanner has '-' here; a missing or '-' flag means affected=0.
-        case $d in 1) gaff[${#gaff[@]}]=1 ;; *) gaff[${#gaff[@]}]=0 ;; esac ;;
+        # advise_disk rejects any other value as cache_malformed, so the last
+        # arm is unreachable through it — and it caps rather than releases,
+        # because this flag gates severity and must not fail open.
+        case $d in
+          1)      gaff[${#gaff[@]}]=1 ;;
+          ''|-|0) gaff[${#gaff[@]}]=0 ;;
+          *)      gaff[${#gaff[@]}]=1 ;;
+        esac ;;
       dir)
         dpath[${#dpath[@]}]=$a; dsize[${#dsize[@]}]=$b; dgroup[${#dgroup[@]}]=$c
         dconf[${#dconf[@]}]=$d; dage[${#dage[@]}]=${e:--} ;;
@@ -438,7 +533,13 @@ disk_group_action() {
       case $conf in
         confirmed)
           item="$(disk_command_for "$p") — frees $(disk_h "$sz")"
-          prefix="cache is $(disk_age "$cage") old; " ;;
+          # The cache age prints beside every command regardless (§6 U4), and
+          # says so out loud once it is past the 6h TTL.
+          if disk_is_uint "$cage" && [ "$cage" -ge "$DISK_CACHE_TTL_S" ]; then
+            prefix="cache is $(disk_age "$cage") old (stale, refreshed every 6h); "
+          else
+            prefix="cache is $(disk_age "$cage") old; "
+          fi ;;
         likely)
           item="$(disk_shq "$p") ($(disk_h "$sz")) — in active use, rebuilt on next build; no command offered" ;;
         *)
@@ -491,13 +592,21 @@ advise_disk() {
 
   # ---- validate. Anything we would compute on must parse, or the domain is
   # unknown with no findings — never `ok`, and never a garbage finding.
-  local epoch='' used='' avail='' dfsize='' mount='' partial=0 vols=0 epochs=0 notes=0
+  local epoch='' used='' avail='' dfsize='' mount='' partial=0
+  local vols=0 epochs=0 notes=0 scans=0
   local bad=0 k a b c d e extra
   while IFS=$'\t' read -r k a b c d e extra || [ -n "$k" ]; do
     [ -n "$k" ] || continue
+    # §3c is a FIVE column format. A row with a sixth field is either a path
+    # carrying a tab (which corrupts every field after it) or a format we do
+    # not understand; either way the numbers are not trustworthy.
+    if [ -n "$e" ] || [ -n "$extra" ]; then bad=1; break; fi
     case $k in
       epoch) epochs=$((epochs + 1)); disk_is_uint "$b" || bad=1; epoch=$b ;;
       scan)
+        # Two scan rows means two answers to "was this partial", and taking the
+        # last is a silent choice between them.
+        scans=$((scans + 1))
         case $a in 0|1) ;; *) bad=1 ;; esac
         case $b in 0|1) ;; *) bad=1 ;; esac
         disk_is_uint "$c" || bad=1
@@ -511,11 +620,19 @@ advise_disk() {
         vols=$((vols + 1))
         disk_is_uint "$b" || bad=1
         disk_is_uint "$c" || bad=1
+        # df_size_kb is descriptive, never a denominator — but a non-numeric
+        # value still means the scanner wrote something we cannot account for.
+        case $d in -) ;; *) disk_is_uint "$d" || bad=1 ;; esac
         mount=$a; used=$b; avail=$c; dfsize=$d ;;
       group)
         [ -n "$a" ] || bad=1
         disk_is_uint "$b" || bad=1
-        disk_is_uint "$c" || bad=1 ;;
+        disk_is_uint "$c" || bad=1
+        # U3's `affected` flag gates the per-group severity cap, so an
+        # unrecognised value must not fail open into "not affected": that is
+        # the path from a malformed row to an inherited-critical finding with a
+        # command attached. '' and '-' are the legacy absent field.
+        case $d in ''|-|0|1) ;; *) bad=1 ;; esac ;;
       dir)
         [ -n "$a" ] || bad=1
         disk_is_uint "$b" || bad=1
@@ -530,6 +647,7 @@ advise_disk() {
   [ "$notes" -gt 0 ] && [ "$partial" != 1 ] && bad=1
   [ "$epochs" = 1 ] || bad=1
   [ "$vols" = 1 ] || bad=1
+  [ "$scans" -le 1 ] || bad=1
   if [ "$bad" != 1 ]; then
     disk_is_uint "$used" && disk_is_uint "$avail" || bad=1
   fi
@@ -548,51 +666,60 @@ advise_disk() {
   return 0
 }
 
-# Reads the cache body and hands back the rows disk_findings consumes, with two
-# impure corrections applied:
+# Reads the cache body and hands back the rows disk_findings consumes, with
+# three impure corrections applied:
 #
-#  1. Re-stat before printing any removal command (§6 U4). The idle > 14d
-#     verdict was evaluated at scan time; the cache is used silently for 6h and
-#     beyond 6h with a stale flag, so a cargo build an hour ago would turn a
-#     printed rm -rf '.../target' into a live-cache deletion this tool authored.
-#     At most a handful of stat calls, not a rescan: if the idle test no longer
-#     holds, the row is downgraded to `likely` and loses its command.
-#  2. A 6th column with each dir's age in seconds, for the transcripts age
+#  1. Revalidate before printing any removal command (§6 U4). The confirmed
+#     verdict was reached at scan time; the cache is used silently for 6h and
+#     beyond 6h with a stale flag, so a build an hour ago would turn a printed
+#     rm -rf '.../target' into a live-cache deletion this tool authored. The
+#     gate is disk_confirm_still_valid: identity, then the §3c marker, then a
+#     recursive bounded idle probe. Anything short of a clean pass downgrades
+#     the row to `likely`, which drops its command.
+#  2. The path is rewritten to the resolved form the gate approved, so the
+#     command names the object that was inspected.
+#  3. A 6th column with each dir's age in seconds, for the transcripts age
 #     breakdown. '-' when it cannot be read.
 disk_body() {
   local cache=$1 now=$2
-  local stamp cutoff
-  cutoff=$(date -v-${DISK_IDLE_DAYS}d +%Y%m%d%H%M.%S 2>/dev/null)
+  local stamp cutoff t0=$SECONDS
+  # See DISK_IDLE_SLACK_S: the stamp sits just before the cutoff so that an
+  # entry exactly on the 14d line reads as active under find's strict -newer.
+  cutoff=$(date -v-${DISK_IDLE_DAYS}d -v-${DISK_IDLE_SLACK_S}S +%Y%m%d%H%M.%S 2>/dev/null)
   stamp=$(mktemp "${TMPDIR:-/tmp}/cw-disk-idle.XXXXXX" 2>/dev/null) || stamp=''
   if [ -n "$stamp" ] && [ -n "$cutoff" ]; then
     touch -t "$cutoff" "$stamp" 2>/dev/null || { rm -f "$stamp"; stamp=''; }
   fi
 
-  local restats=0 k a b c d
+  local probes=0 k a b c d
   while IFS=$'\t' read -r k a b c d || [ -n "$k" ]; do
     case $k in
       scan|note|group) printf '%s\t%s\t%s\t%s\t%s\n' "$k" "$a" "$b" "$c" "$d" ;;
       dir)
-        local conf=$d age='-' mt
+        local conf=$d path=$a age='-' mt resolved
         if [ -d "$a" ]; then
           mt=$(stat -f %m "$a" 2>/dev/null)
           disk_is_uint "$mt" && age=$(( now - mt )) && [ "$age" -ge 0 ] || age='-'
         fi
         if [ "$conf" = confirmed ]; then
           if ! disk_path_safe "$a"; then
-            : # no command will be printed for it anyway; skip the stat
-          elif [ ! -d "$a" ]; then
-            conf=likely   # gone or unreadable since the scan: never author rm -rf blind
+            conf=likely   # no command would be printed anyway; skip the probe
           elif [ -z "$stamp" ]; then
             conf=likely   # could not build the cutoff: refuse rather than guess
-          elif [ "$restats" -ge "$DISK_RESTAT_MAX" ]; then
+          elif [ "$probes" -ge "$DISK_RESTAT_MAX" ]; then
             conf=likely
+          elif [ $(( SECONDS - t0 )) -ge "$DISK_PROBE_SECONDS" ]; then
+            conf=likely   # out of wall-clock budget: downgrade, never promote
           else
-            restats=$((restats + 1))
-            [ -n "$(find "$a" -maxdepth 1 -mindepth 1 -newer "$stamp" -print -quit 2>/dev/null)" ] && conf=likely
+            probes=$((probes + 1))
+            if resolved=$(disk_confirm_still_valid "$a" "$stamp"); then
+              path=$resolved
+            else
+              conf=likely
+            fi
           fi
         fi
-        printf 'dir\t%s\t%s\t%s\t%s\t%s\n' "$a" "$b" "$c" "$conf" "$age" ;;
+        printf 'dir\t%s\t%s\t%s\t%s\t%s\n' "$path" "$b" "$c" "$conf" "$age" ;;
     esac
   done < "$cache"
   [ -n "$stamp" ] && rm -f "$stamp"
