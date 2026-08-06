@@ -88,8 +88,25 @@ DISK_IDLE_DAYS=14
 # entries, and ~/Dev, 60k+, both 8ms). Only a fully idle tree pays for the
 # whole walk — /usr/share, 20k entries, 88ms — so the entry budget below is
 # roughly a quarter-second of worst case per directory.
-DISK_PROBE_ENTRIES=50000
-DISK_PROBE_SECONDS=2
+#
+# The entry cap's rule, so the next person can re-derive it rather than guess:
+# at least 2x the largest reclaimable tree observed, and cap x measured
+# per-entry cost under ~0.3s warm. 120,000 is 2.2x the largest confirmed .venv
+# measured (53,491 entries), 1.5x the largest node_modules (79,291), and at the
+# measured rate of 200,000 entries in 0.46s bounds one probe at ~0.28s warm. It
+# still fails closed, so a machine with a larger tree loses a command rather
+# than gaining a wrong one — and it is one line to raise.
+DISK_PROBE_ENTRIES=120000
+# The wall-clock budget covers the whole realistic workload rather than a
+# fraction of it: after the group filter below, the busiest machine measured
+# needs 17 probes = 0.93s warm, and U3's cold-cache figures imply a 3-4x
+# multiplier, so ~3.5s; DISK_RESTAT_MAX=24 probes at cold cost is ~4.5s. The
+# trade-off: this budget is only ever spent when there are confirmed rows in a
+# published group — i.e. only when there is a payload to print — and one probe
+# can still overrun it by its own duration, because a self-enforced deadline
+# cannot preempt a find already inside a tree. The entry cap bounds that
+# overrun.
+DISK_PROBE_SECONDS=5
 # The idle stamp is built this many seconds BEFORE the cutoff, because
 # `find -newer` is a strict comparison: without the offset an entry sitting
 # exactly on the 14d line reads as idle, and "older than 14d" would include
@@ -727,7 +744,17 @@ disk_body() {
     disk_group_published "$pb" "$total" && pub="$pub$pa"$'\n'
   done < "$cache"
 
-  local stamp cutoff t0=$SECONDS
+  local stamp cutoff
+  # Rebase the clock rather than remember an offset. `t0=$SECONDS` sampled a
+  # counter whose phase is the shell's start time, so `SECONDS - t0 >= N` could
+  # fire after N-1 seconds of real time — a whole second of a small budget.
+  # Assigning 0 resets the counter AND its reference instant, so the test below
+  # is exact to the second. This is safe ONLY because disk_body is invoked
+  # through a process substitution (`< <(disk_body ...)`) and therefore runs in
+  # a subshell: the assignment cannot reach the parent's SECONDS. Re-wiring that
+  # call to a plain call would leak it. Sub-second clocks are not available:
+  # bash 3.2 on macOS has no EPOCHREALTIME and BSD date has no %N.
+  SECONDS=0
   # See DISK_IDLE_SLACK_S: the stamp sits just before the cutoff so that an
   # entry exactly on the 14d line reads as active under find's strict -newer.
   cutoff=$(date -v-${DISK_IDLE_DAYS}d -v-${DISK_IDLE_SLACK_S}S +%Y%m%d%H%M.%S 2>/dev/null)
@@ -767,7 +794,7 @@ disk_body() {
             conf=likely   # could not build the cutoff: refuse rather than guess
           elif [ "$probes" -ge "$DISK_RESTAT_MAX" ]; then
             conf=likely
-          elif [ $(( SECONDS - t0 )) -ge "$DISK_PROBE_SECONDS" ]; then
+          elif [ "$SECONDS" -ge "$DISK_PROBE_SECONDS" ]; then
             conf=likely   # out of wall-clock budget: downgrade, never promote
           else
             probes=$((probes + 1))

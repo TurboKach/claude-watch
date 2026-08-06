@@ -434,6 +434,18 @@ save_s=$DISK_PROBE_SECONDS; DISK_PROBE_SECONDS=0
 probe_cache clock "$TMP/cold/target"
 hasnt "wall-clock budget spent: no cmd" "$(F disk.reclaimable.rebuildable 14)" "rm -rf"
 DISK_PROBE_SECONDS=$save_s
+# ...and the OPEN direction, which nothing asserted before: a budget of 1s must
+# still admit the first probe. A four-entry tree costs microseconds, so a
+# failure here means the budget was already spent before any probe started —
+# which is exactly what the old `t0=$SECONDS` phase bug could do. The phase bug
+# itself is NOT directly testable: you cannot deterministically place the
+# fixture at a chosen fractional offset into a wall-clock second, so the
+# SECONDS=0 rebase is a review item, not an assertion. Said out loud rather
+# than pretending coverage.
+DISK_PROBE_SECONDS=1
+probe_cache clock1 "$TMP/cold/target"
+has "a 1s budget still admits a probe" "$(F disk.reclaimable.rebuildable 14)" "rm -rf"
+DISK_PROBE_SECONDS=$save_s
 probe_cache cold2 "$TMP/cold/target"
 has "  and the bounds are restored"    "$(F disk.reclaimable.rebuildable 14)" "rm -rf"
 
