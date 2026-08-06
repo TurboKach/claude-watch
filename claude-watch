@@ -494,6 +494,48 @@ scan_orphans() {
     }'
 }
 
+# Elapsed seconds from a ps etime string (D-HH:MM:SS, HH:MM:SS or MM:SS).
+etime_secs() {
+  LC_ALL=C awk -v e="${1:-}" 'BEGIN {
+    d = 0
+    if (e ~ /-/) { split(e, a, "-"); d = a[1]; e = a[2] }
+    n = split(e, b, ":")
+    if (n == 3) { h = b[1]; m = b[2] } else { h = 0; m = b[1]; b[3] = b[2] }
+    print d * 86400 + h * 3600 + m * 60 + b[3]
+  }'
+}
+
+# Record a pid's identity (elapsed + argv) the FIRST time we decide to act on it,
+# so later checks compare against the moment of the decision rather than against
+# a moment after the grace period.
+remember_id() {   # <idmap> <pid>
+  local map=$1 pid=$2 line
+  LC_ALL=C awk -F'\t' -v p="$pid" '$1 == p { found = 1; exit } END { exit !found }' "$map" && return 0
+  line=$(ps -o etime=,args= -p "$pid" 2>/dev/null)
+  [ -n "$line" ] || return 1
+  printf '%s\t%s\t%s\n' "$pid" \
+    "$(etime_secs "$(printf '%s' "$line" | LC_ALL=C awk '{print $1}')")" \
+    "$(printf '%s' "$line" | LC_ALL=C sed 's/^ *[^ ]* *//')" >> "$map"
+}
+
+# Is this pid still the process we recorded? A pid that exits during the grace
+# period can be recycled onto something unrelated, and `kill -0` cannot tell the
+# difference — so identity, not liveness, is what gates the forced signal.
+same_process() {   # <idmap> <pid>
+  local map=$1 pid=$2 want want_age want_argv line now_age now_argv
+  want=$(LC_ALL=C awk -F'\t' -v p="$pid" '$1 == p { print; exit }' "$map")
+  [ -n "$want" ] || return 1
+  want_age=$(printf '%s' "$want" | cut -f2)
+  want_argv=$(printf '%s' "$want" | cut -f3-)
+  line=$(ps -o etime=,args= -p "$pid" 2>/dev/null)
+  [ -n "$line" ] || return 1
+  now_argv=$(printf '%s' "$line" | LC_ALL=C sed 's/^ *[^ ]* *//')
+  now_age=$(etime_secs "$(printf '%s' "$line" | LC_ALL=C awk '{print $1}')")
+  [ "$now_argv" = "$want_argv" ] || return 1
+  [ "${now_age:-0}" -ge "${want_age:-0}" ] || return 1
+  return 0
+}
+
 # Current subtree of a pid, deepest first, read live from ps rather than from
 # any earlier snapshot.
 live_descendants() {
@@ -521,21 +563,19 @@ live_descendants() {
 kill_tree() {
   local root=$1 scan=$2 tab pids="" pid depth rss age argv now_line now_age now_argv still waited freed=0
   tab=$(printf '\t')
+  local idmap; idmap=$(mktemp) || return 1
   while IFS="$tab" read -r _ _ pid depth rss age argv; do
     [ -n "$pid" ] || continue
     now_line=$(ps -o etime=,args= -p "$pid" 2>/dev/null)
     if [ -z "$now_line" ]; then continue; fi          # already gone; nothing to do
-    now_age=$(printf '%s' "$now_line" | LC_ALL=C awk '{print $1}')
     now_argv=$(printf '%s' "$now_line" | LC_ALL=C sed 's/^ *[^ ]* *//')
-    now_age=$(LC_ALL=C awk -v e="$now_age" '
-      BEGIN{ d=0; if (e ~ /-/) { split(e,a,"-"); d=a[1]; e=a[2] }
-             n=split(e,b,":"); if (n==3){h=b[1];m=b[2]}else{h=0;m=b[1];b[3]=b[2]}
-             print d*86400 + h*3600 + m*60 + b[3] }')
+    now_age=$(etime_secs "$(printf '%s' "$now_line" | LC_ALL=C awk '{print $1}')")
     if [ "$now_argv" != "$argv" ] || [ "$now_age" -lt "$age" ]; then
       printf '  %s✗ pid %s changed since it was listed — skipping this tree%s\n' "$C_RED" "$pid" "$C_RST"
-      return 1
+      rm -f "$idmap"; return 1
     fi
     pids="$pids $pid"; freed=$((freed + rss))
+    remember_id "$idmap" "$pid"
   done < <(grep "^P${tab}${root}${tab}" "$scan" | sort -t"$tab" -k4,4nr)
 
   [ -n "$pids" ] || { printf '  %salready gone%s\n' "$C_DIM" "$C_RST"; return 0; }
@@ -553,14 +593,14 @@ kill_tree() {
   # between an enumeration and the STOP that was meant to prevent it.
   local stopped="" prev="" pass=0
   while [ "$pass" -lt 4 ]; do
-    for pid in $pids; do kill -STOP "$pid" 2>/dev/null; done
+    for pid in $pids; do kill -STOP "$pid" 2>/dev/null; remember_id "$idmap" "$pid"; done
     stopped="$stopped $pids"
     prev=$(printf '%s\n' $pids | sort -u | tr '\n' ' ')
     pids=$(live_descendants "$root")
     [ "$(printf '%s\n' $pids | sort -u | tr '\n' ' ')" = "$prev" ] && break
     pass=$((pass + 1))
   done
-  [ -n "$pids" ] || { printf '  %salready gone%s\n' "$C_DIM" "$C_RST"; return 0; }
+  [ -n "$pids" ] || { printf '  %salready gone%s\n' "$C_DIM" "$C_RST"; rm -f "$idmap"; return 0; }
 
   for pid in $pids; do kill -TERM "$pid" 2>/dev/null; done
   for pid in $pids; do kill -CONT "$pid" 2>/dev/null; done
@@ -583,17 +623,28 @@ kill_tree() {
   # CONT before KILL so nothing is left stopped, even on the failure path.
   local final
   final=$(printf '%s\n' $(live_descendants "$root") $pids $stopped | sort -u)
+  for pid in $final; do remember_id "$idmap" "$pid"; done
   for pid in $final; do
-    if kill -0 "$pid" 2>/dev/null; then
+    kill -0 "$pid" 2>/dev/null || continue
+    # Identity, not liveness. The grace period is long enough for an exited pid
+    # to be recycled onto an unrelated process, which `kill -0` happily confirms
+    # as alive. A pid that no longer matches what we recorded is left alone --
+    # but resumed first, since we may be the reason it is stopped.
+    if ! same_process "$idmap" "$pid"; then
       kill -CONT "$pid" 2>/dev/null
-      kill -KILL "$pid" 2>/dev/null
+      continue
     fi
+    kill -CONT "$pid" 2>/dev/null
+    kill -KILL "$pid" 2>/dev/null
   done
   sleep 0.2
   still=0
   for pid in $final; do
-    if kill -0 "$pid" 2>/dev/null; then still=1; kill -CONT "$pid" 2>/dev/null; fi
+    kill -0 "$pid" 2>/dev/null || continue
+    same_process "$idmap" "$pid" || continue      # recycled; not ours to report
+    still=1; kill -CONT "$pid" 2>/dev/null
   done
+  rm -f "$idmap"
   if [ "$still" -eq 1 ]; then
     printf '  %s✗ some processes survived SIGKILL (left running, not suspended)%s\n' "$C_RED" "$C_RST"
     return 1
@@ -891,9 +942,14 @@ CWD_SNAP=""
 LIVENESS_OK=0
 init_live_cwds() {
   [ -n "${CWD_SNAP:-}" ] && rm -f "$CWD_SNAP"     # re-sampling must not leak the old one
+  # Clear BOTH first. On a re-sample, leaving LIVENESS_OK=1 from the previous
+  # call while mktemp fails (full temp filesystem) would make the empty snapshot
+  # read as "no live cwd" and let an active worktree be removed. Fail closed.
+  CWD_SNAP=""; LIVENESS_OK=0
   CWD_SNAP=$(mktemp) || return 1
   lsof -w -d cwd -F n 2>/dev/null | sed -n 's/^n//p' | sort -u > "$CWD_SNAP"
-  if [ -s "$CWD_SNAP" ]; then LIVENESS_OK=1; else LIVENESS_OK=0; fi
+  [ -s "$CWD_SNAP" ] && LIVENESS_OK=1
+  return 0
 }
 cwd_in_use_under() {
   local p=$1
