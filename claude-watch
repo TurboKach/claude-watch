@@ -27,9 +27,11 @@ usage() {
   cat <<'EOF'
 claude-watch — what actually used this machine today
 
-usage: claude-watch [report [DATE]] | orphans | worktrees | status | hook | doctor
+usage: claude-watch [report [DATE]] | advise | disk | orphans | worktrees | status | hook | doctor
 
   report [DATE]   digest for DATE: today (default), yesterday, or YYYY-MM-DD
+  advise          what to fix, in priority order, within each domain
+  disk            what is filling the volume (reads the cache; --refresh scans)
   orphans         list leaked dev process trees; --kill to reap them
   worktrees       list stale agent-created git worktrees; --remove to reap them
   status          is sampling alive, how recent, how much data
@@ -37,19 +39,37 @@ usage: claude-watch [report [DATE]] | orphans | worktrees | status | hook | doct
                   (add to .zshrc; returns in ~2ms on every other shell)
   doctor          check the install end to end
 
+  advise [--window 24h|week|month|Nh|Nd|Nw] [--json] [--show-thresholds]
+      Read-only and non-scanning by construction: it has no --kill, --remove,
+      --yes or --refresh. Window defaults to 24h and is clamped to
+      CLAUDE_WATCH_KEEP_DAYS.
+  disk [--refresh] [--json]
+      --refresh is the ONLY thing in this tool that walks the filesystem.
+
   orphans [--kill] [--yes] [--min MINUTES]
   worktrees [--remove] [--yes] [--days DAYS]
       Both list only by default — that IS the dry run. Nothing is destroyed
       without an explicit flag AND a confirmation.
 
-  --json    machine-readable output for report, orphans, worktrees and status.
+  --json    machine-readable output for report, advise, disk, orphans,
+            worktrees and status.
             Read-only: --json prints and exits before any destructive path.
+
+Exit codes (exit 1 already means three things across this CLI, so they are
+written down rather than inferred):
+  0   ran; findings may be `critical` — a full disk is not a tool failure,
+      `doctor` is the health gate
+  1   the data directory is unreadable, or `disk --refresh` could not write
+      its cache
+  2   usage error (bad flag, bad --window, bad threshold env value)
 
 Environment:
   CLAUDE_WATCH_HOME        data directory (default ~/.claude-watch)
   CLAUDE_WATCH_KEEP_DAYS   raw retention in days (default 30)
   CLAUDE_WATCH_ORPHAN_MIN  orphan age floor in minutes (default 60)
   CLAUDE_WATCH_REPO_ROOTS  colon-separated roots to scan for worktrees (default ~/Dev)
+  CLAUDE_WATCH_DISK_CACHE  disk facts cache (default $CLAUDE_WATCH_HOME/state/disk.tsv)
+  advise thresholds: claude-watch advise --show-thresholds
 EOF
 }
 
@@ -1299,7 +1319,10 @@ status() {
   now=$(date +%s); age=$((now - last_ep))
   count=$(wc -l < "$latest" | tr -d ' ')
   if [ "$json" = "1" ]; then
-    printf '{"command":"status","sampling":%s,"last_sample_age_seconds":%d,"rows_today":%d,"disk":"%s","keep_days":%d}\n' \
+    # `data_size` was `disk` until `claude-watch disk` existed. It has always
+    # meant the size of the DATA DIRECTORY, and `disk` now means the volume —
+    # one word with two meanings in one agent contract is worse than a rename.
+    printf '{"command":"status","sampling":%s,"last_sample_age_seconds":%d,"rows_today":%d,"data_size":"%s","keep_days":%d}\n' \
       "$([ "$age" -lt 120 ] && printf 'true' || printf 'false')" "$age" "$count" \
       "$(du -sh "$DATA" 2>/dev/null | cut -f1)" "$KEEP_RAW_DAYS"
     return 0
@@ -1326,7 +1349,7 @@ hook() {
   local y; y=$(date -v-1d +%F)
   [ -n "$(read_day "$y")" ] || return 0
   report "$y"
-  printf '\n%srun `claude-watch` for today, `claude-watch report %s` to re-read this%s\n' \
+  printf '\n%srun `claude-watch` for today, `claude-watch advise` for what to fix, `claude-watch report %s` to re-read this%s\n' \
     "$C_DIM" "$y" "$C_RST"
   retention
 }
@@ -1379,6 +1402,20 @@ case "${1:-report}" in
       shift
     done
     report "$_date" "$_json"
+    ;;
+  # Sourced here rather than at file scope: `hook` runs on every new day and
+  # must not pay for a command it never calls.
+  advise)
+    shift 2>/dev/null || true
+    # shellcheck source=tools/advise.sh
+    . "$REPO_DIR/tools/advise.sh" || { printf 'claude-watch: cannot load %s/tools/advise.sh\n' "$REPO_DIR" >&2; exit 1; }
+    cw_advise ${1+"$@"}
+    ;;
+  disk)
+    shift 2>/dev/null || true
+    # shellcheck source=tools/advise.sh
+    . "$REPO_DIR/tools/advise.sh" || { printf 'claude-watch: cannot load %s/tools/advise.sh\n' "$REPO_DIR" >&2; exit 1; }
+    cw_disk ${1+"$@"}
     ;;
   orphans)         shift; orphans ${1+"$@"} ;;
   worktrees)       shift; worktrees ${1+"$@"} ;;

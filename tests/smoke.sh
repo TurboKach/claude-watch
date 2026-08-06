@@ -37,8 +37,14 @@ expect_json() {  # <desc> <cmd...>
   fi
 }
 
+# The fixture loop below auto-discovers tests/fixture-*.sh, but this list is
+# hardcoded on purpose: a shell file that stops parsing is not a test failure to
+# be discovered, it is the whole suite failing to run. Adding a tools/ script
+# means adding it here.
 echo "syntax"
-for f in claude-watch claude-top install.sh tools/sample.sh tools/orphan-policy.sh tests/smoke.sh; do
+for f in claude-watch claude-top install.sh tools/sample.sh tools/orphan-policy.sh \
+         tools/advise.sh tools/disk-scan.sh tests/smoke.sh; do
+  if [ ! -f "$REPO/$f" ]; then skp "$f parses (not present in this checkout)"; continue; fi
   bash -n "$REPO/$f" 2>/dev/null && ok "$f parses" || bad "$f parses"
 done
 
@@ -54,6 +60,12 @@ expect_exit 0 "report today"       "$CW" report today
 expect_exit 0 "report yesterday"   "$CW" report yesterday
 expect_exit 0 "orphans"            "$CW" orphans
 expect_exit 0 "worktrees"          "$CW" worktrees
+# advise and disk are read-only and never scan, so they are correct on a fresh
+# checkout too: zero samples and an unscanned volume are results, not failures.
+expect_exit 0 "advise"                    "$CW" advise
+expect_exit 0 "advise --window week"      "$CW" advise --window week
+expect_exit 0 "advise --show-thresholds"  "$CW" advise --show-thresholds
+expect_exit 0 "disk"                      "$CW" disk
 if [ "$installed" = 1 ]; then
   expect_exit 0 "status"           "$CW" status
   expect_exit 0 "doctor"           "$CW" doctor
@@ -74,17 +86,41 @@ expect_exit 2 "worktrees --days rejects empty"       "$CW" worktrees --days
 # output well-formed by construction.
 expect_exit 2 "report rejects a malformed date"      "$CW" report garbage
 expect_exit 2 "report rejects a quote in the date"   "$CW" report '2026-01-01"x'
+# advise has no side-effecting path at all, so read-only is structural rather
+# than guarded. These four assert that it stays that way: the day one of them
+# starts exiting 0 is the day advise grew a destructive surface by accident.
+expect_exit 2 "advise --kill rejected"               "$CW" advise --kill
+expect_exit 2 "advise --remove rejected"             "$CW" advise --remove
+expect_exit 2 "advise --yes rejected"                "$CW" advise --yes
+expect_exit 2 "advise --refresh rejected (it never scans)" "$CW" advise --refresh
+expect_exit 2 "advise --window rejects a non-duration"     "$CW" advise --window bogus
+expect_exit 2 "advise --window rejects empty"              "$CW" advise --window
+# awk coerces a non-numeric threshold to 0, which silently disarms it.
+expect_exit 2 "advise rejects a non-numeric threshold" \
+  env CLAUDE_WATCH_DISK_CRIT_GIB=nope "$CW" advise
+expect_exit 2 "disk rejects an unknown option"       "$CW" disk --bogus
 
 echo "--json is valid JSON"
 expect_json "report --json"     "$CW" report today
 expect_json "orphans --json"    "$CW" orphans
 expect_json "worktrees --json"  "$CW" worktrees
+expect_json "advise --json"     "$CW" advise
+expect_json "disk --json"       "$CW" disk
 # status exits 1 with no samples, and pipefail would fail the pipeline even
 # though the JSON it printed is perfectly valid.
 if [ "$installed" = 1 ]; then
   expect_json "status --json"   "$CW" status
+  # `disk` used to mean "size of the data directory" here and now means the
+  # volume, so the field was renamed rather than left with two meanings. This is
+  # a JSON contract change and the assertion is what pins it.
+  if "$CW" status --json 2>/dev/null | grep -q '"data_size":'; then
+    ok "status --json publishes data_size (not disk)"
+  else
+    bad "status --json publishes data_size (not disk)"
+  fi
 else
   skp "status --json (no samples collected yet)"
+  skp "status --json data_size key (no samples collected yet)"
 fi
 # argv and filenames are arbitrary bytes; JSON has to be valid UTF-8 with no raw
 # control characters. Both failure modes break the agent interface, and valid
