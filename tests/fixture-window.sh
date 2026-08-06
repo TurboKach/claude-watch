@@ -75,13 +75,27 @@ expect "week: observed_seconds"           "$(jq_ "d['window']['observed_seconds'
 expect "week: read_seconds spans 3 days"  "$(jq_ "d['window']['read_seconds']")" 259200
 expect "week: no failed days"             "$(jq_ "d['window']['missing_or_failed_days']")" "[]"
 
-# Oldest row first: aggregation closes a sample on an epoch change, so
-# out-of-order concatenation would corrupt the fold. A disordered read would
-# produce gaps of -86400 and a different iv, so iv==30 above already proves
-# order — but assert the raw stream directly as well.
-ORDER=$(CLAUDE_WATCH_HOME="$H1" LC_ALL=C awk 'BEGIN{p=0} { if ($1 + 0 < p) { print "unordered"; exit } p = $1 + 0 } END { print "ordered" }' \
-  <(cat "$H1/raw/$DAY3.tsv" "$TMP/d2.tsv" "$H1/raw/$DAY1.tsv" "$H1/raw/$DAY0.tsv"))
-expect "week: planted rows are ordered oldest-first" "$ORDER" ordered
+# Oldest row first. This observes the READER rather than re-concatenating the
+# planted files in the desired order, which would only prove that `cat` respects
+# its arguments. The reader itself reports every backwards epoch transition, so
+# a week spanning four day files that emits no such warning is the assertion —
+# and the negative case just below proves the detector is not simply mute.
+if grep -q 'out-of-order' "$E"; then
+  bad "week: the reader concatenates day files oldest-first"
+  sed 's/^/        /' "$E"
+else
+  ok "week: the reader concatenates day files oldest-first"
+fi
+# The detector must actually fire, or the assertion above is vacuous.
+HD="$TMP/hd"; mkdir -p "$HD/raw"
+{ sys1 $((NOW - 30)); sys1 $((NOW - 60)); sys1 $((NOW - 90)); } > "$HD/raw/$DAY0.tsv"
+run_advise "$HD" --window 24h
+if grep -q 'out-of-order sample epochs' "$E"; then
+  ok "out-of-order rows are reported, so the order check above is not vacuous"
+else
+  bad "out-of-order rows are reported, so the order check above is not vacuous"
+fi
+expect "out-of-order input still exits 0" "$RC" 0
 
 # ============================================ 2. exported scalars agree =====
 run_advise "$H1" --window week
@@ -107,13 +121,45 @@ expect "dual .tsv/.tsv.gz day counted once" "$(jq_ "d['samples']")" 4
 expect "dual day: no read failure"          "$(jq_ "d['window']['missing_or_failed_days']")" "[]"
 
 # ============================================== 4. corrupt .tsv.gz (E8) =====
-# A corrupt archive currently yields a silently short window with an
+# A corrupt archive otherwise yields a silently short window with an
 # honest-looking observed_seconds. That is the failure this whole tool exists to
 # prevent, so it must surface as window_read_failed, not as fewer samples.
+#
+# The archive is TRUNCATED, not garbage. That distinction is the whole test:
+# gzip carries its CRC and length in a trailer, so a truncated stream
+# decompresses a large, perfectly valid PREFIX and only then exits non-zero. A
+# reader that streams read_day straight into the pipe has already counted those
+# untrusted rows into samples, interval and coverage by the time it learns the
+# day was unreadable — and then reports the day as missing in the same document.
+# A file of pure garbage produces no prefix and cannot catch that at all.
 H3="$TMP/h3"; mkdir -p "$H3/raw"
 { sys1 $((NOW - 60)); sys1 $((NOW - 30)); } > "$H3/raw/$DAY0.tsv"
-printf 'this is not a gzip stream at all\n' > "$H3/raw/$DAY2.tsv.gz"
+# The rows are deliberately VARIED. Five thousand identical rows deflate into a
+# single block, so truncating anywhere leaves nothing decodable and the fixture
+# quietly degrades into the pure-garbage case it was written to replace.
+i=0
+while [ "$i" -lt 5000 ]; do
+  printf '%s\tsys\t-\t1.%03d\t%d\t%d\t0\t14\n' \
+    $((NOW - 172800 + i * 10)) $((i % 1000)) $((100000 + i)) $((900000 - i))
+  i=$((i + 1))
+done > "$TMP/d2big.tsv"
+gzip -c "$TMP/d2big.tsv" > "$TMP/d2big.tsv.gz"
+gzsize=$(wc -c < "$TMP/d2big.tsv.gz" | tr -d ' ')
+dd if="$TMP/d2big.tsv.gz" of="$H3/raw/$DAY2.tsv.gz" bs=1 count=$((gzsize * 6 / 10)) 2>/dev/null
+# Prove the fixture is actually exercising the dangerous shape before asserting
+# anything about it: a valid prefix on stdout AND a non-zero exit.
+prefix_rows=$(gzcat "$H3/raw/$DAY2.tsv.gz" 2>/dev/null | wc -l | tr -d ' ')
+gzcat "$H3/raw/$DAY2.tsv.gz" >/dev/null 2>&1 && prefix_rc=0 || prefix_rc=1
+if [ "$prefix_rows" -gt 100 ] && [ "$prefix_rc" = 1 ]; then
+  ok "corrupt gz: the fixture really is a truncated archive ($prefix_rows rows then a failure)"
+else
+  bad "corrupt gz: the fixture is not a truncated archive (rows=$prefix_rows rc=$prefix_rc)"
+fi
 run_advise "$H3" --window week
+# The decisive assertion: not one row of that valid-looking prefix may count.
+expect "corrupt gz: no row of the partial prefix is counted" "$(jq_ "d['samples']")" 2
+expect "corrupt gz: coverage excludes the partial prefix too" \
+       "$(jq_ "d['window']['observed_seconds']")" 60
 expect "corrupt gz: exit 0"                 "$RC" 0
 if grep -q 'window_read_failed' "$J"; then ok "corrupt gz: window_read_failed reported"
 else bad "corrupt gz: window_read_failed reported"; fi
@@ -169,6 +215,29 @@ if printf '%s' "$CLAMP" | python3 -c 'import json,sys; d=json.load(sys.stdin); s
   ok "month under KEEP_DAYS=7: clamped true, requested_days 7"
 else
   bad "month under KEEP_DAYS=7: clamped true, requested_days 7"
+fi
+# The reader opens at most CW_MAX_WINDOW_DAYS day files. That ceiling has to
+# clamp the ADVERTISED window too: `--window 100w` with a huge retention would
+# otherwise report a 700-day window while reading 400 days, which is the silent
+# truncation E6 exists to prevent, wearing a larger number.
+BIG=$(CLAUDE_WATCH_HOME="$H5" CLAUDE_WATCH_DISK_CACHE="$H5/none.tsv" CLAUDE_WATCH_KEEP_DAYS=1000 \
+  "$CW" advise --window 100w --json 2>/dev/null)
+if printf '%s' "$BIG" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)["window"]
+sys.exit(0 if d["clamped"] and d["requested_days"] == 400
+              and d["requested_seconds"] == 400 * 86400 else 1)'; then
+  ok "100w under KEEP_DAYS=1000: clamped to the 400-day reader ceiling, and says so"
+else
+  bad "100w under KEEP_DAYS=1000: clamped to the 400-day reader ceiling, and says so"
+  printf '%s\n' "$BIG" | python3 -c 'import json,sys; print("        ", json.load(sys.stdin)["window"])' 2>/dev/null
+fi
+BIGTXT=$(CLAUDE_WATCH_HOME="$H5" CLAUDE_WATCH_DISK_CACHE="$H5/none.tsv" CLAUDE_WATCH_KEEP_DAYS=1000 \
+  "$CW" advise --window 100w 2>/dev/null)
+if printf '%s' "$BIGTXT" | grep -qF '400-day reader ceiling'; then
+  ok "100w: the human banner names the ceiling that bound, not the wrong limit"
+else
+  bad "100w: the human banner names the ceiling that bound, not the wrong limit"
 fi
 
 # ==================================================== 7. dead sampler =======
@@ -233,18 +302,30 @@ expect "upper median: observed_seconds = 5 x 20"   "$(jq_ "d['window']['observed
 # A damaged epoch must be excluded and SAID, not silently dropped: awk holds
 # numbers as doubles, so an over-long epoch stops comparing distinctly and two
 # samples collapse into one with nothing reported.
+#
+# Four damaged shapes, and the non-numeric ones are the point. The window filter
+# runs before the validator, so a filter written as `$1 + 0 >= cutoff` converts
+# `notanepoch` to 0, drops it as "before the window", and the validator never
+# sees it — the row reads as absent rather than as damaged, with nothing said.
+# Only the over-long NUMERIC epoch survives that filter, so a fixture carrying
+# just that one passes against a reader that is silently losing rows.
 H9="$TMP/h9"; mkdir -p "$H9/raw"
 { sys1 $((NOW - 60)); sys1 $((NOW - 30)); } > "$H9/raw/$DAY0.tsv"
 printf 'notanepoch\tsys\t-\t1.0\t1\t1\t0\t14\n'        >> "$H9/raw/$DAY0.tsv"
+printf '\tsys\t-\t1.0\t1\t1\t0\t14\n'                  >> "$H9/raw/$DAY0.tsv"
+printf '0001759000000\tsys\t-\t1.0\t1\t1\t0\t14\n'     >> "$H9/raw/$DAY0.tsv"
 printf '90071992547409920\tsys\t-\t1.0\t1\t1\t0\t14\n' >> "$H9/raw/$DAY0.tsv"
 run_advise "$H9" --window 24h
 expect "damaged epochs are excluded from the count" "$(jq_ "d['samples']")" 2
 if grep -q 'window_read_failed' "$J"; then ok "damaged epochs report window_read_failed"
 else bad "damaged epochs report window_read_failed"; fi
-if grep -qF 'not a plain integer of at most ten digits' "$E"; then
-  ok "damaged epochs are reported on stderr, not swallowed"
+# The COUNT is asserted, not merely the presence of a warning: a reader that
+# lost the three non-numeric rows in the filter would report 1 here and still
+# print a plausible-looking line.
+if grep -qF 'has 4 sys rows whose epoch is not a plain integer' "$E"; then
+  ok "all four damaged rows are counted and reported on stderr"
 else
-  bad "damaged epochs are reported on stderr, not swallowed"; sed 's/^/        /' "$E"
+  bad "all four damaged rows are counted and reported on stderr"; sed 's/^/        /' "$E"
 fi
 
 # ================== 9. the emitter: ordering, tabs, the unknown invariant ====
@@ -380,6 +461,54 @@ expect "an inf share is emitted as 0"         "$(jq_ "[f['share_of_domain'] for 
 expect "a numeric share above 1 is clamped"   "$(jq_ "[f['share_of_domain'] for f in d['domains'][0]['findings'] if f['id']=='disk.z'][0]")" 1
 expect "an empty action is null, never an empty command" \
        "$(jq_ "[f['action'] for f in d['domains'][0]['findings'] if f['id']=='disk.x'][0]")" None
+
+# value / threshold / reclaimable_kb are JSON NUMBERS, and JSON's number grammar
+# is narrower than what awk and most eyes call numeric. `.5`, `01` and `1.` are
+# rejected by a strict parser; `1e999999` is finite text and an infinite value,
+# which Python turns into float("inf") WITHOUT raising — so json.tool alone
+# validates a document that has already lost the no-inf contract. A real
+# measurement must be canonicalised rather than zeroed, and only genuine
+# nonsense may become 0.
+cat > "$STUBDIR/tools/advise-disk.sh" <<'STUB'
+advise_disk() {
+  printf 'S\tdisk\twarn\tcomplete\t\tnumber serialisation\t\n'
+  printf 'F\tdisk\tdisk.n1\twarn\t0.1\t.5\tkb\t01\tK\t1.\tn/a\th\td\t\n'
+  printf 'F\tdisk\tdisk.n2\twarn\t0.1\t1e999999\tkb\tnan\tK\tinf\tn/a\th\td\t\n'
+  printf 'F\tdisk\tdisk.n3\twarn\t0.1\t421562020\tkb\t-3.25\tK\t1.5e-7\tn/a\th\td\t\n'
+  printf 'F\tdisk\tdisk.n4\twarn\t0.1\tabc\tkb\t0x1f\tK\t1,5\tn/a\th\td\t\n'
+}
+STUB
+CLAUDE_WATCH_HOME="$H1" CLAUDE_WATCH_DISK_CACHE="$H1/none.tsv" \
+  "$STUBDIR/claude-watch" advise --json > "$J" 2>/dev/null
+# json.tool is not enough on its own here, so every number is checked for
+# finiteness and the raw text is checked against JSON's actual grammar.
+if python3 - "$J" <<'PY'
+import json, math, re, sys
+raw = open(sys.argv[1]).read()
+d = json.loads(raw)
+grammar = re.compile(r'-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)?$')
+for dom in d["domains"]:
+    for f in dom["findings"]:
+        for k in ("value", "threshold", "reclaimable_kb", "share_of_domain"):
+            v = f[k]
+            assert isinstance(v, (int, float)) and math.isfinite(v), (f["id"], k, v)
+for m in re.finditer(r'"(?:value|threshold|reclaimable_kb)":([^,}]+)', raw):
+    assert grammar.fullmatch(m.group(1)), m.group(1)
+PY
+then ok "every emitted number is finite and matches JSON's number grammar"
+else bad "every emitted number is finite and matches JSON's number grammar"; sed 's/^/        /' "$J"
+fi
+expect "'.5' is canonicalised to 0.5, not dropped to 0"  "$(jq_ "[f['value'] for f in d['domains'][0]['findings'] if f['id']=='disk.n1'][0]")" 0.5
+expect "'01' is canonicalised to 1"                      "$(jq_ "[f['threshold'] for f in d['domains'][0]['findings'] if f['id']=='disk.n1'][0]")" 1
+expect "'1.' is canonicalised to 1"                      "$(jq_ "[f['reclaimable_kb'] for f in d['domains'][0]['findings'] if f['id']=='disk.n1'][0]")" 1
+expect "'1e999999' overflows to inf, so it becomes 0"    "$(jq_ "[f['value'] for f in d['domains'][0]['findings'] if f['id']=='disk.n2'][0]")" 0
+expect "a nan threshold becomes 0"                       "$(jq_ "[f['threshold'] for f in d['domains'][0]['findings'] if f['id']=='disk.n2'][0]")" 0
+expect "an inf reclaimable_kb becomes 0"                 "$(jq_ "[f['reclaimable_kb'] for f in d['domains'][0]['findings'] if f['id']=='disk.n2'][0]")" 0
+expect "a large exact integer keeps its precision"       "$(jq_ "[f['value'] for f in d['domains'][0]['findings'] if f['id']=='disk.n3'][0]")" 421562020
+expect "a negative value survives"                       "$(jq_ "[f['threshold'] for f in d['domains'][0]['findings'] if f['id']=='disk.n3'][0]")" -3.25
+expect "exponent notation survives"                      "$(jq_ "[f['reclaimable_kb'] for f in d['domains'][0]['findings'] if f['id']=='disk.n3'][0]")" 1.5e-07
+expect "non-numeric text becomes 0"                      "$(jq_ "[f['value'] for f in d['domains'][0]['findings'] if f['id']=='disk.n4'][0]")" 0
+expect "a hex literal is not a JSON number, so 0"        "$(jq_ "[f['threshold'] for f in d['domains'][0]['findings'] if f['id']=='disk.n4'][0]")" 0
 
 # §3f: disk --json's `domain` is byte-for-byte advise's, minus `priority`.
 A="$TMP/adv.json"; D="$TMP/dsk.json"

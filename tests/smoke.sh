@@ -95,6 +95,27 @@ expect_exit 2 "advise --yes rejected"                "$CW" advise --yes
 expect_exit 2 "advise --refresh rejected (it never scans)" "$CW" advise --refresh
 expect_exit 2 "advise --window rejects a non-duration"     "$CW" advise --window bogus
 expect_exit 2 "advise --window rejects empty"              "$CW" advise --window
+# §9 fixes the exact words, not just the exit code. Each string is problem, then
+# cause, then fix — an exit 2 with a message that names no accepted form leaves
+# the user exactly where they started, so the wording is the contract and the
+# exit code alone does not test it.
+expect_stderr() {  # <desc> <expected substring> <cmd...>
+  local desc=$1 want=$2 got; shift 2
+  got=$("$@" 2>&1 >/dev/null)
+  case "$got" in
+    *"$want"*) ok "$desc" ;;
+    *)         bad "$desc"; printf '      got: %s\n' "$got" ;;
+  esac
+}
+expect_stderr "advise --window bogus prints E1 verbatim" \
+  'claude-watch advise: --window "bogus" is not a duration. Accepted: 24h, week, month, or Nh/Nw/Nd (e.g. 6h, 2w, 14d). Try: claude-watch advise --window 24h' \
+  "$CW" advise --window bogus
+expect_stderr "advise --window with no value prints E2 verbatim" \
+  'claude-watch advise: --window needs a value. Accepted: 24h, week, month, or Nh/Nw/Nd. Try: claude-watch advise --window 24h' \
+  "$CW" advise --window
+expect_stderr "advise --refresh prints E12 verbatim" \
+  'claude-watch advise: advise never scans, so --refresh does nothing here. To rescan the disk: claude-watch disk --refresh' \
+  "$CW" advise --refresh
 # awk coerces a non-numeric threshold to 0, which silently disarms it.
 expect_exit 2 "advise rejects a non-numeric threshold" \
   env CLAUDE_WATCH_DISK_CRIT_GIB=nope "$CW" advise
@@ -112,15 +133,22 @@ if [ "$installed" = 1 ]; then
   expect_json "status --json"   "$CW" status
   # `disk` used to mean "size of the data directory" here and now means the
   # volume, so the field was renamed rather than left with two meanings. This is
-  # a JSON contract change and the assertion is what pins it.
-  if "$CW" status --json 2>/dev/null | grep -q '"data_size":'; then
-    ok "status --json publishes data_size (not disk)"
-  else
-    bad "status --json publishes data_size (not disk)"
-  fi
+  # a JSON contract change, and BOTH halves are asserted: emitting the new key
+  # while quietly keeping the old one is the outcome that leaves two meanings in
+  # the contract, which is the thing the rename exists to remove.
+  status_json=$("$CW" status --json 2>/dev/null)
+  case "$status_json" in
+    *'"data_size":'*) ok "status --json publishes data_size" ;;
+    *)                bad "status --json publishes data_size" ;;
+  esac
+  case "$status_json" in
+    *'"disk":'*) bad "status --json no longer publishes the legacy disk key" ;;
+    *)           ok  "status --json no longer publishes the legacy disk key" ;;
+  esac
 else
   skp "status --json (no samples collected yet)"
   skp "status --json data_size key (no samples collected yet)"
+  skp "status --json legacy disk key (no samples collected yet)"
 fi
 # argv and filenames are arbitrary bytes; JSON has to be valid UTF-8 with no raw
 # control characters. Both failure modes break the agent interface, and valid
@@ -160,7 +188,14 @@ if [ "$("$CW" orphans --json 2>/dev/null | grep -c '"root_pid"')" -gt 0 ]; then
 else
   skp "orphans --kill guard (no orphans present)"
 fi
-if "$CW" worktrees --json 2>/dev/null | grep -q '"removable":true'; then
+# Counted into a variable rather than tested with `grep -q` straight off the
+# pipe. Under `set -o pipefail`, grep -q closes the pipe on its first match, the
+# producer dies of SIGPIPE and the PIPELINE reports 141 — so a run that DOES
+# have removable worktrees takes the else branch and skips the very guard it was
+# supposed to exercise. Silent, and it only shows up on the machines where the
+# assertion matters.
+removable=$("$CW" worktrees --json 2>/dev/null | grep -c '"removable":true')
+if [ "${removable:-0}" -gt 0 ]; then
   expect_exit 1 "worktrees --remove refuses with no tty" "$CW" worktrees --remove
 else
   skp "worktrees --remove guard (nothing removable)"
@@ -190,33 +225,66 @@ echo "sampler pileup detection"
 # when that process exited — so the failure was unreproducible by the person
 # who saw it. This decoy is exactly that shape and must not be counted.
 #
-# This asserts doctor's real output rather than re-implementing its count here,
-# because a copy of the matching rule in the test is a copy that drifts — and
-# the rule is the entire thing under test.
+# Tested in BOTH directions. A check that only proves decoys are ignored is
+# satisfied by a rule that counts nothing at all, and a pileup check that never
+# fires is worse than the false positive it replaced — so the second half plants
+# real samplers in the three invocation shapes a naive argv[1] rule gets wrong.
+#
+# The count is parsed out of doctor's own line rather than re-derived here: a
+# copy of the matching rule in the test is a copy that drifts, and the rule is
+# the entire thing under test.
+pileup_count() { "$CW" doctor 2>/dev/null | sed -n 's/.*no sampler pileup (\([0-9][0-9]*\) in flight.*/\1/p'; }
+
+samp_base=$(pileup_count)
 # The trailing `:` matters: with `sleep 5` as the only command, bash execs it
 # and replaces its own argv, so the decoy string vanishes from ps and the test
 # silently skips. A second command forces bash to stay resident.
 bash -c 'sleep 5; :' "reviewing tools/sample.sh:190 in this worktree" &
 decoy=$!
 sleep 0.3
-# Both results are captured before being tested. Under `set -o pipefail`,
-# `ps | grep -q` closes the pipe the moment grep matches, ps dies of SIGPIPE and
-# the PIPELINE reports 141 — so the success case reads as a failure and this
-# assertion silently skips itself.
+# Captured before being tested. Under `set -o pipefail`, `ps | grep -q` closes
+# the pipe the moment grep matches, ps dies of SIGPIPE and the PIPELINE reports
+# 141 — so the success case reads as a failure and the assertion silently skips.
 decoy_line=$(ps -Ao args= 2>/dev/null | grep 'reviewing tools/sample\.sh:190')
-pileup_line=$("$CW" doctor 2>/dev/null | grep 'sampler pileup')
+samp_decoy=$(pileup_count)
+kill "$decoy" 2>/dev/null; wait "$decoy" 2>/dev/null
 if [ -z "$decoy_line" ]; then
   skp "sampler pileup ignores a decoy (decoy did not start)"
+elif [ "$samp_decoy" = "$samp_base" ]; then
+  ok "sampler pileup ignores a process that only mentions tools/sample.sh"
 else
-  case "$pileup_line" in
-    *"no sampler pileup (0 in flight"*|*"no sampler pileup (1 in flight"*)
-      ok "sampler pileup ignores a process that only mentions tools/sample.sh" ;;
-    *)
-      bad "sampler pileup ignores a process that only mentions tools/sample.sh"
-      printf '      %s\n' "$pileup_line" ;;
-  esac
+  bad "sampler pileup ignores a decoy (count went $samp_base -> $samp_decoy)"
 fi
-kill "$decoy" 2>/dev/null; wait "$decoy" 2>/dev/null
+
+# Three shapes an argv[1]-and-absolute-path rule silently misses: a relative
+# invocation, an interpreter flag before the script, and a repo path containing
+# a space. Each must be COUNTED, or a genuine pileup goes unreported.
+samp_tmp=$(mktemp -d) || samp_tmp=""
+if [ -n "$samp_tmp" ]; then
+  mkdir -p "$samp_tmp/tools" "$samp_tmp/my repo/tools"
+  printf '#!/usr/bin/env bash\nsleep 5\n:\n' > "$samp_tmp/tools/sample.sh"
+  cp "$samp_tmp/tools/sample.sh" "$samp_tmp/my repo/tools/sample.sh"
+  ( cd "$samp_tmp" && exec bash tools/sample.sh ) &     # relative path
+  s1=$!
+  bash -x "$samp_tmp/tools/sample.sh" 2>/dev/null &     # flag before the path
+  s2=$!
+  bash "$samp_tmp/my repo/tools/sample.sh" &            # path containing a space
+  s3=$!
+  sleep 0.5
+  samp_live=$(pileup_count)
+  kill "$s1" "$s2" "$s3" 2>/dev/null
+  wait "$s1" "$s2" "$s3" 2>/dev/null
+  if [ -z "$samp_live" ] || [ -z "$samp_base" ]; then
+    skp "sampler pileup counts real samplers (doctor printed no count)"
+  elif [ "$samp_live" -ge $((samp_base + 3)) ]; then
+    ok "sampler pileup counts relative, flagged and space-containing invocations"
+  else
+    bad "sampler pileup MISSES a real sampler (count went $samp_base -> $samp_live, wanted +3)"
+  fi
+  rm -rf "$samp_tmp"
+else
+  skp "sampler pileup counts real samplers (mktemp failed)"
+fi
 
 echo "sampler"
 tmp=$(mktemp -d) || exit 1

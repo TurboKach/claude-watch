@@ -25,6 +25,13 @@ CLAUDE_WATCH_LEAKS_WORKTREE_WARN_GIB 1 gib'
 CW_DISK_TTL=21600          # 6h (§1)
 CW_LIVENESS_SECONDS=120    # the same constant status() uses (claude-watch:1308)
 
+# Hard ceiling on how many day files one run will open. It exists so a caller
+# who raises CLAUDE_WATCH_KEEP_DAYS past it cannot ask for a window the reader
+# will quietly truncate: the clamp is applied to the ADVERTISED window, not just
+# to the loop bound, so requested_seconds always describes what was actually
+# read and `clamped` says it was reduced.
+CW_MAX_WINDOW_DAYS=400
+
 CW_CAVEAT='CPU and memory advice are not in this version. Even claude-watch report'"'"'s CPU figures are partial by construction: processes under CLAUDE_WATCH_FLOOR (5% of one core) and beyond the top CLAUDE_WATCH_TOPN (8) per sample are never recorded, so twenty processes at 4% — 0.8 cores — produce zero rows. GPU and Neural Engine power are not measured at all (README Limitations). A quiet CPU report does not mean a cool machine.'
 
 # Resolves every knob, rejecting a value awk would silently coerce to 0, and
@@ -83,6 +90,17 @@ cw_day_list() {
 }
 
 # ------------------------------------------------------------ the window ---
+# One definition of "this is an epoch the reader may trust", shared textually by
+# the window FILTER and the window VALIDATOR because they have to agree. The
+# filter cannot simply test `$1 + 0 >= cutoff`: awk converts `notanepoch` to 0,
+# which is below every cutoff, so a damaged row would be dropped before the
+# validator ever saw it — counted as absent rather than as damaged, which is the
+# silent-shortfall failure U0 spent three review rounds closing one layer down.
+#
+# The ten-digit bound is U0's and is what makes epoch comparison injective; see
+# CW_WINDOW_AWK for why it is a length() test and not a brace interval.
+CW_EPOCH_OK='($1 ~ /^(0|[1-9][0-9]*)$/ && length($1) <= 10)'
+
 # cw_read_window <seconds> — raw TSV on stdout, oldest row first, epoch >= now-N.
 #
 # Order is load-bearing: the aggregation closes a sample on an epoch change, so
@@ -96,7 +114,10 @@ cw_read_window() {
   local secs=$1 d i n
   local cutoff=$(( CW_NOW - secs ))
   n=$(( secs / 86400 + 2 ))
-  [ "$n" -gt 400 ] && n=400
+  # Unreachable: the caller has already clamped the window to
+  # CW_MAX_WINDOW_DAYS. It stays as an assertion, because the day a caller
+  # forgets, a truncated read is the failure mode with no symptom.
+  [ "$n" -gt $((CW_MAX_WINDOW_DAYS + 2)) ] && n=$((CW_MAX_WINDOW_DAYS + 2))
   : > "$CW_TMP/failed-days"
   : > "$CW_TMP/covered-days"
   : > "$CW_TMP/window-days"
@@ -107,14 +128,25 @@ cw_read_window() {
       i=$((i - 1))
       printf '%s\n' "$d" >> "$CW_TMP/window-days"
       if [ -f "$RAW/$d.tsv" ] || [ -f "$RAW/$d.tsv.gz" ]; then
-        if read_day "$d" 2>/dev/null; then
+        # Buffered, then emitted only on success. gzip detects corruption from
+        # the CRC and length trailer at the END of the stream, so a truncated
+        # archive decompresses a perfectly valid-looking PREFIX and only then
+        # exits non-zero. Streaming read_day straight into the pipe would let
+        # those untrusted rows count toward samples, interval and coverage while
+        # E8 simultaneously reported the day as unreadable — the two halves of
+        # the output contradicting each other. One buffer file, reused per day.
+        if read_day "$d" > "$CW_TMP/day.buf" 2>/dev/null; then
+          cat "$CW_TMP/day.buf"
           printf '%s\n' "$d" >> "$CW_TMP/covered-days"
         else
           printf '%s\n' "$d" >> "$CW_TMP/failed-days"
         fi
       fi
     done
-  } | CW_CUTOFF="$cutoff" LC_ALL=C awk -F'\t' '($1 + 0) >= (ENVIRON["CW_CUTOFF"] + 0)'
+  } | CW_CUTOFF="$cutoff" LC_ALL=C awk -F'\t' '
+    '"$CW_EPOCH_OK"' { if (($1 + 0) >= (ENVIRON["CW_CUTOFF"] + 0)) print; next }
+    { print }   # damaged epoch: pass it through so the validator can count it
+  '
 }
 
 # The window is read exactly ONCE per run. This pass derives the metadata and
@@ -141,7 +173,7 @@ cw_read_window() {
 #     file can contain, so it cannot also be a sentinel.
 CW_WINDOW_AWK='
   $2 == "sys" {
-    if ($1 !~ /^(0|[1-9][0-9]*)$/ || length($1) > 10) { badep++; next }
+    if (! '"$CW_EPOCH_OK"') { badep++; next }
     ep = $1
     if (!have_prev || ep != prev_ep) {
       if (have_prev) {
@@ -256,9 +288,29 @@ cw_load_analyzers() {
 # called by both `advise` and `disk`, which is what makes §3f's `domain` object
 # byte-for-byte what advise puts in domains[] minus `priority`.
 CW_EMIT_AWK='
-function num(x) {
-  if (x ~ /^-?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?$/) return x
-  return 0
+# A real JSON number serializer, not a numeric-looking-text test.
+#
+# JSON RFC 8259 numbers are NARROWER than what awk and most eyes read as
+# numeric: `.5`, `01` and `1.` are all rejected by a strict parser, and there is
+# no nan and no inf at all. Two ways the old one-line guard shipped an invalid
+# document that looked fine:
+#   - it passed `.5` / `01` / `1.` straight through as JSON numbers
+#   - it passed `1e999999`, which is finite TEXT and infinite VALUE; Python
+#     turns that into float("inf") without raising, so json.tool validates a
+#     document that already lost the contract
+# So: accept canonical JSON text as-is (no round trip, no precision lost);
+# canonicalise anything else awk agrees is a number through %.17g; then prove
+# the RESULT is finite before it is allowed out. Anything left is 0.
+function jnum(x,   s, v) {
+  if (x ~ /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)?$/) s = x
+  else if (x ~ /^[-+]?([0-9]+\.?[0-9]*|\.[0-9]+)([eE][-+]?[0-9]+)?$/) s = sprintf("%.17g", x + 0)
+  else return "0"
+  v = s + 0
+  # Written as a positive range test so nan, which fails every comparison,
+  # lands here too rather than sailing through a negated one.
+  if (!(v >= -1.7976931348623157e308 && v <= 1.7976931348623157e308)) return "0"
+  if (s !~ /^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][-+]?[0-9]+)?$/) return "0"
+  return s
 }
 function clamp01(s) {
   # The text guard runs FIRST. awk parses "nan" and "inf" into real IEEE values
@@ -309,9 +361,9 @@ function fjson(d, k,   out) {
   out = "{\"id\":" jstr(fid[d, k])
   out = out ",\"severity\":" jstr(fsev[d, k]) ",\"severity_rank\":" rank[fsev[d, k]] + 0
   out = out ",\"share_of_domain\":" sprintf("%.6g", fshare[d, k])
-  out = out ",\"value\":" num(fval[d, k]) ",\"unit\":" jstr(funit[d, k])
-  out = out ",\"threshold\":" num(fthr[d, k]) ",\"threshold_name\":" jstr(ftname[d, k])
-  out = out ",\"reclaimable_kb\":" num(frec[d, k]) ",\"confidence\":" jstr(fconf[d, k])
+  out = out ",\"value\":" jnum(fval[d, k]) ",\"unit\":" jstr(funit[d, k])
+  out = out ",\"threshold\":" jnum(fthr[d, k]) ",\"threshold_name\":" jstr(ftname[d, k])
+  out = out ",\"reclaimable_kb\":" jnum(frec[d, k]) ",\"confidence\":" jstr(fconf[d, k])
   out = out ",\"headline\":" jstr(fhead[d, k])
   out = out ",\"detail\":" jstr(fdet[d, k])
   out = out ",\"action\":" jornull(fact[d, k])
@@ -574,13 +626,22 @@ cw_advise() {
   CW_TMP=$(mktemp -d) || return 1
   trap 'rm -rf "$CW_TMP"' EXIT
 
-  # Retention clamp. The label keeps the original ask; requested_seconds and
-  # requested_days become the window actually used, so nothing downstream has to
-  # reconcile two numbers that disagree.
-  CW_CLAMPED=0
+  # Two clamps, both applied to the ADVERTISED window. The label keeps the
+  # original ask; requested_seconds and requested_days become the window
+  # actually read, so nothing downstream has to reconcile two numbers that
+  # disagree, and `clamped` plus the banner name which limit bound.
+  CW_CLAMPED=0; CW_CLAMP_REASON=""
   local keep_secs=$((KEEP_RAW_DAYS * 86400))
+  local max_secs=$((CW_MAX_WINDOW_DAYS * 86400))
   if [ "$CW_WIN_SECONDS" -gt "$keep_secs" ]; then
-    CW_CLAMPED=1; CW_WIN_SECONDS=$keep_secs; CW_WIN_DAYS=$KEEP_RAW_DAYS
+    CW_CLAMPED=1
+    CW_CLAMP_REASON="CLAUDE_WATCH_KEEP_DAYS (${KEEP_RAW_DAYS}d) — raw data is not retained beyond that"
+    CW_WIN_SECONDS=$keep_secs; CW_WIN_DAYS=$KEEP_RAW_DAYS
+  fi
+  if [ "$CW_WIN_SECONDS" -gt "$max_secs" ]; then
+    CW_CLAMPED=1
+    CW_CLAMP_REASON="the ${CW_MAX_WINDOW_DAYS}-day reader ceiling — one run will not open more day files than that"
+    CW_WIN_SECONDS=$max_secs; CW_WIN_DAYS=$CW_MAX_WINDOW_DAYS
   fi
 
   cw_window_pass
@@ -720,7 +781,7 @@ cw_render() {
     if [ "${CW_AVAIL_DAYS:-0}" -gt 0 ] && [ "$CW_WIN_DAYS" -gt "$CW_AVAIL_DAYS" ]; then
       b_e6="window: $CW_WIN_LABEL (${CW_WIN_DAYS}d requested, ${CW_AVAIL_DAYS}d available — the sampler has only been recording since $CW_OLDEST_DAY). Nothing to fix; the window widens as data accumulates"
     fi
-    [ "${CW_CLAMPED:-0}" = 1 ] && b_clamp="window clamped to CLAUDE_WATCH_KEEP_DAYS (${KEEP_RAW_DAYS}d) — raw data is not retained beyond that"
+    [ "${CW_CLAMPED:-0}" = 1 ] && b_clamp="window clamped to ${CW_CLAMP_REASON}"
     if [ "$CW_DISK_CACHE_STATE" = ok ] && [ "$CW_DISK_STALE" = 1 ]; then
       b_disk="disk facts are $(fmt_dur "$CW_DISK_AGE") old (refreshed every 6h) — nothing has rescanned since. For current numbers: claude-watch disk --refresh (~10s, 120s cap)"
     fi
@@ -795,7 +856,7 @@ cw_disk() {
   CW_TMP=$(mktemp -d) || return 1
   trap 'rm -rf "$CW_TMP"' EXIT
 
-  CW_WIN_LABEL="-"; CW_WIN_SECONDS=0; CW_WIN_DAYS=0; CW_CLAMPED=0
+  CW_WIN_LABEL="-"; CW_WIN_SECONDS=0; CW_WIN_DAYS=0; CW_CLAMPED=0; CW_CLAMP_REASON=""
   CW_INTERVAL_SECONDS=10; CW_SAMPLES=0; CW_OBSERVED_SECONDS=0; CW_READ_SECONDS=0
   CW_NCPU=""; CW_MEMSIZE_KB=""; CW_SWAP_CAP_MB=""; CW_SCHEMA2_SINCE=""
   CW_WIN_LAST_EPOCH=""; CW_FAILED_DAYS=""
