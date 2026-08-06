@@ -144,6 +144,46 @@ claude-watch worktrees --days 30        # only call them stale after 30 days
 
 At the prompt, **Enter accepts all**, `n` aborts, and `s` steps through one at a time (`y`/`N`/`a`ll/`q`uit). `--yes` skips the prompt for scripting; without a terminal to confirm on, both commands refuse to destroy anything unless `--yes` is explicit.
 
+## Agent interface
+
+Claude Code can run this tool itself. `install.sh` symlinks two [Agent Skills](https://code.claude.com/docs/en/skills) into `~/.claude/skills/`:
+
+| Skill | Who can invoke | What it does |
+|---|---|---|
+| `claude-watch` | you **and** Claude | Read-only diagnosis. Claude reaches for it on "why is my laptop hot", "what's still running", "which worktrees are left over". |
+| `claude-watch-reap` | **you only** | The destructive half. `disable-model-invocation: true`, so Claude cannot start a reap on its own. |
+
+The split follows the documented guidance for side-effecting workflows: *"You don't want Claude deciding to deploy because your code looks ready."* Killing processes is the same shape of decision.
+
+They are symlinked rather than copied, so the skill stays in step with the flags it documents — pulling the repo updates the skill, and Claude Code picks up the change live without a restart.
+
+### `--json`
+
+`report`, `orphans`, `worktrees` and `status` all take `--json`, so an agent reads values instead of pattern-matching a layout that is free to change:
+
+```bash
+claude-watch report today --json
+claude-watch orphans --json
+claude-watch worktrees --json
+claude-watch status --json
+```
+
+`--json` is read-only by construction: it prints and exits before any confirmation or kill path is reachable.
+
+```json
+{"command":"orphans","min_minutes":60,"trees":[
+  {"root_pid":1304,"name":"node --test","age_seconds":405014,"rss_kb":60960,"cores":0.1,"proc_count":2,
+   "procs":[{"pid":1304,"depth":0,"rss_kb":6912,"age_seconds":405014,"argv":"node --import tsx --test …"},
+            {"pid":1418,"depth":1,"rss_kb":54048,"age_seconds":405014,"argv":"…--test-concurrency=0 …"}]}],
+ "tree_count":1,"total_rss_kb":60960}
+```
+
+Worktree records carry an explicit `removable` boolean alongside `status` and `reason`, so an agent never has to infer eligibility from the status string.
+
+### Why a skill and not an MCP server
+
+An MCP server is a resident process. This tool's defining constraint is that it never leaves one running — and MCP servers show up *in its own reports*, at 50–100M each. A skill costs nothing at rest: only the name and description sit in context, and the body loads when it's used.
+
 ## Install
 
 ```bash
@@ -152,7 +192,7 @@ cd claude-watch
 ./install.sh
 ```
 
-Symlinks both commands into `~/.local/bin`, installs and loads the launchd sampler, and prints one line to add to `.zshrc` — it never edits your shell config for you. Verify with `claude-watch doctor`.
+Symlinks both commands into `~/.local/bin`, symlinks the two agent skills into `~/.claude/skills/`, installs and loads the launchd sampler, and prints one line to add to `.zshrc` — it never edits your shell config for you. Verify with `claude-watch doctor`.
 
 ## How the sampler works
 

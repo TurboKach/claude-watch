@@ -25,6 +25,17 @@ case ":$PATH:" in
   *) echo "note: $BIN_DIR is not on your PATH — add it to run \`claude-watch\` by name" ;;
 esac
 
+# --- agent skills ---
+# Symlinked rather than copied so the skill stays in step with the flags it
+# documents: pulling the repo updates the skill. Claude Code follows a symlinked
+# skill directory and picks up edits live, without a restart.
+SKILL_DIR="$HOME/.claude/skills"
+mkdir -p "$SKILL_DIR"
+for s in claude-watch claude-watch-reap; do
+  ln -sfn "$REPO/skills/$s" "$SKILL_DIR/$s"
+  echo "symlinked $SKILL_DIR/$s -> $REPO/skills/$s"
+done
+
 # --- launchd sampler ---
 mkdir -p "$HOME/Library/LaunchAgents" "$HOME/Library/Logs"
 sed -e "s|__REPO__|$REPO|g" -e "s|__HOME__|$HOME|g" \

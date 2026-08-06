@@ -42,6 +42,9 @@ usage: claude-watch [report [DATE]] | orphans | worktrees | status | hook | doct
       Both list only by default — that IS the dry run. Nothing is destroyed
       without an explicit flag AND a confirmation.
 
+  --json    machine-readable output for report, orphans, worktrees and status.
+            Read-only: --json prints and exits before any destructive path.
+
 Environment:
   CLAUDE_WATCH_HOME        data directory (default ~/.claude-watch)
   CLAUDE_WATCH_KEEP_DAYS   raw retention in days (default 30)
@@ -77,12 +80,17 @@ read_day() {
 
 report() {
   local d; d=$(resolve_date "${1:-today}")
+  local json="${2:-0}"
   local data; data=$(read_day "$d")
   if [ -z "$data" ]; then
-    printf '%sno samples recorded for %s%s\n' "$C_DIM" "$d" "$C_RST"
+    if [ "$json" = "1" ]; then
+      printf '{"command":"report","date":"%s","samples":0,"sessions":[],"machine_cpu":[],"machine_mem":[],"orphans":[]}\n' "$d"
+    else
+      printf '%sno samples recorded for %s%s\n' "$C_DIM" "$d" "$C_RST"
+    fi
     return 0
   fi
-  printf '%s' "$data" | LC_ALL=C awk -F'\t' -v D="$d" -v HOME_DIR="$HOME" \
+  printf '%s' "$data" | LC_ALL=C awk -F'\t' -v D="$d" -v HOME_DIR="$HOME" -v JSON="$json" \
     -v C_HEAD="$C_HEAD" -v C_DIM="$C_DIM" -v C_KEY="$C_KEY" -v C_HOT="$C_HOT" \
     -v C_RED="$C_RED" -v C_OK="$C_OK" -v C_SEC="$C_SEC" -v C_RST="$C_RST" '
     function dur(s,   d, h, m) {
@@ -125,6 +133,53 @@ report() {
     }
     function cores_col(c) { return (c >= 4) ? C_RED : (c >= 1) ? C_HOT : C_OK }
     function tilde(p) { sub("^" HOME_DIR, "~", p); return p }
+
+    # --json exists so an agent reads values instead of regexing a layout that
+    # is free to change. Session labels, cwds and process names are arbitrary
+    # text, so everything user-derived goes through jesc().
+    function jesc(s) {
+      gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s)
+      gsub(/\t/, " ", s); gsub(/\n/, " ", s); gsub(/\r/, " ", s)
+      return s
+    }
+    function emit_json(   i, key, first) {
+      printf "{\"command\":\"report\",\"date\":\"%s\",\"cores\":%d,\"samples\":%d,\"interval_seconds\":%d,\"observed_seconds\":%d",
+             D, ncpu, sysn, iv, covered
+      printf ",\"sessions\":["
+      for (i = 1; i <= skn; i++) {
+        key = sk[i]
+        printf "%s{\"cwd\":\"%s\",\"label\":\"%s\",\"peak_cores\":%.2f,\"avg_cores\":%.2f,\"active_seconds\":%d,\"rss_kb\":%d",
+               (i > 1 ? "," : ""), jesc(key), jesc(slabel[key]), speak[key], ssum[key] / sn[key], sn[key] * iv, srss[key]
+        if (shot[key] != "")
+          printf ",\"hottest_child\":\"%s\",\"hottest_child_cores\":%.2f", jesc(shot[key]), shotc[key]
+        printf "}"
+      }
+      printf "],\"machine_cpu\":["
+      first = 1
+      for (i = 1; i <= pkn; i++) {
+        key = bk[i]; if (psum[key] <= 0) break
+        printf "%s{\"name\":\"%s\",\"cpu_seconds\":%d,\"peak_cores\":%.2f,\"avg_cores\":%.2f,\"seen_pct\":%.1f}",
+               (first ? "" : ","), jesc(key), psum[key] * iv, ppeak[key], psum[key] / pn[key], pn[key] * 100 / sysn
+        first = 0
+      }
+      printf "],\"machine_mem\":["
+      first = 1
+      for (i = 1; i <= pkn; i++) {
+        key = mk[i]; if (prss[key] <= 0) break
+        printf "%s{\"name\":\"%s\",\"rss_kb\":%d,\"instances\":%d,\"seen_pct\":%.1f}",
+               (first ? "" : ","), jesc(key), prss[key], (pcnt[key] > 0 ? pcnt[key] : 1), pn[key] * 100 / sysn
+        first = 0
+      }
+      printf "],\"system\":{\"peak_load\":%.2f,\"peak_mem_used_kb\":%d,\"min_free_kb\":%d,\"max_swap_mb\":%d}",
+             peakload, maxused, minfree, maxswap
+      printf ",\"orphans\":["
+      for (i = 1; i <= okn; i++) {
+        key = ok[i]
+        printf "%s{\"name\":\"%s\",\"age_seconds\":%d,\"rss_kb\":%d,\"still_alive\":%s}",
+               (i > 1 ? "," : ""), jesc(key), oage[key], orss[key], (olast[key] >= lastep ? "true" : "false")
+      }
+      printf "]}\n"
+    }
 
     {
       ep = $1; kind = $2; key = $3; cores = $4 + 0; rss = $5 + 0
@@ -169,7 +224,11 @@ report() {
 
     END {
       flush()   # close the final sample
-      if (sysn == 0) { print "no system samples for " D; exit }
+      if (sysn == 0) {
+        if (JSON == "1") printf "{\"command\":\"report\",\"date\":\"%s\",\"samples\":0,\"sessions\":[],\"machine_cpu\":[],\"machine_mem\":[],\"orphans\":[]}\n", D
+        else print "no system samples for " D
+        exit
+      }
 
       # Derive the sampling interval from the data rather than assuming it, so
       # coverage stays honest if the interval was changed or launchd was paused.
@@ -182,14 +241,25 @@ report() {
       iv = (dn > 0) ? dl[int(dn / 2) + 1] : 10
       covered = sysn * iv
 
+      # Rankings are hoisted out of the print sections so the human and --json
+      # paths report identical order rather than two implementations of it.
+      for (i = 1; i < skn; i++) for (k = i + 1; k <= skn; k++)
+        if (speak[sk[k]] > speak[sk[i]]) { t = sk[i]; sk[i] = sk[k]; sk[k] = t }
+      for (i = 1; i <= pkn; i++) bk[i] = pk[i]
+      for (i = 1; i < pkn; i++) for (k = i + 1; k <= pkn; k++)
+        if (psum[bk[k]] > psum[bk[i]]) { t = bk[i]; bk[i] = bk[k]; bk[k] = t }
+      for (i = 1; i <= pkn; i++) mk[i] = pk[i]
+      for (i = 1; i < pkn; i++) for (k = i + 1; k <= pkn; k++)
+        if (prss[mk[k]] > prss[mk[i]]) { t = mk[i]; mk[i] = mk[k]; mk[k] = t }
+
+      if (JSON == "1") { emit_json(); exit }
+
       printf "%sclaude-watch%s  %s%s%s   %s%d cores · %d samples · %s observed%s\n",
              C_HEAD, C_RST, C_SEC, D, C_RST, C_DIM, ncpu, sysn, dur(covered), C_RST
 
       # --- Claude sessions ---
       printf "\n%sCLAUDE SESSIONS%s\n", C_SEC, C_RST
       if (skn == 0) printf "  %snone recorded%s\n", C_DIM, C_RST
-      for (i = 1; i < skn; i++) for (k = i + 1; k <= skn; k++)
-        if (speak[sk[k]] > speak[sk[i]]) { t = sk[i]; sk[i] = sk[k]; sk[k] = t }
       for (i = 1; i <= skn; i++) {
         key = sk[i]
         printf "  %s%-28.28s%s %speak%s %s%5.1f×%s  %savg%s %4.1f×  %sactive%s %s  %s\n",
@@ -213,9 +283,6 @@ report() {
       else {
         # By total CPU time consumed = sum of per-sample cores × interval. This
         # is the honest "what burned the machine today" measure.
-        for (i = 1; i <= pkn; i++) bk[i] = pk[i]
-        for (i = 1; i < pkn; i++) for (k = i + 1; k <= pkn; k++)
-          if (psum[bk[k]] > psum[bk[i]]) { t = bk[i]; bk[i] = bk[k]; bk[k] = t }
         printf "  %sby CPU time burned%s\n", C_DIM, C_RST
         for (i = 1; i <= pkn && i <= 6; i++) {
           key = bk[i]
@@ -227,9 +294,6 @@ report() {
         }
         # By memory held. Distinct list because a 4G process at 0% CPU never
         # appears in a CPU ranking, and is exactly what you want to know about.
-        for (i = 1; i <= pkn; i++) mk[i] = pk[i]
-        for (i = 1; i < pkn; i++) for (k = i + 1; k <= pkn; k++)
-          if (prss[mk[k]] > prss[mk[i]]) { t = mk[i]; mk[i] = mk[k]; mk[k] = t }
         printf "  %sby memory held%s %s(largest single process; RSS double-counts shared pages)%s\n",
                C_DIM, C_RST, C_DIM, C_RST
         for (i = 1; i <= pkn && i <= 4; i++) {
@@ -390,11 +454,12 @@ kill_tree() {
 }
 
 orphans() {
-  local do_kill=0 assume_yes=0 min="${CLAUDE_WATCH_ORPHAN_MIN:-${ORPHAN_MIN_DEFAULT:-60}}"
+  local do_kill=0 assume_yes=0 json=0 min="${CLAUDE_WATCH_ORPHAN_MIN:-${ORPHAN_MIN_DEFAULT:-60}}"
   while [ $# -gt 0 ]; do
     case "$1" in
       --kill)     do_kill=1 ;;
       --yes|-y)   assume_yes=1; do_kill=1 ;;
+      --json)     json=1 ;;
       --min)      shift; min="${1:-$min}" ;;
       --min=*)    min="${1#--min=}" ;;
       *) printf 'claude-watch orphans: unknown option %s\n' "$1" >&2; return 2 ;;
@@ -409,6 +474,29 @@ orphans() {
   local scan tab; tab=$(printf '\t')
   scan=$(mktemp) || return 1
   scan_orphans "$min" > "$scan"
+
+  # --json is read-only by construction: it prints and exits before any of the
+  # confirmation or kill machinery below is reachable.
+  if [ "$json" = "1" ]; then
+    LC_ALL=C awk -F'\t' -v MIN="$min" '
+      function jesc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); gsub(/\t/, " ", s); return s }
+      function closetree() { if (open) { printf "]}"; open = 0 } }
+      BEGIN { printf "{\"command\":\"orphans\",\"min_minutes\":%d,\"trees\":[", MIN }
+      $1 == "T" {
+        closetree(); if (nt++) printf ","
+        printf "{\"root_pid\":%d,\"name\":\"%s\",\"age_seconds\":%d,\"rss_kb\":%d,\"cores\":%.2f,\"proc_count\":%d,\"procs\":[",
+               $2, jesc($3), $4, $5, $7, $6
+        open = 1; np = 0; total += $5; next
+      }
+      $1 == "P" {
+        if (np++) printf ","
+        printf "{\"pid\":%d,\"depth\":%d,\"rss_kb\":%d,\"age_seconds\":%d,\"argv\":\"%s\"}", $3, $4, $5, $6, jesc($7)
+        next
+      }
+      END { closetree(); printf "],\"tree_count\":%d,\"total_rss_kb\":%d}\n", nt + 0, total + 0 }
+    ' "$scan"
+    rm -f "$scan"; return 0
+  fi
 
   local ntrees; ntrees=$(grep -c "^T${tab}" "$scan" 2>/dev/null || true)
   ntrees=${ntrees:-0}
@@ -577,11 +665,12 @@ session_cwd_under() {
 }
 
 worktrees() {
-  local do_remove=0 assume_yes=0 days=7
+  local do_remove=0 assume_yes=0 json=0 days=7
   while [ $# -gt 0 ]; do
     case "$1" in
       --remove)   do_remove=1 ;;
       --yes|-y)   assume_yes=1; do_remove=1 ;;
+      --json)     json=1 ;;
       --days)     shift; days="${1:-$days}" ;;
       --days=*)   days="${1#--days=}" ;;
       *) printf 'claude-watch worktrees: unknown option %s\n' "$1" >&2; return 2 ;;
@@ -592,6 +681,22 @@ worktrees() {
   local scan tab; tab=$(printf '\t')
   scan=$(mktemp) || return 1
   scan_worktrees "$days" > "$scan"
+
+  if [ "$json" = "1" ]; then
+    LC_ALL=C awk -F'\t' -v D="$days" '
+      function jesc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); gsub(/\t/, " ", s); return s }
+      BEGIN { printf "{\"command\":\"worktrees\",\"stale_after_days\":%d,\"worktrees\":[", D }
+      {
+        rm = ($1 == "STALE" || $1 == "PRUNABLE") ? "true" : "false"
+        if (n++) printf ","
+        printf "{\"status\":\"%s\",\"path\":\"%s\",\"main\":\"%s\",\"branch\":\"%s\",\"age_days\":%d,\"dirty\":%d,\"unpushed\":%d,\"size_kb\":%d,\"removable\":%s,\"reason\":\"%s\"}",
+               $1, jesc($2), jesc($3), jesc($4), $5, $6, $7, $8, rm, jesc($9)
+        if (rm == "true") { rc++; rk += $8 }
+      }
+      END { printf "],\"removable_count\":%d,\"reclaimable_kb\":%d}\n", rc + 0, rk + 0 }
+    ' "$scan"
+    rm -f "$scan"; return 0
+  fi
 
   if [ ! -s "$scan" ]; then
     printf '%s✓ no agent-created worktrees found%s %s(scanned %s)%s\n' \
@@ -713,17 +818,29 @@ orphan_branches() {
 }
 
 status() {
-  local latest count
+  local latest count json=0
+  [ "${1:-}" = "--json" ] && json=1
   latest=$(ls -t "$RAW"/*.tsv 2>/dev/null | head -n1)
-  printf '%sclaude-watch status%s\n' "$C_HEAD" "$C_RST"
   if [ -z "$latest" ]; then
-    printf '  %sno samples yet%s — is the launchd job loaded? try: claude-watch doctor\n' "$C_RED" "$C_RST"
+    if [ "$json" = "1" ]; then
+      printf '{"command":"status","sampling":false,"reason":"no samples yet"}\n'
+    else
+      printf '%sclaude-watch status%s\n' "$C_HEAD" "$C_RST"
+      printf '  %sno samples yet%s — is the launchd job loaded? try: claude-watch doctor\n' "$C_RED" "$C_RST"
+    fi
     return 1
   fi
   local last_ep now age
   last_ep=$(tail -n1 "$latest" | cut -f1)
   now=$(date +%s); age=$((now - last_ep))
   count=$(wc -l < "$latest" | tr -d ' ')
+  if [ "$json" = "1" ]; then
+    printf '{"command":"status","sampling":%s,"last_sample_age_seconds":%d,"rows_today":%d,"disk":"%s","keep_days":%d}\n' \
+      "$([ "$age" -lt 120 ] && printf 'true' || printf 'false')" "$age" "$count" \
+      "$(du -sh "$DATA" 2>/dev/null | cut -f1)" "$KEEP_RAW_DAYS"
+    return 0
+  fi
+  printf '%sclaude-watch status%s\n' "$C_HEAD" "$C_RST"
   if [ "$age" -lt 120 ]; then
     printf '  %s● sampling%s   last sample %ss ago\n' "$C_OK" "$C_RST" "$age"
   else
@@ -790,12 +907,20 @@ doctor() {
 }
 
 case "${1:-report}" in
-  report)          shift 2>/dev/null || true; report "${1:-today}" ;;
+  report)
+    shift 2>/dev/null || true
+    _date=today; _json=0
+    while [ $# -gt 0 ]; do
+      case "$1" in --json) _json=1 ;; *) _date="$1" ;; esac
+      shift
+    done
+    report "$_date" "$_json"
+    ;;
   orphans)         shift; orphans ${1+"$@"} ;;
   worktrees)       shift; worktrees ${1+"$@"} ;;
   today)           report today ;;
   yesterday)       report yesterday ;;
-  status)          status ;;
+  status)          shift; status ${1+"$@"} ;;
   hook)            hook ;;
   doctor)          doctor ;;
   -h|--help|help)  usage ;;

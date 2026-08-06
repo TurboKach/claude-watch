@@ -101,7 +101,9 @@ Two invariants worth protecting:
 
 13. **An agent worktree in active use is indistinguishable from an abandoned one by age alone.** `wizards/.claude/worktrees/agent-a309e0b6…` looked exactly like the 5-month-old Conductor leftovers; it had a commit 10 minutes old and git's `locked` flag. Liveness (lock flag, commit < 24h, a live session cwd inside it) is checked *before* staleness, and always wins.
 
-14. **`pgrep -f codex` is useless on macOS.** The path `/var/run/com.apple.security.cryptexd/codex.system/...` appears in the inherited environment of nearly every process, so the string "codex" in argv matches almost everything. Any future Codex detection needs a different key.
+14. **Malformed skill frontmatter fails silently and badly.** Claude Code loads the body with *empty metadata*, so `/skill-name` still works but Claude has no `description` to match on — auto-invocation dies with no error anywhere. This bit us: `when_to_use: "a", "b", "c"` is not valid YAML. Use a `>-` block scalar for anything containing quotes or apostrophes, and validate with a real YAML parser, not by eye.
+
+15. **`pgrep -f codex` is useless on macOS.** The path `/var/run/com.apple.security.cryptexd/codex.system/...` appears in the inherited environment of nearly every process, so the string "codex" in argv matches almost everything. Any future Codex detection needs a different key.
 
 ---
 
@@ -223,6 +225,30 @@ Safety properties, all load-bearing (see gotchas §4.10–§4.13):
 **Still no automated tests** (§7a). Everything above was verified by hand against synthetic orphan
 trees and a sandbox repo of backdated worktrees. Given these paths are irreversible, they are now
 the strongest argument for §7a — the report aggregation is no longer the highest-value test target.
+
+---
+
+## 12. Agent interface
+
+`report`, `orphans`, `worktrees` and `status` take `--json`. `--json` prints and returns before any
+confirmation or kill path is reachable, so it is read-only by construction, not by convention.
+Report rankings are sorted **once**, above the human/JSON branch, so the two modes cannot disagree
+about order. Everything user-derived (cwds, session labels, argv, paths) goes through `jesc()`.
+
+Two skills in `skills/`, symlinked into `~/.claude/skills/` by `install.sh` (symlinked, not copied,
+so the skill tracks the flags it documents; Claude Code follows symlinked skill dirs and hot-reloads):
+
+- **`claude-watch`** — read-only, model-invocable. Claude picks it up from "why is my laptop hot".
+- **`claude-watch-reap`** — `disable-model-invocation: true`, so only the user can start a reap.
+  Its description is deliberately *not* in context; that is the documented behaviour of the flag.
+
+Why a skill and not an MCP server: MCP servers are resident processes that appear in this tool's own
+reports at 50–100M each. A monitor whose defining constraint is leaving nothing running should not
+ship a daemon to describe itself.
+
+Two facts worth keeping: a Claude Bash call has **no tty** (verified), so `--kill`/`--remove` refuse
+unless `--yes` is explicit — the agent cannot destroy anything by accident. And `--yes` takes
+*everything* removable; per-item selection needs a real terminal, because `s` mode needs to prompt.
 
 ---
 
