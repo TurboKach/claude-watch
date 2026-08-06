@@ -483,7 +483,7 @@ disk_findings() {
   fi
 
   # ---- disk.reclaimable.<group> ------------------------------------------
-  local i j
+  local i j disk_conf_rank_v=1
   for (( i = 0; i < ${#glabel[@]}; i++ )); do
     local lab=${glabel[$i]} sz=${gsize[$i]} cnt=${gcount[$i]} aff=${gaff[$i]}
     # >= 2% of volume_total_kb, and nothing below that line is surfaced at all.
@@ -505,7 +505,9 @@ disk_findings() {
     gshare=$(disk_share "$sz" "$total")
     gthr=$(( (DISK_GROUP_WARN_PCT * total + 99) / 100 ))
 
-    # Sort this group's dir rows by size, largest first.
+    # Sort this group's dir rows by confidence rank first, then by size, largest
+    # first within each tier — so the rows that carry a runnable command are the
+    # ones the DISK_ACTION_MAX display slots are spent on.
     local sorted=''
     for (( j = 0; j < ${#dpath[@]}; j++ )); do
       [ "${dgroup[$j]}" = "$lab" ] || continue
@@ -514,9 +516,15 @@ disk_findings() {
         likely)     nlikely=$((nlikely + 1)); case $best in n/a|unverified) best=likely ;; esac ;;
         unverified) nunver=$((nunver + 1)); [ "$best" = n/a ] && best=unverified ;;
       esac
-      sorted=$sorted$(printf '%s\t%s\t%s\t%s' "${dsize[$j]}" "${dpath[$j]}" "${dconf[$j]}" "${dage[$j]}")$'\n'
+      disk_conf_rank "${dconf[$j]}" "${dpath[$j]}" "$lab"
+      sorted=$sorted$(printf '%s\t%s\t%s\t%s\t%s' "$disk_conf_rank_v" \
+        "${dsize[$j]}" "${dpath[$j]}" "${dconf[$j]}" "${dage[$j]}")$'\n'
     done
-    [ -n "$sorted" ] && sorted=$(printf '%s' "$sorted" | sort -t$'\t' -k1,1nr)
+    # The rank is a sort key only: cut it back off so disk_group_action and
+    # disk_transcript_breakdown keep their exact four-field `sz p conf age`
+    # contract. It is always a digit, so the tab-separated row it prefixes can
+    # never hand an `IFS=$'\t' read` consumer an empty interior field.
+    [ -n "$sorted" ] && sorted=$(printf '%s' "$sorted" | sort -t$'\t' -k1,1n -k2,2nr | cut -f2-)
 
     local action detail
     action=$(disk_group_action "$lab" "$cage" "$sorted")
@@ -559,6 +567,21 @@ disk_findings() {
   return 0
 }
 
+# Rank 0 is "this row will carry a runnable command" — not merely `confirmed`,
+# because a confirmed row whose path fails the §3b charset gate renders as
+# "path needs manual handling" and would otherwise consume a display slot it
+# cannot pay for. Transcripts get one rank for every row (§8 open decision 2
+# means none of them is ever commandable), so their list stays purely
+# size-ordered and this is a no-op for that group.
+disk_conf_rank() {   # <conf> <path> <label>; result in disk_conf_rank_v, no fork
+  disk_conf_rank_v=1
+  case $3 in transcripts) return 0 ;; esac
+  case $1 in
+    confirmed)  disk_path_safe "$2" && disk_conf_rank_v=0 ;;
+    unverified) disk_conf_rank_v=2 ;;
+  esac
+}
+
 # The action string for one group. Confidence gates whether a removal command
 # may be printed at all (§3c): confirmed -> command; likely -> size, no command,
 # "in active use, rebuilt on next build"; unverified -> size and path only,
@@ -599,7 +622,10 @@ disk_group_action() {
   done <<EOF
 $sorted
 EOF
-  [ "$more" -gt 0 ] && out="$out · + ${more} more (--json for all)"
+  # The list is confidence-ranked before size, so what is hidden here is no
+  # longer simply "the smaller ones" — it can be a larger entry that carries no
+  # command. Say so rather than let the reader infer a size ordering.
+  [ "$more" -gt 0 ] && out="$out · + ${more} more, smaller or without a command (--json for all)"
   printf '%s%s' "$prefix" "$out"
 }
 
