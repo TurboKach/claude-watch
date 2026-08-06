@@ -62,6 +62,35 @@ else
   C_HEAD=""; C_DIM=""; C_KEY=""; C_HOT=""; C_RED=""; C_OK=""; C_SEC=""; C_RST=""
 fi
 
+# One definition of JSON string escaping, textually prepended to every awk
+# program that needs it. awk cannot share functions between an inline program
+# and -f files, so string concatenation is the only way to keep this from
+# existing as three copies that drift apart.
+#
+# Paths, session labels and argv are arbitrary bytes. JSON forbids raw control
+# characters, so anything below 0x20 has to be escaped or the whole document is
+# invalid — a single ESC in a command line would otherwise break the agent
+# interface. The regex fast-path keeps the per-character loop off the common
+# case. Callers must run awk under LC_ALL=C so this is byte-oriented.
+JESC_AWK='
+function jesc(s,   i, c, o, n) {
+  gsub(/\\/, "\\\\", s)
+  gsub(/"/, "\\\"", s)
+  if (s !~ /[\001-\037]/) return s
+  if (!_ORD_INIT) { for (i = 1; i < 256; i++) _ORD[sprintf("%c", i)] = i; _ORD_INIT = 1 }
+  o = ""; n = length(s)
+  for (i = 1; i <= n; i++) {
+    c = substr(s, i, 1)
+    if      (c == "\t") o = o "\\t"
+    else if (c == "\n") o = o "\\n"
+    else if (c == "\r") o = o "\\r"
+    else if (c < " ")   o = o sprintf("\\u%04x", _ORD[c])
+    else                o = o c
+  }
+  return o
+}
+'
+
 resolve_date() {
   case "${1:-today}" in
     today|"")  date +%F ;;
@@ -101,7 +130,7 @@ report() {
   fi
   printf '%s' "$data" | LC_ALL=C awk -F'\t' -v D="$d" -v HOME_DIR="$HOME" -v JSON="$json" \
     -v C_HEAD="$C_HEAD" -v C_DIM="$C_DIM" -v C_KEY="$C_KEY" -v C_HOT="$C_HOT" \
-    -v C_RED="$C_RED" -v C_OK="$C_OK" -v C_SEC="$C_SEC" -v C_RST="$C_RST" '
+    -v C_RED="$C_RED" -v C_OK="$C_OK" -v C_SEC="$C_SEC" -v C_RST="$C_RST" "$JESC_AWK"'
     function dur(s,   d, h, m) {
       d = int(s / 86400); h = int((s % 86400) / 3600); m = int((s % 3600) / 60)
       if (d) return sprintf("%dd%02dh", d, h)
@@ -145,12 +174,7 @@ report() {
 
     # --json exists so an agent reads values instead of regexing a layout that
     # is free to change. Session labels, cwds and process names are arbitrary
-    # text, so everything user-derived goes through jesc().
-    function jesc(s) {
-      gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s)
-      gsub(/\t/, " ", s); gsub(/\n/, " ", s); gsub(/\r/, " ", s)
-      return s
-    }
+    # text, so everything user-derived goes through jesc() (defined in JESC_AWK).
     function emit_json(   i, key, first) {
       printf "{\"command\":\"report\",\"date\":\"%s\",\"cores\":%d,\"samples\":%d,\"interval_seconds\":%d,\"observed_seconds\":%d",
              jesc(D), ncpu, sysn, iv, covered
@@ -512,8 +536,7 @@ orphans() {
   # --json is read-only by construction: it prints and exits before any of the
   # confirmation or kill machinery below is reachable.
   if [ "$json" = "1" ]; then
-    LC_ALL=C awk -F'\t' -v MIN="$min" '
-      function jesc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); gsub(/\t/, " ", s); return s }
+    LC_ALL=C awk -F'\t' -v MIN="$min" "$JESC_AWK"'
       function closetree() { if (open) { printf "]}"; open = 0 } }
       BEGIN { printf "{\"command\":\"orphans\",\"min_minutes\":%d,\"trees\":[", MIN }
       $1 == "T" {
@@ -807,8 +830,7 @@ worktrees() {
   scan_worktrees "$days" > "$scan"
 
   if [ "$json" = "1" ]; then
-    LC_ALL=C awk -F'\t' -v D="$days" '
-      function jesc(s) { gsub(/\\/, "\\\\", s); gsub(/"/, "\\\"", s); gsub(/\t/, " ", s); return s }
+    LC_ALL=C awk -F'\t' -v D="$days" "$JESC_AWK"'
       BEGIN { printf "{\"command\":\"worktrees\",\"stale_after_days\":%d,\"worktrees\":[", D }
       {
         rm = ($1 == "STALE" || $1 == "PRUNABLE") ? "true" : "false"

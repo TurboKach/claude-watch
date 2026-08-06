@@ -32,6 +32,15 @@ esac
 SKILL_DIR="$HOME/.claude/skills"
 mkdir -p "$SKILL_DIR"
 for s in claude-watch claude-watch-reap; do
+  # `ln -sfn` onto a REAL directory does not replace it — it drops the link
+  # INSIDE it, and Claude Code then keeps loading the old copy while this script
+  # cheerfully reports success. Refuse rather than half-install.
+  if [ -d "$SKILL_DIR/$s" ] && [ ! -L "$SKILL_DIR/$s" ]; then
+    echo "warning: $SKILL_DIR/$s is a real directory, not a symlink — skipping."
+    echo "         Claude Code will keep loading that copy. Remove it and re-run:"
+    echo "           rm -rf $SKILL_DIR/$s && ./install.sh"
+    continue
+  fi
   ln -sfn "$REPO/skills/$s" "$SKILL_DIR/$s"
   echo "symlinked $SKILL_DIR/$s -> $REPO/skills/$s"
 done

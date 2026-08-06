@@ -42,13 +42,25 @@ for f in claude-watch claude-top install.sh tools/sample.sh tools/orphan-policy.
   bash -n "$REPO/$f" 2>/dev/null && ok "$f parses" || bad "$f parses"
 done
 
+# `status` exits 1 with no samples and `doctor` exits non-zero until launchd,
+# the data dir and the shell hook are installed. Both are correct behaviour, so
+# a fresh checkout must skip them rather than fail — otherwise the suite this
+# README advertises cannot pass in the state most people first run it in.
+installed=0
+[ -n "$(ls -A "${CLAUDE_WATCH_HOME:-$HOME/.claude-watch}/raw" 2>/dev/null)" ] && installed=1
+
 echo "commands exit clean"
 expect_exit 0 "report today"       "$CW" report today
 expect_exit 0 "report yesterday"   "$CW" report yesterday
-expect_exit 0 "status"             "$CW" status
 expect_exit 0 "orphans"            "$CW" orphans
 expect_exit 0 "worktrees"          "$CW" worktrees
-expect_exit 0 "doctor"             "$CW" doctor
+if [ "$installed" = 1 ]; then
+  expect_exit 0 "status"           "$CW" status
+  expect_exit 0 "doctor"           "$CW" doctor
+else
+  skp "status (no samples collected yet)"
+  skp "doctor (sampler not installed yet)"
+fi
 expect_exit 2 "unknown subcommand rejected"        "$CW" "report today"
 expect_exit 2 "unknown orphans option rejected"    "$CW" orphans --bogus
 expect_exit 2 "unknown worktrees option rejected"  "$CW" worktrees --bogus
@@ -65,9 +77,28 @@ expect_exit 2 "report rejects a quote in the date"   "$CW" report '2026-01-01"x'
 
 echo "--json is valid JSON"
 expect_json "report --json"     "$CW" report today
-expect_json "status --json"     "$CW" status
 expect_json "orphans --json"    "$CW" orphans
 expect_json "worktrees --json"  "$CW" worktrees
+# status exits 1 with no samples, and pipefail would fail the pipeline even
+# though the JSON it printed is perfectly valid.
+if [ "$installed" = 1 ]; then
+  expect_json "status --json"   "$CW" status
+else
+  skp "status --json (no samples collected yet)"
+fi
+# Control bytes are legal in argv and paths but illegal raw in JSON, so the
+# escaper must encode the whole sub-0x20 range, not just tab/newline/return.
+if [ "$have_python" = 1 ]; then
+  ctl=$(printf 'a\001b\033c')
+  if printf '%s' "$ctl" | LC_ALL=C awk "$(sed -n "/^JESC_AWK='$/,/^'$/p" "$REPO/claude-watch" | sed '1d;$d')"'
+        { printf "{\"v\":\"%s\"}\n", jesc($0) }' | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
+    ok "jesc escapes control characters"
+  else
+    bad "jesc escapes control characters"
+  fi
+else
+  skp "jesc control characters (no python3)"
+fi
 
 echo "destructive paths refuse without a terminal"
 # Only meaningful when there is something to destroy: with an empty list both
