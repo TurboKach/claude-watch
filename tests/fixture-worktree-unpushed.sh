@@ -21,6 +21,9 @@
 #   - still_removable() agrees with the listing: the sandbox worktree is actually
 #     removed. If the two tests ever drift, removal reports "changed since it was
 #     listed" for everything and this goes red.
+#   - the edge cases the common shape does not reach: a detached HEAD, a repo
+#     with no remote at all, and a commit published only via a remote that is
+#     not `origin`. Each gets its own sandbox at the bottom of this file.
 set -uo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")/.." && pwd)"
@@ -205,6 +208,134 @@ case "$merged_reason" in
     ;;
 esac
 
+
+# ======================================================= isolated edge cases ==
+# Everything above is the common shape: attached branches, exactly one `origin`.
+# The three cases below are the ones that shape does not reach. Each builds its
+# own repository AND scans with its own CLAUDE_WATCH_REPO_ROOTS, so no case can
+# see another's worktrees. They live under $TMP/cases, which is not itself a
+# repository, so repo_candidates never descended into them during the scan above
+# either — the assertions there are unaffected by anything added here.
+CASES="$TMP/cases"
+mkdir -p "$CASES" || exit 1
+
+cg() { local d=$1; shift; git -C "$d" "$@" >/dev/null 2>&1; }
+
+# <name> — builds $CASES/<name>/repo on `main` with one commit and no remote.
+newcase() {
+  local d="$CASES/$1/repo"
+  mkdir -p "$d" || return 1
+  git init -q "$d" >/dev/null 2>&1 || return 1
+  cg "$d" symbolic-ref HEAD refs/heads/main
+  printf 'base\n' > "$d/README.md"
+  cg "$d" add README.md
+  cg "$d" commit -m 'base'
+}
+
+# <name> — scans that sandbox alone and leaves the document in $JSON, so the
+# `field` helper above reads it unchanged.
+scan_case() {
+  JSON="$CASES/$1.json"
+  CLAUDE_WATCH_HOME="$TMP/watchhome" CLAUDE_WATCH_REPO_ROOTS="$CASES/$1" \
+    "$CW" worktrees --json > "$JSON" 2>/dev/null
+  python3 -m json.tool < "$JSON" >/dev/null 2>&1 && return 0
+  bad "$1: worktrees --json is valid JSON"
+  return 1
+}
+
+# (d) detached HEAD. `HEAD --not --remotes` asks about COMMITS, so it answers
+# for a detached worktree exactly as it does for an attached branch: what
+# decides the count is whether the commit HEAD sits on is reachable from a
+# remote-tracking ref, not whether a branch name happens to be attached. So a
+# detached worktree parked on a published commit is as safe as any other, and
+# one parked on an unpushed commit stays UNSAFE. Worth pinning because agent
+# tools do leave detached worktrees behind, and because a "no branch, no
+# upstream, assume nothing published" reading would pin every one of them
+# UNSAFE for ever — the exact bug this whole change fixed, by another door.
+echo "d. detached HEAD"
+DET="$CASES/detached/repo"
+newcase detached || bad "detached: sandbox built"
+git init -q --bare "$CASES/detached/origin.git" >/dev/null 2>&1
+cg "$DET" remote add origin "$CASES/detached/origin.git"
+cg "$DET" push -q origin main
+det_pushed=$(git -C "$DET" rev-parse HEAD 2>/dev/null)
+printf 'later\n' >> "$DET/README.md"
+cg "$DET" commit -am 'never pushed anywhere'
+det_ahead=$(git -C "$DET" rev-parse HEAD 2>/dev/null)
+cg "$DET" worktree add --detach "$DET/.claude/worktrees/det-pushed" "$det_pushed"
+cg "$DET" worktree add --detach "$DET/.claude/worktrees/det-ahead"  "$det_ahead"
+if scan_case detached; then
+  eq "a detached worktree is listed as detached" "(detached)" "$(field /worktrees/det-pushed branch)"
+  eq "detached on a published commit → unpushed 0" "0" "$(field /worktrees/det-pushed unpushed)"
+  eq "detached on an unpushed commit → unpushed 1" "1" "$(field /worktrees/det-ahead  unpushed)"
+  # Independent of the liveness sweep: unpushed > 0 is UNSAFE under every branch
+  # of the classification, so this one can be asserted rather than skipped.
+  eq "detached on an unpushed commit is not removable" "false" "$(field /worktrees/det-ahead removable)"
+fi
+
+# (e) no remotes at all. With nothing to exclude, `--not --remotes` excludes
+# nothing and the count is the ENTIRE history. That is the right answer, not an
+# artefact: a repository with no remote has published nothing, so every commit
+# in it exists only on this disk and the worktree must stay UNSAFE. The
+# alternative reading — "no remote to compare against, call it clean" — would
+# offer `--remove` a worktree holding the only copy of its work, which is the
+# one outcome this command must never produce. Pinned to the exact count so a
+# future rewrite cannot quietly turn it into 0.
+echo "e. no remotes configured"
+NRM="$CASES/noremote/repo"
+newcase noremote || bad "noremote: sandbox built"
+printf 'two\n'   >> "$NRM/README.md"; cg "$NRM" commit -am second
+printf 'three\n' >> "$NRM/README.md"; cg "$NRM" commit -am third
+cg "$NRM" branch feature-local main
+cg "$NRM" worktree add "$NRM/.claude/worktrees/local" feature-local
+[ -z "$(git -C "$NRM" remote 2>/dev/null)" ] \
+  && ok  "no remotes configured (premise)" \
+  || bad "no remotes configured (premise)"
+if scan_case noremote; then
+  eq "no remote → the whole history counts as unpushed" "3" "$(field /worktrees/local unpushed)"
+  eq "no remote → never removable"                  "false" "$(field /worktrees/local removable)"
+fi
+
+# (f) several remotes. This is the regression the reviewer named: an
+# implementation narrowed to `--remotes=origin` passes every assertion above —
+# they all use a single origin — while reporting work that was pushed to a
+# second remote as unpushed, pinning those worktrees UNSAFE for ever. Bare
+# `--remotes` means "any remote-tracking ref", and that is the property being
+# pinned. The second worktree, pushed nowhere, is here so the case cannot pass
+# by an implementation that simply returns 0.
+echo "f. a commit published only via a second remote"
+MUL="$CASES/multi/repo"
+newcase multi || bad "multi: sandbox built"
+git init -q --bare "$CASES/multi/origin.git" >/dev/null 2>&1
+git init -q --bare "$CASES/multi/backup.git" >/dev/null 2>&1
+cg "$MUL" remote add origin "$CASES/multi/origin.git"
+cg "$MUL" remote add backup "$CASES/multi/backup.git"
+cg "$MUL" push -q origin main
+cg "$MUL" checkout -b feature-backup main
+printf 'via backup\n' > "$MUL/backup.txt"
+cg "$MUL" add backup.txt
+cg "$MUL" commit -m 'published to the backup remote only'
+cg "$MUL" push -q backup feature-backup
+cg "$MUL" checkout -b feature-nowhere main
+printf 'nowhere\n' > "$MUL/nowhere.txt"
+cg "$MUL" add nowhere.txt
+cg "$MUL" commit -m 'published nowhere'
+cg "$MUL" checkout main
+cg "$MUL" worktree add "$MUL/.claude/worktrees/backedup" feature-backup
+cg "$MUL" worktree add "$MUL/.claude/worktrees/nowhere"  feature-nowhere
+# Premises. If push stopped updating remote-tracking refs, (f) would be testing
+# nothing at all, so both halves are asserted rather than assumed.
+git -C "$MUL" rev-parse --verify -q refs/remotes/backup/feature-backup >/dev/null \
+  && ok  "the commit reached the second remote (premise)" \
+  || bad "the commit reached the second remote (premise)"
+git -C "$MUL" rev-parse --verify -q refs/remotes/origin/feature-backup >/dev/null \
+  && bad "origin has never seen that commit (premise)" \
+  || ok  "origin has never seen that commit (premise)"
+if scan_case multi; then
+  eq "pushed to a NON-origin remote counts as published" "0" "$(field /worktrees/backedup unpushed)"
+  eq "pushed to no remote still counts as unpushed"      "1" "$(field /worktrees/nowhere  unpushed)"
+  eq "pushed to no remote is not removable"          "false" "$(field /worktrees/nowhere  removable)"
+fi
 
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ]
