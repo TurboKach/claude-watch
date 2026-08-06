@@ -322,10 +322,11 @@ F=$(frow leaks.worktrees)
 eq "tab in a worktree path: the prefix is never named" \
    "$(printf '%s' "$F" | grep -c '/Users/safe')" 0
 eq "  ... no command printed"        "$(field "$F" 14 | grep -c 'claude-watch-reap')" 0
-eq "  ... says it needs manual handling" "$(field "$F" 14 | grep -c 'path needs manual handling')" 1
+eq "  ... says the listing cannot be trusted" \
+   "$(field "$F" 14 | grep -c 'could not be trusted')" 1
 eq "  ... excluded from the reclaim total" "$(field "$F" 10)" 0
 eq "  ... domain is partial"         "$(field "$(srow)" 4)" partial
-eq "  ... reason recorded"           "$(field "$(srow)" 5)" cache_malformed
+eq "  ... reason recorded"           "$(field "$(srow)" 5)" scan_malformed
 
 # A newline in a path is worse: it arrives as two rows, neither of which has the
 # §3d shape. Both are counted and skipped. (A newline crafted to inject a whole
@@ -336,17 +337,50 @@ run "" "$(w_row STALE "$(printf '/Users/safe\nevil')" '' '' 4096)"
 eq "newline in a worktree path: no command" \
    "$(field "$(frow leaks.worktrees)" 14 | grep -c 'claude-watch-reap')" 0
 eq "  ... both halves counted unparsable" \
-   "$(field "$(frow leaks.worktrees)" 13 | grep -c '2 unparsable rows')" 1
+   "$(field "$(frow leaks.worktrees)" 12 | grep -c '2 unrepresentable rows')" 1
 
-# A good row beside a bad one still gets its command, and the total says it is
-# short. Silently dropping the bad row would make the reclaim figure a lie.
+# A good row beside a bad one gets NO command either, and no total. Once one
+# row is unrepresentable, the plausible row beside it may be the fabrication —
+# that is exactly how a newline injects one. Publishing the smaller total
+# instead would be a lie with a decimal point on it.
 run "" "$(w_row STALE /a/good '' '' 4096
           w_row STALE "$(printf '/a/b\tc')" '' '' 999999)"
 F=$(frow leaks.worktrees)
-eq "good row beside a bad one: command for the good one" \
-   "$(field "$F" 14 | grep -c "'/a/good'")" 1
-eq "  ... total excludes the bad row" "$(field "$F" 10)" 4096
-eq "  ... and says so"                "$(field "$F" 13 | grep -c '1 unparsable row excluded')" 1
+eq "good row beside a bad one: still no command" \
+   "$(field "$F" 14 | grep -c 'claude-watch-reap')" 0
+eq "  ... and the good path is not named"  "$(printf '%s' "$F" | grep -c '/a/good')" 0
+eq "  ... no reclaim total is published"   "$(field "$F" 10)" 0
+eq "  ... value is 0 too"                  "$(field "$F" 6)" 0
+eq "  ... share cannot be nonzero"         "$(field "$F" 5)" 0
+eq "  ... and the headline says why"       "$(field "$F" 12 | grep -c 'listing unusable')" 1
+
+# THE injection. A newline in a directory name splits one worktree across two
+# physical lines, and the tail can be crafted to present as a complete,
+# PLAUSIBLE nine-field STALE row naming a path the attacker chose. Field count
+# cannot catch that — the crafted row has nine fields. Two things do: the
+# content check rejects a row assembled out of a path fragment, and the
+# fail-closed rule means the malformed sibling alone kills every action in the
+# scan.
+inject=$(printf 'STALE\t/Users/turbokach/Dev/repo/.claude/worktrees/a\nSTALE\t/Users/turbokach/Dev/evil\t/repo\tagent/x\t99\t0\t0\t9999999\tclean\t/repo\tagent/x\t99\t0\t0\t4096\tclean\n')
+run "" "$inject"
+F=$(frow leaks.worktrees)
+eq "newline-injected plausible row: no action"  "$(field "$F" 14 | grep -c 'claude-watch-reap')" 0
+eq "  ... the injected path is never named"     "$(printf '%s' "$F" | grep -c '/Dev/evil')" 0
+eq "  ... contributes to no total"              "$(field "$F" 10)" 0
+eq "  ... and to no value"                      "$(field "$F" 6)" 0
+eq "  ... domain is partial, not complete"      "$(field "$(srow)" 4)" partial
+eq "  ... with scan_malformed"                  "$(field "$(srow)" 5)" scan_malformed
+eq "  ... and never warn on an untrusted total" "$(field "$F" 4)" info
+
+# The content gate on its own: a nine-field row whose status is a path fragment,
+# and one whose size column is not a number. Both are shapes a split path
+# produces and a real scan never does.
+run "" "$(printf 'usr/local/bin\t/a/wt\t/repo\tagent/x\t30\t0\t0\t4096\tclean\n')"
+eq "nine fields, bogus status -> unrepresentable" \
+   "$(field "$(frow leaks.worktrees)" 12 | grep -c 'listing unusable')" 1
+run "" "$(printf 'STALE\t/a/wt\t/repo\tagent/x\t30\t0\t0\tnot-a-number\tclean\n')"
+eq "nine fields, non-numeric size -> unrepresentable" \
+   "$(field "$(frow leaks.worktrees)" 12 | grep -c 'listing unusable')" 1
 
 # Same gate on the orphan side: a T row is 7 fields, and a name carrying a tab
 # shifts every number after it.
@@ -385,6 +419,71 @@ fi
 run "$(t_row 1 node 600 307200)" ""
 eq "orphan action points at the reap skill" \
    "$(printf '%s' "$(field "$(frow leaks.orphans)" 14)" | grep -c '/claude-watch-reap')" 1
+
+echo "scan_worktrees: unrepresentable paths at the source (upstream half)"
+
+# Downstream refusal is the second layer; this is the first. `scan_worktrees`
+# reads records with `IFS=<tab> read`, so a tab inside a real directory name
+# used to shift `path` to a PREFIX before any consumer saw the row — and `git
+# -C`, `du` and the removal offer then all acted on the wrong directory. This
+# builds that directory for real and asserts the scanner refuses to represent
+# it, rather than asserting it against a hand-written fixture that cannot prove
+# the shift ever happened.
+if ! command -v git >/dev/null 2>&1; then
+  skp "scan_worktrees unrepresentable-path handling (no git)"
+else
+  UP="$TMP/upstream"
+  mkdir -p "$UP/home" "$UP/empty"
+  : > "$UP/gitconfig-global"
+  (
+    # Hermetic: no user hooks, no template dir, no real HOME (the same isolation
+    # tests/fixture-worktree-unpushed.sh documents at length).
+    export HOME="$UP/home" \
+           GIT_CONFIG_GLOBAL="$UP/gitconfig-global" GIT_CONFIG_SYSTEM=/dev/null \
+           GIT_CONFIG_NOSYSTEM=1 GIT_TERMINAL_PROMPT=0 \
+           GIT_AUTHOR_NAME=t GIT_AUTHOR_EMAIL=t@t GIT_COMMITTER_NAME=t GIT_COMMITTER_EMAIL=t@t
+    R="$UP/roots/repo"
+    mkdir -p "$R" && cd "$R" || exit 1
+    git init -q . && git commit -q --allow-empty -m init
+    git -c core.hooksPath="$UP/empty" -c init.templateDir="$UP/empty" \
+        worktree add -q -b agent/tabbed "$R/.claude/worktrees/$(printf 'a\tb')" >/dev/null 2>&1
+    git -c core.hooksPath="$UP/empty" -c init.templateDir="$UP/empty" \
+        worktree add -q -b agent/gone "$R/.claude/worktrees/gone" >/dev/null 2>&1
+    rm -rf "$R/.claude/worktrees/gone"     # would be PRUNABLE on a clean scan
+    set -- --help
+    # shellcheck source=../claude-watch
+    . "$REPO/claude-watch" >/dev/null 2>&1
+    CLAUDE_WATCH_REPO_ROOTS="$UP/roots" scan_worktrees 7
+  ) > "$UP/out.tsv" 2>/dev/null
+
+  if [ ! -s "$UP/out.tsv" ]; then
+    skp "scan_worktrees unrepresentable-path sandbox (git worktree add refused the path)"
+  else
+    eq "tabbed path is reported unrepresentable" \
+       "$(grep -c 'worktree record is unrepresentable' "$UP/out.tsv")" 1
+    eq "  ... as UNSAFE, never removable" \
+       "$(LC_ALL=C awk -F'\t' '$9 ~ /record is unrepresentable/ { print $1 }' "$UP/out.tsv")" UNSAFE
+    eq "  ... every emitted row still has 9 fields" \
+       "$(LC_ALL=C awk -F'\t' 'NF != 9 { n++ } END { print n + 0 }' "$UP/out.tsv")" 0
+    eq "  ... no raw control byte survives into the row" \
+       "$(LC_ALL=C awk -F'\t' '$9 ~ /record is unrepresentable/ { print $2 }' "$UP/out.tsv" | LC_ALL=C grep -c '[[:cntrl:]]')" 0
+    # The taint rule: one unrepresentable record means a deleted worktree can no
+    # longer be offered as PRUNABLE, because a crafted newline presents its tail
+    # as exactly that — a plausible row for a path that does not exist.
+    eq "  ... and PRUNABLE is withheld for the tainted scan" \
+       "$(grep -c '^PRUNABLE' "$UP/out.tsv")" 0
+    eq "  ... the deleted worktree is still reported" \
+       "$(grep -c 'cannot be trusted' "$UP/out.tsv")" 1
+    # The scanner having sanitised at the source, the analyzer sees only
+    # well-formed UNSAFE rows: nothing removable, no finding, no command, and
+    # no unrepresentable rows left for it to fail closed on. Both layers agree.
+    W=$(leaks_agg_worktrees "$UP/out.tsv")
+    NOW_OUT=$(leaks_findings "" "$W")
+    eq "  ... analyzer sees nothing removable"  "$(nfrows)" 0
+    eq "  ... and emits no command at all"      "$(printf '%s' "$NOW_OUT" | grep -c 'claude-watch-reap')" 0
+    eq "  ... and no unparsable rows remain"    "$(printf '%s' "$W" | LC_ALL=C awk -F'\t' '{print $5}')" 0
+  fi
+fi
 
 echo "leaks: live shape (§3d)"
 

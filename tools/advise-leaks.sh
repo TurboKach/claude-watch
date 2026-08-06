@@ -137,9 +137,15 @@ leaks_agg_orphans() {   # <file> -> n \t total_rss_kb \t max_age_s \t top_rss_kb
 leaks_agg_worktrees() {   # <file> -> n \t reclaim_kb \t max_age_days \t top_kb \t unrep \t top_path
   LC_ALL=C awk -F'\t' '
     BEGIN { OFS = "\t" }
-    # A short row is as untrustworthy as a long one: a newline inside a path
-    # arrives as two rows, and the first of them still starts with STALE.
+    # Count is necessary and not sufficient. A newline inside a path splits one
+    # worktree across two physical lines, and the tail of a crafted directory
+    # name can present as a complete NINE-FIELD row — right count, wrong
+    # record. So the CONTENT is validated too: the status must be one of the
+    # five §3d words and every numeric column must actually be numeric. A row
+    # assembled out of a path fragment does not survive that.
     NF != 9 { unrep++; next }
+    $1 !~ /^(ACTIVE|UNSAFE|STALE|RECENT|PRUNABLE)$/ { unrep++; next }
+    $5 !~ /^[0-9]+$/ || $6 !~ /^[0-9]+$/ || $7 !~ /^[0-9]+$/ || $8 !~ /^[0-9]+$/ { unrep++; next }
     $1 == "STALE" || $1 == "PRUNABLE" {
       n++
       kb = $8 + 0; age = $5 + 0
@@ -240,30 +246,39 @@ leaks_findings() {
   fi
   [ "${w_unrep:-0}" -gt 0 ] && r_unrep=1
   if [ "${w_n:-0}" -gt 0 ] || [ "${w_unrep:-0}" -gt 0 ]; then
-    local wsev=info
-    [ "$w_reclaim" -ge $((warn_gib * 1048576)) ] && wsev=warn
-    # The action names a path, so both §3b layers apply: quote always, and print
-    # no command at all when the path leaves the safe charset. A row that could
-    # not even be split gets no command either — its path is not knowable from
-    # here, and naming the prefix would point at a real, different directory.
-    local action
-    if [ "${w_n:-0}" -eq 0 ]; then
-      action="$w_unrep worktree row$([ "$w_unrep" = 1 ] || printf 's') could not be parsed — path needs manual handling; run claude-watch worktrees to see them"
-    elif leaks_path_safe "$w_toppath"; then
-      action="run /claude-watch-reap and choose worktrees to remove them (largest: $(leaks_qq "$w_toppath"))"
+    local wsev=info action headline detail
+    local w_value=$w_reclaim w_share
+    if [ "${w_unrep:-0}" -gt 0 ]; then
+      # FAIL CLOSED, the whole domain. An injected record always arrives beside
+      # the malformed fragment it was split from, so once one row is
+      # unrepresentable ANY row in this scan may be a fabrication — including a
+      # perfectly plausible one. There is no honest number to publish and no
+      # path safe to name, so this finding reports the corruption and nothing
+      # else: no total, no reclaim figure, no command. Reporting a smaller
+      # total instead would be a lie with a decimal point on it.
+      w_value=0
+      w_share=0
+      action="the worktree listing could not be trusted — run claude-watch worktrees and check it by hand"
+      headline="worktree listing unusable: $w_unrep unrepresentable row$([ "$w_unrep" = 1 ] || printf 's')"
+      detail="$w_n row$([ "$w_n" = 1 ] || printf 's') parsed, but a tab or newline in a path can split one worktree into two rows, so no reclaim total and no removal target can be trusted from this scan"
     else
-      action="$(leaks_clean "$w_toppath") — path needs manual handling"
+      [ "$w_reclaim" -ge $((warn_gib * 1048576)) ] && wsev=warn
+      w_share=$(leaks_share "$w_reclaim" "${CW_VOLUME_TOTAL_KB-}")
+      [ "$w_share" = 0 ] && [ "$w_reclaim" -gt 0 ] && r_vol=1
+      # The action names a path, so both §3b layers apply: quote always, and
+      # print no command at all when the path leaves the safe charset.
+      if leaks_path_safe "$w_toppath"; then
+        action="run /claude-watch-reap and choose worktrees to remove them (largest: $(leaks_qq "$w_toppath"))"
+      else
+        action="$(leaks_clean "$w_toppath") — path needs manual handling"
+      fi
+      headline="$w_n removable agent worktree$([ "$w_n" = 1 ] || printf 's'), $(leaks_hmem "$w_reclaim") reclaimable"
+      detail="largest $(leaks_hmem "$w_topkb"), oldest ${w_maxage}d; warns at ${warn_gib} GiB reclaimable"
     fi
-    local w_share; w_share=$(leaks_share "$w_reclaim" "${CW_VOLUME_TOTAL_KB-}")
-    [ "$w_share" = 0 ] && [ "$w_reclaim" -gt 0 ] && r_vol=1
-    local w_extra=
-    [ "${w_unrep:-0}" -gt 0 ] && w_extra="; $w_unrep unparsable row$([ "$w_unrep" = 1 ] || printf 's') excluded from the total"
     rows+=("$(printf '%s\t%s\tleaks.worktrees\tF\tleaks\tleaks.worktrees\t%s\t%s\t%s\tkb\t%s\tCLAUDE_WATCH_LEAKS_WORKTREE_WARN_GIB\t%s\tconfirmed\t%s\t%s\t%s' \
       "$(leaks_rank "$wsev")" "$w_share" \
-      "$wsev" "$w_share" "$w_reclaim" "$((warn_gib * 1048576))" "$w_reclaim" \
-      "$(leaks_clean "$w_n removable agent worktree$([ "$w_n" = 1 ] || printf 's'), $(leaks_hmem "$w_reclaim") reclaimable")" \
-      "$(leaks_clean "largest $(leaks_hmem "$w_topkb"), oldest ${w_maxage}d; warns at ${warn_gib} GiB reclaimable$w_extra")" \
-      "$(leaks_clean "$action")")")
+      "$wsev" "$w_share" "$w_value" "$((warn_gib * 1048576))" "$w_value" \
+      "$(leaks_clean "$headline")" "$(leaks_clean "$detail")" "$(leaks_clean "$action")")")
     [ "$(leaks_rank "$wsev")" -gt "$(leaks_rank "$worst")" ] && worst=$wsev
   fi
 
@@ -275,7 +290,11 @@ leaks_findings() {
     # first is a fixture that flakes.
     [ "$r_mem"   = 1 ] && reasons="${reasons:+$reasons,}no_samples"
     [ "$r_vol"   = 1 ] && reasons="${reasons:+$reasons,}cache_missing"
-    [ "$r_unrep" = 1 ] && reasons="${reasons:+$reasons,}cache_malformed"
+    # scan_malformed is NOT in §3e's enum today: these rows come from a
+    # transient live scan, and cache_malformed ("the cache exists but does not
+    # parse") would send a consumer looking for a cache file that is fine. The
+    # enum needs this value added; U2's emitter and U6's SKILL.md carry it.
+    [ "$r_unrep" = 1 ] && reasons="${reasons:+$reasons,}scan_malformed"
     [ "$r_scan"  = 1 ] && reasons="${reasons:+$reasons,}scan_permission_denied"
     # One sentence, worst cause first.
     if [ "$o_ok" = 0 ]; then
@@ -283,7 +302,7 @@ leaks_findings() {
     elif [ "$w_ok" = 0 ]; then
       remedy='the worktree scan could not run; run claude-watch worktrees directly to see the error'
     elif [ "$r_unrep" = 1 ]; then
-      remedy='some scan rows could not be parsed and were skipped; run claude-watch orphans and claude-watch worktrees to see them'
+      remedy='some scan rows could not be parsed, so no removal target is trustworthy; run claude-watch orphans and claude-watch worktrees and check them by hand'
     else
       remedy='no volume total or memory size is recorded yet, so shares are reported as 0 rather than computed; severity still comes from the absolute thresholds'
     fi
@@ -301,7 +320,10 @@ leaks_findings() {
   else
     local parts=
     [ "${o_n:-0}" -gt 0 ] && parts="$o_n leaked process tree$([ "$o_n" = 1 ] || printf 's') ($(leaks_hmem "$o_total"))"
-    if [ "${w_n:-0}" -gt 0 ]; then
+    if [ "${w_unrep:-0}" -gt 0 ]; then
+      [ -n "$parts" ] && parts="$parts; "
+      parts="${parts}the worktree listing could not be trusted ($w_unrep unrepresentable row$([ "$w_unrep" = 1 ] || printf 's'))"
+    elif [ "${w_n:-0}" -gt 0 ]; then
       [ -n "$parts" ] && parts="$parts; "
       parts="$parts$w_n removable worktree$([ "$w_n" = 1 ] || printf 's') ($(leaks_hmem "$w_reclaim") reclaimable)"
     fi
