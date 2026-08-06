@@ -358,6 +358,10 @@ fmt_mem() {
 }
 term_width() { local c; c=$(tput cols 2>/dev/null); [ -n "$c" ] && [ "$c" -gt 40 ] 2>/dev/null && printf '%s' "$c" || printf '100'; }
 
+# awk coerces a non-numeric -v to 0, which would silently turn an age floor of
+# "--min typo" into "--min 0" and hand every match to the kill path. Reject it.
+is_uint() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+
 # A live ps scan, never the stored samples. Orphan rows carry no pid at all
 # (epoch, orphan, name, cores, rss, secs), and even if they did, a pid recorded
 # minutes ago may since have been recycled onto something completely unrelated.
@@ -468,12 +472,16 @@ orphans() {
       --kill)     do_kill=1 ;;
       --yes|-y)   assume_yes=1; do_kill=1 ;;
       --json)     json=1 ;;
-      --min)      shift; min="${1:-$min}" ;;
+      --min)      shift; min="${1:-}" ;;
       --min=*)    min="${1#--min=}" ;;
       *) printf 'claude-watch orphans: unknown option %s\n' "$1" >&2; return 2 ;;
     esac
     shift
   done
+  if ! is_uint "$min"; then
+    printf 'claude-watch orphans: --min needs a non-negative integer (got "%s")\n' "$min" >&2
+    return 2
+  fi
   if [ -z "${ORPHAN_MATCH_RE:-}" ]; then
     printf '%serror:%s cannot read %s/tools/orphan-policy.sh\n' "$C_RED" "$C_RST" "$REPO_DIR" >&2
     return 1
@@ -629,9 +637,21 @@ scan_worktrees() {
         list_repo_worktrees "$d"
       done
     done
+    # Conductor workspaces are normally reached through their owning repo's
+    # worktree list, which only works when that repo sits under a scanned root.
+    # Enumerate them directly too, so a workspace whose repo lives elsewhere is
+    # still discoverable rather than silently invisible. Only as part of the
+    # DEFAULT roots: an explicit CLAUDE_WATCH_REPO_ROOTS must stay authoritative,
+    # or the setting cannot scope a run (and tests cannot isolate one).
+    if [ -z "${CLAUDE_WATCH_REPO_ROOTS:-}" ]; then
+      for d in "$HOME"/conductor/workspaces/*/*; do
+        [ -e "$d/.git" ] || continue
+        list_repo_worktrees "$d"
+      done
+    fi
   } | sort -u -t"$(printf '\t')" -k2,2 | while IFS="$(printf '\t')" read -r main path branch locked; do
     is_agent_worktree "$path" || continue
-    local age dirty unpushed size ct st why
+    local age dirty unpushed size ct st why hasup
     if [ ! -d "$path" ]; then
       printf 'PRUNABLE\t%s\t%s\t%s\t0\t0\t0\t0\tdirectory no longer exists\n' "$path" "$main" "$branch"
       continue
@@ -640,8 +660,18 @@ scan_worktrees() {
     [ -n "$ct" ] || ct=0
     age=$(( (now - ct) / 86400 ))
     dirty=$(git -C "$path" status --porcelain 2>/dev/null | grep -c . || true)
-    unpushed=$(git -C "$path" log --oneline '@{u}..' 2>/dev/null | grep -c . || true)
     size=$(du -sk "$path" 2>/dev/null | cut -f1); [ -n "$size" ] || size=0
+
+    # A branch with no upstream has NOTHING published, so `git log @{u}..` fails
+    # and a naive count reads 0 — "nothing unpushed" exactly when everything is.
+    # Ask about the upstream first and treat its absence as unpublished.
+    if git -C "$path" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
+      hasup=yes
+      unpushed=$(git -C "$path" log --oneline '@{u}..' 2>/dev/null | grep -c . || true)
+    else
+      hasup=no
+      unpushed=$(git -C "$path" log --oneline 2>/dev/null | grep -c . || true)
+    fi
 
     # Liveness first. An agent worktree in active use looks exactly like a stale
     # one on disk — git's own lock flag and a fresh commit are what tell them
@@ -649,15 +679,41 @@ scan_worktrees() {
     if   [ "$locked" = "1" ];                 then st=ACTIVE;   why="locked by the tool using it"
     elif [ $(( now - ct )) -lt 86400 ];       then st=ACTIVE;   why="committed to in the last 24h"
     elif session_cwd_under "$path";           then st=ACTIVE;   why="a live session is sitting in it"
-    elif [ "${dirty:-0}" -gt 0 ] || [ "${unpushed:-0}" -gt 0 ]; then
-      st=UNSAFE
-      why="$(printf '%s uncommitted, %s unpushed' "${dirty:-0}" "${unpushed:-0}")"
+    elif [ "${dirty:-0}" -gt 0 ]; then
+      st=UNSAFE; why="$(printf '%s uncommitted' "${dirty:-0}")"
+    elif [ "$hasup" = "no" ]; then
+      st=UNSAFE; why="no upstream — nothing published (branch survives removal)"
+    elif [ "${unpushed:-0}" -gt 0 ]; then
+      st=UNSAFE; why="$(printf '%s unpushed' "${unpushed:-0}")"
     elif [ "$age" -ge "$days" ];              then st=STALE;    why="clean, ${age}d old"
     else                                            st=RECENT;  why="clean but only ${age}d old"
     fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$st" "$path" "$main" "$branch" "$age" "${dirty:-0}" "${unpushed:-0}" "$size" "$why"
   done
+}
+
+# Re-run the whole safety classification for ONE worktree. Called immediately
+# before removal, because the listing can be minutes old by the time an answer
+# arrives and an agent may have claimed the worktree in between. `git worktree
+# remove` refuses on local modifications but not on a live cwd, so the liveness
+# half is ours to repeat — the same discipline the orphan killer applies to pids.
+still_removable() {
+  local path=$1 ct locked
+  [ -d "$path" ] || return 0                        # already gone; prune handles it
+  [ "$(git -C "$path" status --porcelain 2>/dev/null | grep -c . || true)" -eq 0 ] || return 1
+  if git -C "$path" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
+    [ "$(git -C "$path" log --oneline '@{u}..' 2>/dev/null | grep -c . || true)" -eq 0 ] || return 1
+  else
+    return 1                                        # no upstream: nothing published
+  fi
+  ct=$(git -C "$path" log -1 --format=%ct 2>/dev/null || printf '0')
+  [ $(( $(date +%s) - ${ct:-0} )) -ge 86400 ] || return 1
+  session_cwd_under "$path" && return 1
+  locked=$(list_repo_worktrees "$path" 2>/dev/null \
+           | LC_ALL=C awk -F'\t' -v p="$path" '$2 == p { print $4 }' | head -n1)
+  [ "${locked:-0}" = "1" ] && return 1
+  return 0
 }
 
 # The sampler already caches the cwd of every live claude session, so this costs
@@ -679,12 +735,16 @@ worktrees() {
       --remove)   do_remove=1 ;;
       --yes|-y)   assume_yes=1; do_remove=1 ;;
       --json)     json=1 ;;
-      --days)     shift; days="${1:-$days}" ;;
+      --days)     shift; days="${1:-}" ;;
       --days=*)   days="${1#--days=}" ;;
       *) printf 'claude-watch worktrees: unknown option %s\n' "$1" >&2; return 2 ;;
     esac
     shift
   done
+  if ! is_uint "$days"; then
+    printf 'claude-watch worktrees: --days needs a non-negative integer (got "%s")\n' "$days" >&2
+    return 2
+  fi
 
   local scan tab; tab=$(printf '\t')
   scan=$(mktemp) || return 1
@@ -715,7 +775,8 @@ worktrees() {
   printf '%sAGENT WORKTREES%s %s(.claude/worktrees and conductor workspaces; your own are not listed)%s\n\n' \
     "$C_SEC" "$C_RST" "$C_DIM" "$C_RST"
 
-  local st path main branch age dirty unpushed size why col mark i=0 reclaim=0 targets=""
+  local st path main branch age dirty unpushed size why col mark i=0 reclaim=0 targets
+  targets=$(mktemp) || { rm -f "$scan"; return 1; }
   while IFS="$tab" read -r st path main branch age dirty unpushed size why; do
     case "$st" in
       ACTIVE)   col=$C_OK;  mark="●" ;;
@@ -725,7 +786,7 @@ worktrees() {
       *)        col=$C_DIM; mark="·" ;;
     esac
     if [ "$st" = "STALE" ] || [ "$st" = "PRUNABLE" ]; then
-      i=$((i + 1)); targets="$targets $path"; reclaim=$((reclaim + size))
+      i=$((i + 1)); printf '%s\n' "$path" >> "$targets"; reclaim=$((reclaim + size))
       printf '  %s[%d]%s ' "$C_SEC" "$i" "$C_RST"
     else
       printf '      '
@@ -736,14 +797,14 @@ worktrees() {
 
   if [ "$i" -eq 0 ]; then
     printf '\n  %snothing stale to remove%s\n' "$C_DIM" "$C_RST"
-    rm -f "$scan"; return 0
+    rm -f "$scan" "$targets"; return 0
   fi
   printf '\n  %s%d removable · %s reclaimable%s\n' "$C_DIM" "$i" "$(fmt_mem "$reclaim")" "$C_RST"
 
   if [ "$do_remove" -eq 0 ]; then
     printf '\n  %srun%s claude-watch worktrees --remove %sto reap the stale ones%s\n' \
       "$C_DIM" "$C_RST" "$C_DIM" "$C_RST"
-    rm -f "$scan"; return 0
+    rm -f "$scan" "$targets"; return 0
   fi
 
   # ACTIVE and UNSAFE are never in the removable set at all, so "all" can never
@@ -752,23 +813,28 @@ worktrees() {
   if [ "$assume_yes" -eq 0 ]; then
     if [ ! -t 0 ]; then
       printf '\n%serror:%s no terminal to confirm on — pass --yes to remove without prompting\n' "$C_RED" "$C_RST" >&2
-      rm -f "$scan"; return 1
+      rm -f "$scan" "$targets"; return 1
     fi
     printf '\nremove all %d stale worktree%s? [Y/n/s] ' "$i" "$([ "$i" -eq 1 ] || printf 's')"
     if ! read -r ans; then
       printf '\n%saborted — stdin closed before an answer, nothing was removed%s\n' "$C_DIM" "$C_RST"
-      rm -f "$scan"; return 1
+      rm -f "$scan" "$targets"; return 1
     fi
     case "$ans" in
       ""|y|Y|yes|YES) mode="all" ;;
       s|S)            mode="select" ;;
-      *)              printf '%saborted — nothing was removed%s\n' "$C_DIM" "$C_RST"; rm -f "$scan"; return 0 ;;
+      *)              printf '%saborted — nothing was removed%s\n' "$C_DIM" "$C_RST"; rm -f "$scan" "$targets"; return 0 ;;
     esac
   fi
 
   printf '\n'
   i=0
-  for path in $targets; do
+  # Targets are read on fd 3, not stdin: the confirmation prompt below reads
+  # stdin, and a path list piped into the loop would be eaten by it. Reading a
+  # line at a time also keeps paths containing spaces intact, which splitting an
+  # accumulated string on IFS would not.
+  while IFS= read -r path <&3; do
+    [ -n "$path" ] || continue
     i=$((i + 1))
     main=$(grep -F "$tab$path$tab" "$scan" | cut -f3 | head -n1)
     if [ "$mode" = "select" ]; then
@@ -783,6 +849,15 @@ worktrees() {
     else
       printf '  [%d] %s\n' "$i" "$(printf '%s' "$path" | sed "s|^$HOME|~|")"
     fi
+    # Re-check safety immediately before removing. The scan may be minutes old by
+    # the time an answer arrives, and an agent can claim a worktree in that
+    # window. git refuses on local modifications but not on a live cwd, so the
+    # liveness half of the check is ours to repeat — the same discipline the
+    # orphan killer applies to pids.
+    if ! still_removable "$path"; then
+      printf '    %s✗ changed since it was listed — skipping%s\n' "$C_RED" "$C_RST"
+      continue
+    fi
     # git worktree remove, never rm -rf: git re-checks for local modifications
     # and refuses, which is a second independent guard behind our own.
     if git -C "$main" worktree remove "$path" 2>/dev/null; then
@@ -795,8 +870,8 @@ worktrees() {
         printf '    %s✓ pruned%s\n' "$C_OK" "$C_RST"
       fi
     fi
-  done
-  rm -f "$scan"
+  done 3< "$targets"
+  rm -f "$scan" "$targets"
 
   # Branches left behind by removed worktrees are reported, never deleted:
   # a branch is cheap to keep and the only copy of that work if it never merged.

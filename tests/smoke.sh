@@ -52,6 +52,12 @@ expect_exit 0 "doctor"             "$CW" doctor
 expect_exit 2 "unknown subcommand rejected"        "$CW" "report today"
 expect_exit 2 "unknown orphans option rejected"    "$CW" orphans --bogus
 expect_exit 2 "unknown worktrees option rejected"  "$CW" worktrees --bogus
+# awk coerces a non-numeric -v to 0, which would silently drop the age floor and
+# hand every match to --kill. These must be refused before the scan runs.
+expect_exit 2 "orphans --min rejects non-numeric"   "$CW" orphans --kill --yes --min nope
+expect_exit 2 "orphans --min rejects empty"         "$CW" orphans --min
+expect_exit 2 "worktrees --days rejects non-numeric" "$CW" worktrees --remove --yes --days xyz
+expect_exit 2 "worktrees --days rejects empty"       "$CW" worktrees --days
 
 echo "--json is valid JSON"
 expect_json "report --json"     "$CW" report today
