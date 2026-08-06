@@ -549,13 +549,21 @@ kill_tree() {
   # SIGSTOP first so the tree cannot fork out from under the enumeration, then
   # re-enumerate to catch anything created before the stop landed. SIGTERM is
   # paired with SIGCONT because a stopped process cannot act on TERM.
-  for pid in $pids; do kill -STOP "$pid" 2>/dev/null; done
-  pids=$(live_descendants "$root")
-  for pid in $pids; do kill -STOP "$pid" 2>/dev/null; done
-  pids=$(live_descendants "$root")
+  # Freeze, then re-enumerate, until membership stops changing: a fork can land
+  # between an enumeration and the STOP that was meant to prevent it.
+  local stopped="" prev="" pass=0
+  while [ "$pass" -lt 4 ]; do
+    for pid in $pids; do kill -STOP "$pid" 2>/dev/null; done
+    stopped="$stopped $pids"
+    prev=$(printf '%s\n' $pids | sort -u | tr '\n' ' ')
+    pids=$(live_descendants "$root")
+    [ "$(printf '%s\n' $pids | sort -u | tr '\n' ' ')" = "$prev" ] && break
+    pass=$((pass + 1))
+  done
   [ -n "$pids" ] || { printf '  %salready gone%s\n' "$C_DIM" "$C_RST"; return 0; }
 
-  for pid in $pids; do kill -TERM "$pid" 2>/dev/null; kill -CONT "$pid" 2>/dev/null; done
+  for pid in $pids; do kill -TERM "$pid" 2>/dev/null; done
+  for pid in $pids; do kill -CONT "$pid" 2>/dev/null; done
   waited=0
   while [ "$waited" -lt 30 ]; do
     still=0
@@ -563,14 +571,31 @@ kill_tree() {
     [ "$still" -eq 0 ] && break
     sleep 0.1; waited=$((waited + 1))
   done
-  for pid in $pids; do
-    if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null; fi
+
+  # The force pass covers three sets, because each can contain a pid the others
+  # do not:
+  #   - the tree as it stands NOW: a process that traps SIGTERM can fork the
+  #     moment SIGCONT reaches it, and that child is in none of the earlier lists
+  #   - the list we just signalled
+  #   - everything we ever stopped: if its parent died it was reparented to
+  #     launchd and left the tree, so it would never be re-enumerated and would
+  #     stay SUSPENDED for ever while we reported success
+  # CONT before KILL so nothing is left stopped, even on the failure path.
+  local final
+  final=$(printf '%s\n' $(live_descendants "$root") $pids $stopped | sort -u)
+  for pid in $final; do
+    if kill -0 "$pid" 2>/dev/null; then
+      kill -CONT "$pid" 2>/dev/null
+      kill -KILL "$pid" 2>/dev/null
+    fi
   done
   sleep 0.2
   still=0
-  for pid in $pids; do kill -0 "$pid" 2>/dev/null && still=1; done
+  for pid in $final; do
+    if kill -0 "$pid" 2>/dev/null; then still=1; kill -CONT "$pid" 2>/dev/null; fi
+  done
   if [ "$still" -eq 1 ]; then
-    printf '  %s✗ some processes survived SIGKILL%s\n' "$C_RED" "$C_RST"
+    printf '  %s✗ some processes survived SIGKILL (left running, not suspended)%s\n' "$C_RED" "$C_RST"
     return 1
   fi
   printf '  %s✓ reaped%s %s reclaimed\n' "$C_OK" "$C_RST" "$(fmt_mem "$freed")"
