@@ -81,10 +81,45 @@ An integration build of all five branches merged cleanly and passed **64/0/1**;
 non-finite numbers, all refusals exit 2. Four issues that only appeared by
 running it:
 
-1. **It offers zero removal commands.** `0 confirmed, 20 likely, 0 unverified` on
-   this machine — the safety gate is tight enough that the feature has no payload.
-   The headline value ("here is the line to reclaim 25 GiB") never fires. Needs a
-   product decision on the confidence gate, not a code fix.
+1. **It offered zero removal commands — this is a code fix, not a product
+   decision.** The scan was always right; the verdicts were destroyed at print
+   time. A fresh `disk --refresh` writes a cache with 24 confirmed, 16 likely,
+   2 unverified rows (17 of the confirmed in the published `rebuildable` group),
+   but the renderer reported `0 confirmed`. Three compounding suppressors in
+   `tools/advise-disk.sh`, all in the print-time path: (a) `DISK_PROBE_SECONDS=2`
+   was a *total* wall-clock budget spent walking rows in cache order, so it was
+   burned on `node_modules` rows that can never print (below the 2% line) and
+   starved the `rebuildable` rows that would have — everything past the budget
+   silently downgraded to `likely`; (b) `DISK_PROBE_ENTRIES=50000` failed the
+   largest trees by construction (`~/Dev/hr-breaker/.venv`, 53,491 entries, the
+   largest confirmed rebuildable directory here, hit the cap); (c)
+   `DISK_ACTION_MAX=3` shows only the three largest by size, and the three
+   largest rebuildable entries were `likely`, so even with (a) and (b) fixed the
+   real commands stayed hidden behind `+ N more`. Controlled experiment:
+   changing only `DISK_PROBE_SECONDS` from 2 to 60 flipped the output from
+   `0 confirmed, 20 likely` to `16 confirmed, 4 likely`. Along the way, three
+   independent-review rounds found and fixed three promote-on-ambiguity defects
+   in `disk_probe_idle` that each authorised `rm -rf` on a directory not fully
+   inspected: the recorded P1 where the recursive idle probe failed open on
+   traversal errors (find's stderr discarded, exit status lost in the pipeline);
+   completion proved by an in-band newline sentinel, forgeable because paths may
+   contain newlines; and the hot signal via `-exec printf`, where a failed child
+   makes the AND predicate false so `-quit` never fires and a hot tree reads
+   idle. Current state uses NUL-framed records and a find primitive with no
+   `-exec`. Fixed on branch `worktree-agent-aad40a9660cdc5d95`
+   (`.claude/worktrees/agent-aad40a9660cdc5d95`), commits `ed5934b..cf59cff`,
+   **not merged**; its plan is on that branch at
+   `docs/prompts/advise-confidence-fix-plan.md` (does not exist on `main`).
+   After the fix, this machine reports `17 confirmed, 3 likely` and three
+   commands totalling ~3.4 GiB — not the full 25 GiB: the two biggest
+   rebuildable trees (`buzz/target` 11.0 GiB, `src-tauri/target` 6.5 GiB) are
+   genuinely `likely` (in active use) and must stay that way.
+   `tests/fixture-disk.sh` went from 151 to 184 assertions; the original 151
+   all passed while the bug was live because `probe_cache` wrote a cache with
+   exactly one group and one dir row, confidence counters were asserted only
+   through the pure half (`disk_findings`) and never through `disk_body`, both
+   budget assertions tested only the fail-closed direction, and no fixture
+   created an unreadable subtree.
 2. `~/Downloads` renders as *"in active use, rebuilt on next build"* — hardcoded
    `likely` boilerplate ignoring group kind. The group's own line correctly says
    "not rebuildable: these are files you chose to keep".
