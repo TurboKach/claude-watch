@@ -392,6 +392,28 @@ eq "duplicate epoch rows -> malformed" "$(S 5)" cache_malformed
 # tests is about the filesystem. Each case below is built so that exactly ONE
 # reason to downgrade is present: the tree is otherwise cold and the marker is
 # otherwise there, so a passing assertion pins that specific reason.
+#
+# WHY 151 ASSERTIONS ALL PASSED WHILE THE GATE PRINTED NOTHING. The live tool
+# rendered `0 confirmed, 20 likely` over a cache holding 24 confirmed rows, and
+# nothing here noticed. Four reasons, each closed by tests added below:
+#
+#  1. probe_cache writes a cache with exactly ONE group and exactly ONE dir row.
+#     No sub-threshold group ever competed for the probe budget, the 3-item
+#     action cap was never reached, and with one row confidence-vs-size ordering
+#     is unobservable. Every filesystem-touching assertion goes through it.
+#     -> the sub-threshold-group filter case and the seam case below.
+#  2. The confidence counters are asserted only through pure_body, which calls
+#     disk_findings directly and never runs disk_body. The two halves are each
+#     tested in isolation and the bug lived precisely in the seam — the cost of
+#     the pure/impure split, worth paying only if something crosses it.
+#     -> the seam case below is the one assertion whose left side is the cache
+#        and whose right side is the rendered text.
+#  3. Both budget assertions test the CLOSED direction only: force the bound to
+#     0 or 1, assert no command. A gate that is closed too often passes every
+#     fail-closed test ever written.
+#     -> the 1s-budget and entry-cap-boundary cases assert the open direction.
+#  4. No fixture ever created an unreadable subtree, so find's discarded exit
+#     status was never exercised.  -> the permfail case.
 echo "revalidation before printing a command"
 OLD=$(date -v-60d +%Y%m%d%H%M.%S)
 # TMP is under /var, which is a symlink to /private/var on macOS, so the
@@ -566,6 +588,32 @@ good_cache "$TMP/parityout.tsv" "group	rebuildable	8845750	1	0
 dir	$TMP/rb1/target	8845750	rebuildable	confirmed"
 from_cache "$TMP/parityout.tsv"
 eq "one KB below: no finding at all"   "$(nfind)" 1
+
+# THE SEAM. The whole file's missing assertion class is "the cache says
+# confirmed, the render says likely": every other case here either builds the
+# cache and stops at disk_body, or hand-writes fact rows and starts at
+# disk_findings. This one runs a realistic multi-group cache — three cold
+# confirmed rows in a sub-2% group listed FIRST, five in the published one —
+# all the way through advise_disk and reads the rendered text.
+mk_target "$TMP/rb3"; mk_target "$TMP/rb4"; mk_target "$TMP/rb5"
+good_cache "$TMP/seam.tsv" "group	node_modules	8845750	3	0
+dir	$TMP/nm1/target	3000000	node_modules	confirmed
+dir	$TMP/nm2/target	2000000	node_modules	confirmed
+dir	$TMP/nm3/target	1000000	node_modules	confirmed
+group	rebuildable	26738688	5	0
+dir	$TMP/rb1/target	9000000	rebuildable	confirmed
+dir	$TMP/rb2/target	8000000	rebuildable	confirmed
+dir	$TMP/rb3/target	7000000	rebuildable	confirmed
+dir	$TMP/rb4/target	6000000	rebuildable	confirmed
+dir	$TMP/rb5/target	5000000	rebuildable	confirmed"
+from_cache "$TMP/seam.tsv"
+A=$(F disk.reclaimable.rebuildable 14)
+has "seam: the render agrees with the cache" "$(F disk.reclaimable.rebuildable 13)" \
+  "Confidence: 5 confirmed, 0 likely, 0 unverified"
+eq "  and DISK_ACTION_MAX commands print" \
+  "$(printf '%s\n' "$A" | grep -o -- 'rm -rf' | grep -c '')" "$DISK_ACTION_MAX"
+has "  largest first inside the tier"  "$(first_item "$A")" "rm -rf '$TMPR/rb1/target'"
+has "  the remainder is counted"       "$A" "+ 2 more"
 
 # The 14d boundary, pinned without a wall-clock race. `find -newer` is strict,
 # so an entry sitting exactly on the stamp reads as idle — which is precisely
