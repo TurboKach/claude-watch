@@ -11,21 +11,42 @@ STATE="$DATA/state"
 KEEP_RAW_DAYS="${CLAUDE_WATCH_KEEP_DAYS:-30}"
 GZIP_AFTER_DAYS=2
 
+# install.sh symlinks this script onto PATH, so walk the link chain to find our
+# own tools/ directory. Sourcing is best-effort: only `orphans` needs the policy,
+# and a missing file must not break reporting.
+SELF="${BASH_SOURCE[0]:-$0}"
+while [ -L "$SELF" ]; do
+  _link=$(readlink "$SELF")
+  case "$_link" in /*) SELF="$_link" ;; *) SELF="$(dirname "$SELF")/$_link" ;; esac
+done
+REPO_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+# shellcheck source=tools/orphan-policy.sh
+. "$REPO_DIR/tools/orphan-policy.sh" 2>/dev/null || true
+
 usage() {
   cat <<'EOF'
 claude-watch — what actually used this machine today
 
-usage: claude-watch [report [DATE]] | status | hook | doctor
+usage: claude-watch [report [DATE]] | orphans | worktrees | status | hook | doctor
 
   report [DATE]   digest for DATE: today (default), yesterday, or YYYY-MM-DD
+  orphans         list leaked dev process trees; --kill to reap them
+  worktrees       list stale agent-created git worktrees; --remove to reap them
   status          is sampling alive, how recent, how much data
   hook            print yesterday's digest once on the first shell of a new day
                   (add to .zshrc; returns in ~2ms on every other shell)
   doctor          check the install end to end
 
+  orphans [--kill] [--yes] [--min MINUTES]
+  worktrees [--remove] [--yes] [--days DAYS]
+      Both list only by default — that IS the dry run. Nothing is destroyed
+      without an explicit flag AND a confirmation.
+
 Environment:
-  CLAUDE_WATCH_HOME       data directory (default ~/.claude-watch)
-  CLAUDE_WATCH_KEEP_DAYS  raw retention in days (default 30)
+  CLAUDE_WATCH_HOME        data directory (default ~/.claude-watch)
+  CLAUDE_WATCH_KEEP_DAYS   raw retention in days (default 30)
+  CLAUDE_WATCH_ORPHAN_MIN  orphan age floor in minutes (default 60)
+  CLAUDE_WATCH_REPO_ROOTS  colon-separated roots to scan for worktrees (default ~/Dev)
 EOF
 }
 
@@ -241,6 +262,456 @@ report() {
     }'
 }
 
+# --------------------------------------------------------------- reaping ---
+# Shared formatting for the action commands. The report's own dur()/gb() live
+# inside its awk program and are not reachable from shell.
+fmt_dur() {
+  local s=$1 d h m
+  d=$((s / 86400)); h=$(((s % 86400) / 3600)); m=$(((s % 3600) / 60))
+  if   [ "$d" -gt 0 ]; then printf '%dd%02dh' "$d" "$h"
+  elif [ "$h" -gt 0 ]; then printf '%dh%02dm' "$h" "$m"
+  elif [ "$m" -gt 0 ]; then printf '%dm' "$m"
+  else                      printf '%ds' "$s"
+  fi
+}
+# Worktrees can be a few hundred KB, so a plain %dM floor would print "0M" for
+# something that genuinely exists.
+fmt_mem() {
+  local kb=$1
+  if   [ "$kb" -ge 1048576 ]; then LC_ALL=C awk -v k="$kb" 'BEGIN{printf "%.1fG", k/1048576}'
+  elif [ "$kb" -ge 10240 ];   then printf '%dM' "$((kb / 1024))"
+  elif [ "$kb" -ge 1024 ];    then LC_ALL=C awk -v k="$kb" 'BEGIN{printf "%.1fM", k/1024}'
+  else                             printf '%dK' "$kb"
+  fi
+}
+term_width() { local c; c=$(tput cols 2>/dev/null); [ -n "$c" ] && [ "$c" -gt 40 ] 2>/dev/null && printf '%s' "$c" || printf '100'; }
+
+# A live ps scan, never the stored samples. Orphan rows carry no pid at all
+# (epoch, orphan, name, cores, rss, secs), and even if they did, a pid recorded
+# minutes ago may since have been recycled onto something completely unrelated.
+#
+# Emits, per orphan tree, one T row followed by its P rows in tree order:
+#   T <root> <name> <age_s> <subtree_rss_kb> <nproc> <subtree_cpu>
+#   P <root> <pid> <depth> <rss_kb> <age_s> <argv>
+scan_orphans() {
+  ps -Ao pid=,ppid=,pcpu=,rss=,etime=,args= 2>/dev/null | LC_ALL=C awk \
+    -v MATCH="$ORPHAN_MATCH_RE" -v EXCL="$ORPHAN_EXCLUDE_RE" -v MIN="$1" '
+    function esec(e,   a, b, d, n, h, m) {
+      d = 0
+      if (e ~ /-/) { split(e, a, "-"); d = a[1]; e = a[2] }
+      n = split(e, b, ":")
+      if (n == 3) { h = b[1]; m = b[2] } else { h = 0; m = b[1]; b[3] = b[2] }
+      return d * 86400 + h * 3600 + m * 60 + b[3]
+    }
+    function shortname(a,   n) {
+      n = a; sub(/ .*/, "", n); sub(/.*\//, "", n)
+      if (n ~ /^\(.*\)$/) { sub(/^\(/, "", n); sub(/\)$/, "", n) }  # ps parenthesises an unreadable argv
+      if (a ~ / --test( |$)/) n = n " --test"
+      return n
+    }
+    function subrss(p,   i, s) { s = R[p]; for (i = 1; i <= nk[p]; i++) s += subrss(kid[p, i]); return s }
+    function subcpu(p,   i, s) { s = C[p]; for (i = 1; i <= nk[p]; i++) s += subcpu(kid[p, i]); return s }
+    function subn(p,     i, s) { s = 1;    for (i = 1; i <= nk[p]; i++) s += subn(kid[p, i]);   return s }
+    function mark(p,     i)    { cl[p] = 1; for (i = 1; i <= nk[p]; i++) mark(kid[p, i]) }
+    function walk(p, root, depth,   i) {
+      print "P", root, p, depth, R[p], S[p], A[p]
+      for (i = 1; i <= nk[p]; i++) walk(kid[p, i], root, depth + 1)
+    }
+    BEGIN { OFS = "\t" }
+    {
+      pid = $1; a = $0
+      for (i = 1; i <= 5; i++) sub(/^ *[^ ]+ +/, "", a)
+      PA[pid] = $2; C[pid] = $3; R[pid] = $4; S[pid] = esec($5); A[pid] = a; seen[pid] = 1
+      if (pid != 1) { nk[$2]++; kid[$2, nk[$2]] = pid }
+    }
+    END {
+      # Defensive: a process reparented to launchd cannot be inside a live
+      # session tree, but a claude started by launchd itself would be.
+      for (p in seen) if (shortname(A[p]) == "claude") mark(p)
+      for (p in seen) {
+        if (PA[p] != 1 || cl[p]) continue
+        if (A[p] !~ MATCH || A[p] ~ EXCL) continue
+        if (S[p] < MIN * 60) continue
+        print "T", p, shortname(A[p]), S[p], subrss(p), subn(p), subcpu(p)
+        walk(p, p, 0)
+      }
+    }'
+}
+
+# Kill one tree. Two safety properties, both load-bearing:
+#   1. Deepest-first. Killing the root first reparents its live children to
+#      launchd, where they simply return as brand-new orphans still holding
+#      their memory — the exact bug this command exists to fix.
+#   2. Re-verify every pid immediately before signalling. Between listing and
+#      confirmation a pid can exit and be recycled onto something unrelated, so
+#      argv must still match and elapsed time must not have gone backwards.
+kill_tree() {
+  local root=$1 scan=$2 tab pids="" pid depth rss age argv now_line now_age now_argv still waited freed=0
+  tab=$(printf '\t')
+  while IFS="$tab" read -r _ _ pid depth rss age argv; do
+    [ -n "$pid" ] || continue
+    now_line=$(ps -o etime=,args= -p "$pid" 2>/dev/null)
+    if [ -z "$now_line" ]; then continue; fi          # already gone; nothing to do
+    now_age=$(printf '%s' "$now_line" | LC_ALL=C awk '{print $1}')
+    now_argv=$(printf '%s' "$now_line" | LC_ALL=C sed 's/^ *[^ ]* *//')
+    now_age=$(LC_ALL=C awk -v e="$now_age" '
+      BEGIN{ d=0; if (e ~ /-/) { split(e,a,"-"); d=a[1]; e=a[2] }
+             n=split(e,b,":"); if (n==3){h=b[1];m=b[2]}else{h=0;m=b[1];b[3]=b[2]}
+             print d*86400 + h*3600 + m*60 + b[3] }')
+    if [ "$now_argv" != "$argv" ] || [ "$now_age" -lt "$age" ]; then
+      printf '  %s✗ pid %s changed since it was listed — skipping this tree%s\n' "$C_RED" "$pid" "$C_RST"
+      return 1
+    fi
+    pids="$pids $pid"; freed=$((freed + rss))
+  done < <(grep "^P${tab}${root}${tab}" "$scan" | sort -t"$tab" -k4,4nr)
+
+  [ -n "$pids" ] || { printf '  %salready gone%s\n' "$C_DIM" "$C_RST"; return 0; }
+
+  for pid in $pids; do kill -TERM "$pid" 2>/dev/null; done
+  waited=0
+  while [ "$waited" -lt 30 ]; do
+    still=0
+    for pid in $pids; do kill -0 "$pid" 2>/dev/null && still=1; done
+    [ "$still" -eq 0 ] && break
+    sleep 0.1; waited=$((waited + 1))
+  done
+  for pid in $pids; do
+    if kill -0 "$pid" 2>/dev/null; then kill -KILL "$pid" 2>/dev/null; fi
+  done
+  sleep 0.2
+  still=0
+  for pid in $pids; do kill -0 "$pid" 2>/dev/null && still=1; done
+  if [ "$still" -eq 1 ]; then
+    printf '  %s✗ some processes survived SIGKILL%s\n' "$C_RED" "$C_RST"
+    return 1
+  fi
+  printf '  %s✓ reaped%s %s reclaimed\n' "$C_OK" "$C_RST" "$(fmt_mem "$freed")"
+  return 0
+}
+
+orphans() {
+  local do_kill=0 assume_yes=0 min="${CLAUDE_WATCH_ORPHAN_MIN:-${ORPHAN_MIN_DEFAULT:-60}}"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --kill)     do_kill=1 ;;
+      --yes|-y)   assume_yes=1; do_kill=1 ;;
+      --min)      shift; min="${1:-$min}" ;;
+      --min=*)    min="${1#--min=}" ;;
+      *) printf 'claude-watch orphans: unknown option %s\n' "$1" >&2; return 2 ;;
+    esac
+    shift
+  done
+  if [ -z "${ORPHAN_MATCH_RE:-}" ]; then
+    printf '%serror:%s cannot read %s/tools/orphan-policy.sh\n' "$C_RED" "$C_RST" "$REPO_DIR" >&2
+    return 1
+  fi
+
+  local scan tab; tab=$(printf '\t')
+  scan=$(mktemp) || return 1
+  scan_orphans "$min" > "$scan"
+
+  local ntrees; ntrees=$(grep -c "^T${tab}" "$scan" 2>/dev/null || true)
+  ntrees=${ntrees:-0}
+  if [ "$ntrees" -eq 0 ]; then
+    printf '%s✓ no orphaned dev processes%s %s(nothing unparented older than %sm)%s\n' \
+      "$C_OK" "$C_RST" "$C_DIM" "$min" "$C_RST"
+    rm -f "$scan"; return 0
+  fi
+
+  local w; w=$(term_width)
+  printf '%s⚠ %d orphaned dev tree%s%s %s(no parent, older than %sm — still holding memory and ports)%s\n\n' \
+    "$C_RED" "$ntrees" "$([ "$ntrees" -eq 1 ] || printf 's')" "$C_RST" "$C_DIM" "$min" "$C_RST"
+
+  # Oldest first: awk iterates its arrays in no defined order, and the numbered
+  # list has to still mean the same thing when it is confirmed against.
+  local i=0 roots="" total=0 root name age rss nproc cpu
+  while IFS="$tab" read -r _ root name age rss nproc cpu; do
+    i=$((i + 1)); roots="$roots $root"; total=$((total + rss))
+    printf '  %s[%d]%s %s%-24.24s%s %s  %8s  %s%d proc%s%s  %s%.1f×%s\n' \
+      "$C_SEC" "$i" "$C_RST" "$C_KEY" "$name" "$C_RST" "$(fmt_dur "$age")" "$(fmt_mem "$rss")" \
+      "$C_DIM" "$nproc" "$([ "$nproc" -eq 1 ] || printf 's')" "$C_RST" \
+      "$C_DIM" "$cpu" "$C_RST"
+    local pid depth prss page argv pad
+    while IFS="$tab" read -r _ _ pid depth prss page argv; do
+      pad=$(LC_ALL=C awk -v d="$depth" 'BEGIN{s=""; for(j=0;j<d;j++) s = s "  "; print s}')
+      printf '      %s%s%s%-6s%s %s\n' "$C_DIM" "$pad" "$([ "$depth" -eq 0 ] || printf '└')" \
+        "$pid" "$C_RST" "$(printf '%s' "$argv" | cut -c1-$((w - 16)))"
+    done < <(grep "^P${tab}${root}${tab}" "$scan")
+    printf '\n'
+  done < <(grep "^T${tab}" "$scan" | sort -t"$tab" -k4,4nr)
+
+  printf '  %stotal held: %s%s\n' "$C_DIM" "$(fmt_mem "$total")" "$C_RST"
+
+  if [ "$do_kill" -eq 0 ]; then
+    printf '\n  %srun%s claude-watch orphans --kill %sto reap these%s\n' "$C_DIM" "$C_RST" "$C_DIM" "$C_RST"
+    rm -f "$scan"; return 0
+  fi
+
+  # Killing from a pipe or a cron job with no way to answer would be the worst
+  # possible default, so require an explicit --yes when there is no terminal.
+  local mode="all"
+  if [ "$assume_yes" -eq 0 ]; then
+    if [ ! -t 0 ]; then
+      printf '\n%serror:%s no terminal to confirm on — pass --yes to reap without prompting\n' "$C_RED" "$C_RST" >&2
+      rm -f "$scan"; return 1
+    fi
+    local ans
+    printf '\nkill all %d tree%s? [Y/n/s] ' "$ntrees" "$([ "$ntrees" -eq 1 ] || printf 's')"
+    # Enter means "all", so a closed stdin must NOT read as an empty answer —
+    # that would turn a hung-up terminal into a silent reap-everything.
+    if ! read -r ans; then
+      printf '\n%saborted — stdin closed before an answer, nothing was killed%s\n' "$C_DIM" "$C_RST"
+      rm -f "$scan"; return 1
+    fi
+    case "$ans" in
+      ""|y|Y|yes|YES) mode="all" ;;
+      s|S)            mode="select" ;;
+      *)              printf '%saborted — nothing was killed%s\n' "$C_DIM" "$C_RST"; rm -f "$scan"; return 0 ;;
+    esac
+  fi
+
+  printf '\n'
+  i=0
+  for root in $roots; do
+    i=$((i + 1))
+    name=$(grep "^T${tab}${root}${tab}" "$scan" | cut -f3)
+    rss=$(grep "^T${tab}${root}${tab}" "$scan" | cut -f5)
+    if [ "$mode" = "select" ]; then
+      local a2
+      printf '  [%d] %s (%s) — kill? [y/N/a/q] ' "$i" "$name" "$(fmt_mem "$rss")"
+      if ! read -r a2; then
+        printf '\n  %sstdin closed — stopping%s\n' "$C_DIM" "$C_RST"; break
+      fi
+      case "$a2" in
+        y|Y|yes|YES) ;;
+        a|A)         mode="all" ;;
+        q|Q)         printf '  %sstopped%s\n' "$C_DIM" "$C_RST"; break ;;
+        *)           printf '  %sskipped%s\n' "$C_DIM" "$C_RST"; continue ;;
+      esac
+    else
+      printf '  [%d] %s (%s)\n' "$i" "$name" "$(fmt_mem "$rss")"
+    fi
+    kill_tree "$root" "$scan"
+  done
+  rm -f "$scan"
+  return 0
+}
+
+# Only paths that an agent tool creates on its own. Hand-made worktrees sitting
+# beside their repo (feature branches you made yourself) are structurally
+# invisible to this command, so it can never propose removing your real work.
+is_agent_worktree() {
+  case "$1" in
+    */.claude/worktrees/*)      return 0 ;;
+    "$HOME"/conductor/workspaces/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# main<TAB>path<TAB>branch<TAB>locked for every worktree the repo knows about.
+list_repo_worktrees() {
+  git -C "$1" worktree list --porcelain 2>/dev/null | LC_ALL=C awk '
+    function emit() { print main, p, b, lk }
+    BEGIN { OFS = "\t"; p = ""; main = ""; b = ""; lk = 0 }
+    /^worktree /  { if (p != "") emit(); p = substr($0, 10); if (main == "") main = p; b = ""; lk = 0; next }
+    /^branch /    { b = substr($0, 8); sub(/^refs\/heads\//, "", b); next }
+    /^detached/   { b = "(detached)"; next }
+    /^locked/     { lk = 1; next }
+    END { if (p != "") emit() }'
+}
+
+# status<TAB>path<TAB>main<TAB>branch<TAB>age_days<TAB>dirty<TAB>unpushed<TAB>size_kb<TAB>why
+scan_worktrees() {
+  local days=$1 roots now
+  roots="${CLAUDE_WATCH_REPO_ROOTS:-$HOME/Dev}"
+  now=$(date +%s)
+  {
+    printf '%s\n' "$roots" | tr ':' '\n' | while IFS= read -r root; do
+      [ -d "$root" ] || continue
+      for d in "$root"/*; do
+        [ -e "$d/.git" ] || continue
+        list_repo_worktrees "$d"
+      done
+    done
+  } | sort -u -t"$(printf '\t')" -k2,2 | while IFS="$(printf '\t')" read -r main path branch locked; do
+    is_agent_worktree "$path" || continue
+    local age dirty unpushed size ct st why
+    if [ ! -d "$path" ]; then
+      printf 'PRUNABLE\t%s\t%s\t%s\t0\t0\t0\t0\tdirectory no longer exists\n' "$path" "$main" "$branch"
+      continue
+    fi
+    ct=$(git -C "$path" log -1 --format=%ct 2>/dev/null || printf '0')
+    [ -n "$ct" ] || ct=0
+    age=$(( (now - ct) / 86400 ))
+    dirty=$(git -C "$path" status --porcelain 2>/dev/null | grep -c . || true)
+    unpushed=$(git -C "$path" log --oneline '@{u}..' 2>/dev/null | grep -c . || true)
+    size=$(du -sk "$path" 2>/dev/null | cut -f1); [ -n "$size" ] || size=0
+
+    # Liveness first. An agent worktree in active use looks exactly like a stale
+    # one on disk — git's own lock flag and a fresh commit are what tell them
+    # apart, and getting this wrong destroys work in progress.
+    if   [ "$locked" = "1" ];                 then st=ACTIVE;   why="locked by the tool using it"
+    elif [ $(( now - ct )) -lt 86400 ];       then st=ACTIVE;   why="committed to in the last 24h"
+    elif session_cwd_under "$path";           then st=ACTIVE;   why="a live session is sitting in it"
+    elif [ "${dirty:-0}" -gt 0 ] || [ "${unpushed:-0}" -gt 0 ]; then
+      st=UNSAFE
+      why="$(printf '%s uncommitted, %s unpushed' "${dirty:-0}" "${unpushed:-0}")"
+    elif [ "$age" -ge "$days" ];              then st=STALE;    why="clean, ${age}d old"
+    else                                            st=RECENT;  why="clean but only ${age}d old"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$st" "$path" "$main" "$branch" "$age" "${dirty:-0}" "${unpushed:-0}" "$size" "$why"
+  done
+}
+
+# The sampler already caches the cwd of every live claude session, so this costs
+# a few file reads rather than a full lsof sweep.
+session_cwd_under() {
+  local target=$1 f cwd
+  for f in "$STATE"/cwd/*; do
+    [ -e "$f" ] || continue
+    cwd=$(cat "$f" 2>/dev/null)
+    case "$cwd" in "$target"|"$target"/*) return 0 ;; esac
+  done
+  return 1
+}
+
+worktrees() {
+  local do_remove=0 assume_yes=0 days=7
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --remove)   do_remove=1 ;;
+      --yes|-y)   assume_yes=1; do_remove=1 ;;
+      --days)     shift; days="${1:-$days}" ;;
+      --days=*)   days="${1#--days=}" ;;
+      *) printf 'claude-watch worktrees: unknown option %s\n' "$1" >&2; return 2 ;;
+    esac
+    shift
+  done
+
+  local scan tab; tab=$(printf '\t')
+  scan=$(mktemp) || return 1
+  scan_worktrees "$days" > "$scan"
+
+  if [ ! -s "$scan" ]; then
+    printf '%s✓ no agent-created worktrees found%s %s(scanned %s)%s\n' \
+      "$C_OK" "$C_RST" "$C_DIM" "${CLAUDE_WATCH_REPO_ROOTS:-$HOME/Dev}" "$C_RST"
+    rm -f "$scan"; return 0
+  fi
+
+  printf '%sAGENT WORKTREES%s %s(.claude/worktrees and conductor workspaces; your own are not listed)%s\n\n' \
+    "$C_SEC" "$C_RST" "$C_DIM" "$C_RST"
+
+  local st path main branch age dirty unpushed size why col mark i=0 reclaim=0 targets=""
+  while IFS="$tab" read -r st path main branch age dirty unpushed size why; do
+    case "$st" in
+      ACTIVE)   col=$C_OK;  mark="●" ;;
+      UNSAFE)   col=$C_HOT; mark="!" ;;
+      STALE)    col=$C_RED; mark="·" ;;
+      PRUNABLE) col=$C_RED; mark="·" ;;
+      *)        col=$C_DIM; mark="·" ;;
+    esac
+    if [ "$st" = "STALE" ] || [ "$st" = "PRUNABLE" ]; then
+      i=$((i + 1)); targets="$targets $path"; reclaim=$((reclaim + size))
+      printf '  %s[%d]%s ' "$C_SEC" "$i" "$C_RST"
+    else
+      printf '      '
+    fi
+    printf '%s%s %-8s%s %s%s%s\n' "$col" "$mark" "$st" "$C_RST" "$C_KEY" "$(printf '%s' "$path" | sed "s|^$HOME|~|")" "$C_RST"
+    printf '        %s%s · %s · %s%s\n' "$C_DIM" "$branch" "$(fmt_mem $((size)))" "$why" "$C_RST"
+  done < <(sort -t"$tab" -k1,1 -k5,5nr "$scan")
+
+  if [ "$i" -eq 0 ]; then
+    printf '\n  %snothing stale to remove%s\n' "$C_DIM" "$C_RST"
+    rm -f "$scan"; return 0
+  fi
+  printf '\n  %s%d removable · %s reclaimable%s\n' "$C_DIM" "$i" "$(fmt_mem "$reclaim")" "$C_RST"
+
+  if [ "$do_remove" -eq 0 ]; then
+    printf '\n  %srun%s claude-watch worktrees --remove %sto reap the stale ones%s\n' \
+      "$C_DIM" "$C_RST" "$C_DIM" "$C_RST"
+    rm -f "$scan"; return 0
+  fi
+
+  # ACTIVE and UNSAFE are never in the removable set at all, so "all" can never
+  # reach a worktree that is in use or holding work that exists nowhere else.
+  local mode="all" ans
+  if [ "$assume_yes" -eq 0 ]; then
+    if [ ! -t 0 ]; then
+      printf '\n%serror:%s no terminal to confirm on — pass --yes to remove without prompting\n' "$C_RED" "$C_RST" >&2
+      rm -f "$scan"; return 1
+    fi
+    printf '\nremove all %d stale worktree%s? [Y/n/s] ' "$i" "$([ "$i" -eq 1 ] || printf 's')"
+    if ! read -r ans; then
+      printf '\n%saborted — stdin closed before an answer, nothing was removed%s\n' "$C_DIM" "$C_RST"
+      rm -f "$scan"; return 1
+    fi
+    case "$ans" in
+      ""|y|Y|yes|YES) mode="all" ;;
+      s|S)            mode="select" ;;
+      *)              printf '%saborted — nothing was removed%s\n' "$C_DIM" "$C_RST"; rm -f "$scan"; return 0 ;;
+    esac
+  fi
+
+  printf '\n'
+  i=0
+  for path in $targets; do
+    i=$((i + 1))
+    main=$(grep -F "$tab$path$tab" "$scan" | cut -f3 | head -n1)
+    if [ "$mode" = "select" ]; then
+      printf '  [%d] %s — remove? [y/N/a/q] ' "$i" "$(printf '%s' "$path" | sed "s|^$HOME|~|")"
+      if ! read -r ans; then printf '\n  %sstdin closed — stopping%s\n' "$C_DIM" "$C_RST"; break; fi
+      case "$ans" in
+        y|Y|yes|YES) ;;
+        a|A)         mode="all" ;;
+        q|Q)         printf '  %sstopped%s\n' "$C_DIM" "$C_RST"; break ;;
+        *)           printf '  %sskipped%s\n' "$C_DIM" "$C_RST"; continue ;;
+      esac
+    else
+      printf '  [%d] %s\n' "$i" "$(printf '%s' "$path" | sed "s|^$HOME|~|")"
+    fi
+    # git worktree remove, never rm -rf: git re-checks for local modifications
+    # and refuses, which is a second independent guard behind our own.
+    if git -C "$main" worktree remove "$path" 2>/dev/null; then
+      printf '    %s✓ removed%s\n' "$C_OK" "$C_RST"
+    else
+      git -C "$main" worktree prune 2>/dev/null
+      if [ -d "$path" ]; then
+        printf '    %s✗ git refused to remove it — left untouched%s\n' "$C_RED" "$C_RST"
+      else
+        printf '    %s✓ pruned%s\n' "$C_OK" "$C_RST"
+      fi
+    fi
+  done
+  rm -f "$scan"
+
+  # Branches left behind by removed worktrees are reported, never deleted:
+  # a branch is cheap to keep and the only copy of that work if it never merged.
+  local leftover; leftover=$(orphan_branches)
+  if [ -n "$leftover" ]; then
+    printf '\n%sleftover agent branches (not deleted — review by hand)%s\n' "$C_DIM" "$C_RST"
+    printf '%s\n' "$leftover"
+  fi
+  return 0
+}
+
+orphan_branches() {
+  local roots; roots="${CLAUDE_WATCH_REPO_ROOTS:-$HOME/Dev}"
+  printf '%s\n' "$roots" | tr ':' '\n' | while IFS= read -r root; do
+    [ -d "$root" ] || continue
+    for d in "$root"/*; do
+      [ -d "$d/.git" ] || continue
+      git -C "$d" for-each-ref --format='%(refname:short)' \
+        'refs/heads/claude/*' 'refs/heads/worktree-agent-*' 2>/dev/null \
+        | while IFS= read -r b; do
+            [ -n "$b" ] || continue
+            git -C "$d" worktree list --porcelain 2>/dev/null | grep -qF "branch refs/heads/$b" && continue
+            printf '  %s  %s\n' "$(printf '%s' "$d" | sed "s|^$HOME|~|")" "$b"
+          done
+    done
+  done
+}
+
 status() {
   local latest count
   latest=$(ls -t "$RAW"/*.tsv 2>/dev/null | head -n1)
@@ -320,6 +791,8 @@ doctor() {
 
 case "${1:-report}" in
   report)          shift 2>/dev/null || true; report "${1:-today}" ;;
+  orphans)         shift; orphans ${1+"$@"} ;;
+  worktrees)       shift; worktrees ${1+"$@"} ;;
   today)           report today ;;
   yesterday)       report yesterday ;;
   status)          status ;;

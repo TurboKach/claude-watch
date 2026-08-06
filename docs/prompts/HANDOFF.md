@@ -37,8 +37,10 @@ That last point is why the tool reports machine-wide consumers alongside Claude 
 
 ```
 claude-top                  live tree; standalone, reads ps directly, no state
-claude-watch                CLI: report | status | hook | doctor
+claude-watch                CLI: report | orphans | worktrees | status | hook | doctor
 tools/sample.sh             ONE sampling pass; launchd runs it
+tools/orphan-policy.sh      what counts as a leaked dev process; sourced by BOTH
+                            sample.sh (records) and claude-watch (kills)
 tools/com.turbokach.claudewatch.plist   StartInterval=10, RunAtLoad
 
 ~/.claude-watch/
@@ -90,6 +92,16 @@ Two invariants worth protecting:
 8. **A CPU floor alone misses memory hogs.** Firefox idling at 1.0G / 0.0% CPU never crossed a CPU-only floor. Hence `CLAUDE_WATCH_MEMFLOOR`.
 
 9. **In the Claude Code harness, foreground `sleep` is blocked.** Use `run_in_background: true` or an `until` loop when testing timing behaviour.
+
+10. **Orphans are trees, not processes.** The real pid-1304 orphan was a `node --test` runner *plus* a worker child holding 54 of its 59.5M. Killing the root alone reparents the child to launchd, where it returns as a brand-new orphan still holding the memory. Always walk the subtree **deepest-first**.
+
+11. **Orphan TSV rows carry no pid** (`epoch, orphan, name, cores, rss, secs`), so a kill list can never come from stored samples. It must be a live `ps` scan anyway — a pid recorded minutes ago may have been recycled onto something unrelated. Re-verify argv *and* that elapsed time has not gone backwards immediately before signalling.
+
+12. **`read -r ans` returns empty on EOF as well as on Enter.** With "Enter means yes to all", a closed stdin silently reaps everything — this was a real bug, caught only because a pty test hung up early and killed a tree it had been told to skip. Test `if ! read -r ans`, never just the value. Note that `[ -t 0 ]` does *not* save you here: under a pty stdin is a terminal and can still hit EOF.
+
+13. **An agent worktree in active use is indistinguishable from an abandoned one by age alone.** `wizards/.claude/worktrees/agent-a309e0b6…` looked exactly like the 5-month-old Conductor leftovers; it had a commit 10 minutes old and git's `locked` flag. Liveness (lock flag, commit < 24h, a live session cwd inside it) is checked *before* staleness, and always wins.
+
+14. **`pgrep -f codex` is useless on macOS.** The path `/var/run/com.apple.security.cryptexd/codex.system/...` appears in the inherited environment of nearly every process, so the string "codex" in argv matches almost everything. Any future Codex detection needs a different key.
 
 ---
 
@@ -145,8 +157,11 @@ Coverage is `samples × interval`, and the interval is derived from the data (me
 ### 7f. Weekly/monthly rollups
 `claude-watch report` handles one day. A `--week` view over the retained window is a natural extension, and all the data is already there.
 
-### 7g. Orphan actions
-Orphans are reported but never actionable. A `claude-watch orphans --kill` (with confirmation) would close the loop — carefully, since misidentifying a live process would be bad.
+### 7g. Orphan actions — DONE
+Shipped as `claude-watch orphans [--kill]` and `claude-watch worktrees [--remove]`. See §11.
+
+### 7h. Disk: agent transcripts are the biggest reclaimable thing on the machine
+Measured 2026-08-06: `~/.claude` **5.9G** (of which `~/.claude/projects` transcripts **3.7G**) and `~/.codex/sessions` **783M** across 3254 files. That dwarfs anything the process or worktree reaping recovers (~170M combined). Deliberately left out of the reaping commands because deleting transcripts is irreversible and needs its own rules about what Claude Code still needs in order to resume a session. Worth its own plan.
 
 ---
 
@@ -158,6 +173,8 @@ claude-watch report yesterday   # what the hook prints
 claude-watch report 2026-08-01  # any retained day
 claude-watch status             # sampling alive? how recent?
 claude-watch doctor             # 8 checks, exit 0 when healthy
+claude-watch orphans            # list leaked process trees; --kill to reap
+claude-watch worktrees          # list stale agent worktrees; --remove to reap
 claude-top                      # live tree; -1 one frame, -i N interval
 
 launchctl unload ~/Library/LaunchAgents/com.turbokach.claudewatch.plist
@@ -179,6 +196,33 @@ Raw data is plain TSV — `epoch, kind, key, cores, rss_kb, detail`, where `kind
 - **Keep session labels absent rather than wrong** when a cwd is ambiguous.
 - **Session labels are a soft dependency** on `claude-code-statusline`, which writes `~/.claude/session-labels/`. Without it, labels are omitted and everything else works. Don't turn this into a hard dependency.
 - The repo's README sample output uses **neutral project names** on purpose. The original history contained real ones and was squashed to remove them — keep published samples anonymised.
+- **Both reaping commands list by default.** `--kill` / `--remove` are what make them destructive; keep the bare command a dry run.
+- **Never widen `is_agent_worktree()`** to cover worktrees the user made by hand. Hand-made worktrees being *structurally* invisible — not merely deprioritised — is what makes the bulk "yes to all" safe.
+- **Leftover agent branches are reported, never deleted.** A branch is cheap and may be the only copy of unmerged work.
+- **Removal goes through `git worktree remove`, never `rm -rf`** — git re-checks for local modifications and refuses, which is a second guard independent of ours.
+
+---
+
+## 11. The reaping commands (added after the original handoff)
+
+`claude-watch orphans [--kill] [--yes] [--min MINUTES]` and
+`claude-watch worktrees [--remove] [--yes] [--days DAYS]`.
+
+Both list by default; the bare command **is** the dry run. Confirmation is `[Y/n/s]` where Enter
+means all and `s` steps per item (`y`/`N`/`a`/`q`) — the user chose "all is the default" explicitly.
+Without a terminal, both refuse to destroy anything unless `--yes` is passed.
+
+Safety properties, all load-bearing (see gotchas §4.10–§4.13):
+
+- live `ps` scan, never stored samples; re-verify argv + elapsed immediately before signalling
+- subtree kill, deepest-first, `TERM` → 3s → `KILL`
+- worktree liveness (locked / commit < 24h / live session cwd inside) is checked **before** staleness
+- ACTIVE and UNSAFE worktrees are never in the bulk set at all
+- only agent-created paths are visible: `<repo>/.claude/worktrees/*`, `~/conductor/workspaces/*`
+
+**Still no automated tests** (§7a). Everything above was verified by hand against synthetic orphan
+trees and a sandbox repo of backdated worktrees. Given these paths are irreversible, they are now
+the strongest argument for §7a — the report aggregation is no longer the highest-value test target.
 
 ---
 

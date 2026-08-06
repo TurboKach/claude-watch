@@ -13,7 +13,13 @@ STATE="$DATA/state"
 FLOOR="${CLAUDE_WATCH_FLOOR:-5}"            # %CPU of one core; below this, machine-wide rows are noise
 MEMFLOOR="${CLAUDE_WATCH_MEMFLOOR:-409600}" # RSS in KB (400M); catches idle memory hogs the CPU floor misses
 TOPN="${CLAUDE_WATCH_TOPN:-8}"              # cap on machine-wide rows per sample
-ORPHAN_MIN="${CLAUDE_WATCH_ORPHAN_MIN:-60}" # unparented dev processes older than this are flagged
+
+# What counts as a leaked dev process lives in one file, shared with the
+# `claude-watch orphans` killer so the two can never disagree.
+POLICY="$(dirname "${BASH_SOURCE[0]:-$0}")/orphan-policy.sh"
+# shellcheck source=orphan-policy.sh
+. "$POLICY" || { echo "claude-watch: cannot read $POLICY" >&2; exit 1; }
+ORPHAN_MIN="${CLAUDE_WATCH_ORPHAN_MIN:-$ORPHAN_MIN_DEFAULT}"  # unparented dev processes older than this are flagged
 
 mkdir -p "$RAW" "$STATE/cwd" "$STATE/label" || exit 1
 
@@ -88,6 +94,7 @@ for p in $roots; do
 done
 
 LC_ALL=C awk -v NOW="$now" -v FLOOR="$FLOOR" -v TOPN="$TOPN" -v OM="$ORPHAN_MIN" \
+             -v MATCH="$ORPHAN_MATCH_RE" -v EXCL="$ORPHAN_EXCLUDE_RE" \
              -v MEMFLOOR="$MEMFLOOR" -v META="$metafile" -v SNAP="$snapfile" -v SYS="$sys" -v LOAD="$load" -v NCPU="$ncpu" '
   function esec(e,   a, b, d, n, h, m) {
     d = 0
@@ -176,8 +183,8 @@ LC_ALL=C awk -v NOW="$now" -v FLOOR="$FLOOR" -v TOPN="$TOPN" -v OM="$ORPHAN_MIN"
     # but it still holds memory, ports and file handles.
     for (p in seen) {
       if (par[p] != 1 || owner[p] != "" || secs[p] < OM * 60) continue
-      if (args[p] !~ /(node|tsx|npm|npx|yarn|pnpm|bun|deno|vite|esbuild|webpack|jest|vitest|pytest|python[23]?|ts-node|next-server|playwright|chrome-headless)/) continue
-      if (args[p] ~ /(Applications|\/usr\/libexec|\/System\/)/) continue
+      if (args[p] !~ MATCH) continue
+      if (args[p] ~ EXCL) continue
       print NOW, "orphan", clean(name(args[p])), sprintf("%.2f", subcpu(p) / 100), subrss(p), secs[p]
     }
   }' >> "$out"
