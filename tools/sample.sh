@@ -26,13 +26,16 @@ mkdir -p "$RAW" "$STATE/cwd" "$STATE/label" || exit 1
 now=$(date +%s)
 out="$RAW/$(date +%F).tsv"
 
-snap=$(ps -Ao pid=,ppid=,pcpu=,rss=,etime=,args= 2>/dev/null) || exit 0
+# `time=` is cumulative CPU time. %cpu is a decaying average over up to a
+# minute of previous real time, so it can only ever estimate what a process
+# burned; the cumulative counter, differenced between samples, is exact.
+snap=$(ps -Ao pid=,ppid=,pcpu=,rss=,etime=,time=,args= 2>/dev/null) || exit 0
 [ -n "$snap" ] || exit 0
 
-# $6 is the first token of the command line. Do NOT parse by leading characters:
+# $7 is the first token of the command line. Do NOT parse by leading characters:
 # ps right-pads the pid column, so a fixed-offset parse silently drops sessions
 # whose pid is narrower than the widest pid on the machine.
-roots=$(printf '%s\n' "$snap" | awk '{ n = $6; sub(/.*\//, "", n); if (n == "claude") print $1 }')
+roots=$(printf '%s\n' "$snap" | awk '{ n = $7; sub(/.*\//, "", n); if (n == "claude") print $1 }')
 
 # --- resolve cwd + tab label once per session, then cache by pid ---
 # Neither changes for a live pid, and lsof is the expensive part of a sample.
@@ -77,12 +80,23 @@ sys=$(vm_stat 2>/dev/null | awk -v ps="$(sysctl -n hw.pagesize)" \
   /Pages purgeable/              { purge = $3 }
   /Pages free/                   { free = $3 }
   /Pages speculative/            { spec = $3 }
+  # Since-boot cumulative counters, recorded raw and differenced by the reader.
+  # These two lines have NF=2, so they are matched by name — reading them out of
+  # a column of the page table above would silently record 0.
+  /^Pageins/                     { pgin = $2 }
+  /^Pageouts/                    { pgout = $2 }
   END {
     gsub(/\./, "", anon); gsub(/\./, "", wired); gsub(/\./, "", comp)
     gsub(/\./, "", purge); gsub(/\./, "", free); gsub(/\./, "", spec)
+    gsub(/\./, "", pgin); gsub(/\./, "", pgout)
     split(swap, s, /[ =M]+/)
-    for (i = 1; i <= 20; i++) if (s[i] == "used") { swu = s[i+1]; break }
-    printf "%d\t%d\t%d", (anon - purge + wired + comp) * ps / 1024, (free + spec) * ps / 1024, swu + 0
+    for (i = 1; i <= 20; i++) if (s[i] == "used")  { swu = s[i+1]; break }
+    for (i = 1; i <= 20; i++) if (s[i] == "total") { swt = s[i+1]; break }
+    # Machine capacities are recorded per sample rather than looked up when the
+    # data is read: a window can predate a RAM or swap-config change here.
+    printf "%d\t%d\t%d\t%d\t%d\t%d\t%d", \
+      (anon - purge + wired + comp) * ps / 1024, (free + spec) * ps / 1024, swu + 0, \
+      pgin + 0, pgout + 0, total / 1024, swt + 0
   }')
 
 metafile=$(mktemp) || exit 1
@@ -131,8 +145,9 @@ LC_ALL=C awk -v NOW="$now" -v FLOOR="$FLOOR" -v TOPN="$TOPN" -v OM="$ORPHAN_MIN"
       if (line == "") continue
       split(line, f, " ")
       p = f[1]; a = line
-      for (i = 1; i <= 5; i++) sub(/^ *[^ ]+ +/, "", a)
+      for (i = 1; i <= 6; i++) sub(/^ *[^ ]+ +/, "", a)
       par[p] = f[2]; cpu[p] = f[3]; rss[p] = f[4]; secs[p] = esec(f[5])
+      ctime[p] = esec(f[6])
       args[p] = a; seen[p] = 1
       if (p != 1) { nk[f[2]]++; kid[f[2], nk[f[2]]] = p }
     }
@@ -141,10 +156,18 @@ LC_ALL=C awk -v NOW="$now" -v FLOOR="$FLOOR" -v TOPN="$TOPN" -v OM="$ORPHAN_MIN"
     for (p in isroot) mark(p, p)
 
     # System row: always emitted, so the report knows the machine was awake.
-    print NOW, "sys", "-", LOAD, SYS, NCPU
+    # $9 is the schema version and never moves: a sys row with NF == 8 is
+    # schema 1, the era when every CPU number was a %cpu estimate.
+    split(SYS, sv, "\t")
+    print NOW, "sys", "-", LOAD, sv[1], sv[2], sv[3], NCPU, 2, sv[4], sv[5], sv[6], sv[7]
 
     # Session rows: always emitted even at 0%, so the report can compute how
     # long each session was alive, not just when it was busy.
+    #
+    # Deliberately no cumulative CPU here: a session row is a whole-tree
+    # roll-up, and a tree cumulative drops by the whole lifetime of a departing
+    # child the moment it exits, so a delta between two samples can go sharply
+    # negative for a session that was in fact busy. %cpu sees that work.
     for (p in isroot) {
       hot = ""; hotc = -1
       for (q in owner) {
@@ -171,12 +194,14 @@ LC_ALL=C awk -v NOW="$now" -v FLOOR="$FLOOR" -v TOPN="$TOPN" -v OM="$ORPHAN_MIN"
       if (rss[mp[k]] > rss[mp[i]]) { t = mp[i]; mp[i] = mp[k]; mp[k] = t }
     for (i = 1; i <= n && i <= TOPN; i++) {
       p = hp[i]; emitted[p] = 1
-      print NOW, "proc", clean(name(args[p])), sprintf("%.2f", cpu[p] / 100), rss[p], p
+      print NOW, "proc", clean(name(args[p])), sprintf("%.2f", cpu[p] / 100), rss[p], p, \
+            sprintf("%.2f", ctime[p])
     }
     for (i = 1; i <= mn && i <= TOPN; i++) {
       p = mp[i]
       if (emitted[p]) continue
-      print NOW, "proc", clean(name(args[p])), sprintf("%.2f", cpu[p] / 100), rss[p], p
+      print NOW, "proc", clean(name(args[p])), sprintf("%.2f", cpu[p] / 100), rss[p], p, \
+            sprintf("%.2f", ctime[p])
     }
 
     # Orphans: dev tooling reparented to launchd. Whatever started it is gone,
