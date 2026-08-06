@@ -1366,23 +1366,25 @@ doctor() {
 
   [ -x "$REPO_DIR/tools/disk-scan.sh" ]; chk $? "disk scanner is executable"
 
-  # The disk cache and the lock that guards it are one check: a lock left behind
-  # by a killed scan makes every later run refuse and serve the stale cache, and
-  # that has no other symptom.
+  # The disk cache and the lock that guards it are one check, but the lock is
+  # tested INDEPENDENTLY of the cache: a first scan that was killed leaves the
+  # lock behind and no cache at all, and every later run then refuses silently.
+  # A recycled pid answers kill -0, so the owner's start time has to match too.
   local dcache="${CLAUDE_WATCH_DISK_CACHE:-$STATE/disk.tsv}" dlock="$STATE/disk-scan.lock"
-  local dmsg dok=1 dage dpid
+  local dmsg dok=0 dage dpid did
+  if [ -d "$dlock" ]; then
+    dpid=$(cat "$dlock/pid" 2>/dev/null); did=$(cat "$dlock/id" 2>/dev/null)
+    if [ -z "$dpid" ] || [ -z "$did" ] || ! kill -0 "$dpid" 2>/dev/null ||
+       [ "$(ps -o lstart= -p "$dpid" 2>/dev/null | tr -s ' ')" != "$did" ]; then
+      dmsg=" — orphaned scan lock, remove $dlock"; dok=1
+    fi
+  fi
   if [ -f "$dcache" ] && [ -w "$dcache" ]; then
     dage=$(( ( $(date +%s) - $(stat -f %m "$dcache") ) / 3600 ))
-    dmsg="disk cache present and writable (age ${dage}h)"
-    dok=0
-    if [ -d "$dlock" ]; then
-      dpid=$(cat "$dlock/pid" 2>/dev/null)
-      if [ -z "$dpid" ] || ! kill -0 "$dpid" 2>/dev/null; then
-        dmsg="$dmsg — orphaned scan lock, remove $dlock"; dok=1
-      fi
-    fi
+    dmsg="disk cache present and writable (age ${dage}h)${dmsg:-}"
   else
-    dmsg="disk cache present and writable ($dcache missing — run: claude-watch disk --refresh)"
+    dmsg="disk cache present and writable ($dcache missing — run: claude-watch disk --refresh)${dmsg:-}"
+    dok=1
   fi
   [ "$dok" = 0 ]; chk $? "$dmsg"
 

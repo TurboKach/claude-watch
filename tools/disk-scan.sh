@@ -14,8 +14,18 @@
 #   scan   <partial>   <deadline_hit>  <roots_scanned>  <roots_total>
 #   note   <reason>    <count>         -                -
 #   vol    <mount>     <used_kb>       <avail_kb>       <df_size_kb>
-#   group  <label>     <size_kb>       <dir_count>      -
+#   group  <label>     <size_kb>       <dir_count>      <affected>
 #   dir    <path>      <size_kb>       <group_label>    <confidence>
+#
+# `scan partial` and `group affected` answer two different questions and must not
+# be collapsed. `partial=1` means the scan AS A WHOLE was less than total, and it
+# drives the summary banner. `affected=1` means THAT GROUP's own measurement was
+# short — a denial under one of its paths, an unrepresentable path dropped from
+# it, an off-volume root that could have fed it, or the deadline — and it is what
+# gates severity capping. On a Mac without Full Disk Access every scan is partial
+# because ~/Library/Caches denies reads; that says nothing about whether ~/Dev
+# was measured completely, and it must not mute the finding that answers the
+# user's actual question.
 #
 # The one volume denominator is used_kb + avail_kb. df's Size column is the APFS
 # container, which includes space this volume cannot claim; it is recorded as
@@ -27,7 +37,10 @@ DATA="${CLAUDE_WATCH_HOME:-$HOME/.claude-watch}"
 STATE="$DATA/state"
 CACHE="${CLAUDE_WATCH_DISK_CACHE:-$STATE/disk.tsv}"
 ROOTS="${CLAUDE_WATCH_REPO_ROOTS:-$HOME/Dev}"
-DEADLINE="${CLAUDE_WATCH_DISK_DEADLINE:-120}"   # seconds; lowered by the fixtures
+# CLAUDE_WATCH_DISK_DEADLINE is a TEST HOOK, not a user knob: the fixtures cannot
+# spend 120s proving the deadline fires. It is deliberately undocumented — do not
+# put it in the README or the usage text.
+DEADLINE="${CLAUDE_WATCH_DISK_DEADLINE:-120}"
 GRACE=3                                          # TERM -> KILL delay for the walk
 MAXDEPTH=4
 IDLE_DAYS=14
@@ -73,24 +86,44 @@ lose_lock() {
 # mkdir is the arbiter because it is atomic on APFS. `[ -f ] && touch` is TOCTOU:
 # both runs lose the race and both proceed.
 lock_held=0
+
+# A pid is not an identity: pids are recycled, and a recycled one answers kill -0
+# forever, so an age-plus-liveness breaker would never fire and every later run
+# would silently serve a stale cache with no symptom. The process start time
+# pins WHICH process that pid is.
+# Kept byte-identical to doctor's copy in `claude-watch`, which compares against
+# the file this writes.
+proc_ident() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
+
+take_lock() {  # record who holds it: pid first, then the identity that pins it
+  lock_held=1
+  printf '%s\n' "$$" > "$LOCK/pid" 2>/dev/null
+  proc_ident "$$" > "$LOCK/id" 2>/dev/null
+}
+
 acquire_lock() {
   mkdir -p "$STATE" 2>/dev/null
-  if mkdir "$LOCK" 2>/dev/null; then
-    lock_held=1; printf '%s\n' "$$" > "$LOCK/pid" 2>/dev/null; return 0
-  fi
+  if mkdir "$LOCK" 2>/dev/null; then take_lock; return 0; fi
   # Could not create it AND it does not exist: $STATE is not writable, which is
   # a cache-write failure, not a contended lock.
   [ -d "$LOCK" ] || die_write
 
   # The stale breaker needs BOTH tests. Age alone lets two runs break the same
-  # lock and both proceed; a live-pid test alone leaves a kill -9'd owner's lock
+  # lock and both proceed; a liveness test alone leaves a kill -9'd owner's lock
   # in place forever, after which every run silently serves a stale cache.
-  local lpid lmt age stash
+  local lpid lid lmt age stash
   lpid=$(cat "$LOCK/pid" 2>/dev/null)
+  lid=$(cat "$LOCK/id" 2>/dev/null)
   lmt=$(stat -f %m "$LOCK" 2>/dev/null || printf '0')
   age=$(( $(date +%s) - lmt ))
   [ "$age" -gt "$LOCK_STALE" ] || return 1
-  if [ -n "$lpid" ] && kill -0 "$lpid" 2>/dev/null; then return 1; fi
+  # Live means: that pid exists AND it is still the same process that took the
+  # lock. A missing identity file can only mean the owner died between mkdir and
+  # the write — over $LOCK_STALE seconds ago, so it is certainly dead.
+  if [ -n "$lpid" ] && [ -n "$lid" ] && kill -0 "$lpid" 2>/dev/null &&
+     [ "$(proc_ident "$lpid")" = "$lid" ]; then
+    return 1
+  fi
 
   # Break by rename, not by rm: only one of two racing breakers can rename the
   # same directory away, so the winner is decided before either re-creates it.
@@ -98,7 +131,8 @@ acquire_lock() {
   mv "$LOCK" "$stash" 2>/dev/null || return 1
   rm -rf "$stash" 2>/dev/null
   mkdir "$LOCK" 2>/dev/null || return 1
-  lock_held=1; printf '%s\n' "$$" > "$LOCK/pid" 2>/dev/null; return 0
+  take_lock
+  return 0
 }
 
 worker=""
@@ -157,8 +191,8 @@ group_of() {  # <basename> -> group label
 # Two independent tests, per §3c. A directory matched on NAME ALONE gets no
 # removal command, ever — a hand-made `venv` of notes and a source directory
 # called `target` both exist in the wild.
-confidence_of() {  # <path> <basename>
-  local p=$1 base=$2 parent marker=0 idle=0 g
+confidence_of() {  # <path> <basename> <group>
+  local p=$1 base=$2 grp=$3 parent marker=0 idle=0 g newer nrc
   parent=${p%/*}
   case "$base" in
     node_modules|.next) [ -f "$parent/package.json" ] && marker=1 ;;
@@ -168,11 +202,14 @@ confidence_of() {  # <path> <basename>
                           [ -e "$g" ] && { marker=1; break; }
                         done ;;
   esac
-  # No reference file means no idle evidence — never assume idle, because idle
-  # plus a marker is what authorises a printed `rm -rf`.
-  if [ -f "$REF" ] && [ -z "$(find "$p" -mindepth 1 -maxdepth 1 -newer "$REF" -print -quit 2>>"$ERRLOG")" ]; then
-    idle=1
-  fi
+  # The idle probe must SUCCEED to count. A find that failed on permissions also
+  # prints nothing, and reading that silence as "nothing newer than 14 days" is
+  # how a directory nobody could actually inspect earns a removal command.
+  # No reference file, or a failed probe, means no idle evidence — and idle plus
+  # a marker is the only thing that authorises a printed `rm -rf`.
+  newer=$(find "$p" -mindepth 1 -maxdepth 1 -newer "$REF" -print -quit 2>>"$ERRLOG"); nrc=$?
+  if [ -f "$REF" ] && [ "$nrc" = 0 ] && [ -z "$newer" ]; then idle=1; fi
+  [ "$nrc" = 0 ] || affect "$grp"
   if   [ "$marker" = 1 ] && [ "$idle" = 1 ]; then printf 'confirmed'
   elif [ "$marker" = 1 ];                    then printf 'likely'
   else                                            printf 'unverified'
@@ -183,32 +220,68 @@ confidence_of() {  # <path> <basename>
 # Runs in a background subshell, so every result travels back through $RAWOUT as
 # it lands and a killed walk still yields what it had measured:
 #   H <group> <size_kb> <confidence> <path>   a measured directory
+#   A <group>                                 THAT group's measurement is short
 #   S                                         a repo root finished
 #   V                                         a root skipped: other volume
 #   U                                         a path a TSV cannot carry
 #   D                                         the walk stopped on its own clock
+#
+# `A` is deliberately per group and separate from the global `partial`: a TCC
+# denial under ~/Library/Containers says nothing about whether ~/Dev was measured
+# completely, and muting the one finding that answers the user's question because
+# an unrelated group was unreadable is exactly the failure to avoid.
+affect() { printf 'A\t%s\n' "$1" >> "$RAWOUT"; }
+
 measure() {  # <file of newline-delimited paths> — one batched du for the lot
-  local f=$1 size path base grp conf
+  local f=$1 size path base grp conf berr="$WORK/berr"
   [ -s "$f" ] || return 0
+  : > "$berr"
   # Discovery is NUL-delimited so a path with a space or a `;` survives; the
   # paths in $f have already been filtered to those a TSV can carry.
-  tr '\n' '\0' < "$f" | xargs -0 du -skx 2>>"$ERRLOG" | while IFS="$TAB" read -r size path; do
+  tr '\n' '\0' < "$f" | xargs -0 du -skx 2>"$berr" | while IFS="$TAB" read -r size path; do
     [ -n "${path:-}" ] || continue
     base=${path##*/}
     grp=$(group_of "$base")
-    conf=$(confidence_of "$path" "$base")
+    conf=$(confidence_of "$path" "$base" "$grp")
     printf 'H\t%s\t%s\t%s\t%s\n' "$grp" "$size" "$conf" "$path" >> "$RAWOUT"
   done
+  [ -s "$berr" ] || return 0
+  cat "$berr" >> "$ERRLOG"
+  # A batched du mixes groups, so attribute each error to the hit that contains
+  # the path it names — a denial under one node_modules must not mark every
+  # `target` in the same repo root as unmeasured.
+  CW_KEPT="$f" CW_ERR="$berr" awk '
+    BEGIN {
+      n = 0
+      while ((getline l < ENVIRON["CW_KEPT"]) > 0) pre[++n] = l
+      while ((getline e < ENVIRON["CW_ERR"]) > 0) {
+        sub(/^[a-z]+: /, "", e)      # du: <path>: Permission denied
+        sub(/: [^:]*$/, "", e)
+        hit = ""
+        for (i = 1; i <= n; i++) {
+          if (e == pre[i] || index(e, pre[i] "/") == 1) { hit = pre[i]; break }
+        }
+        # An error we cannot attribute taints the whole batch: better to
+        # understate one group than to claim a completeness we do not have.
+        if (hit == "") { for (i = 1; i <= n; i++) print pre[i] } else print hit
+      }
+    }' | sort -u > "$WORK/aff"
+  while IFS= read -r path; do
+    [ -n "$path" ] || continue
+    affect "$(group_of "${path##*/}")"
+  done < "$WORK/aff"
 }
 
 measure_fixed() {  # <path> <group> — the shortlist: kind is known from the path
-  local p=$1 grp=$2 size path
-  du -skx "$p" 2>>"$ERRLOG" | while IFS="$TAB" read -r size path; do
+  local p=$1 grp=$2 size path berr="$WORK/berr"
+  : > "$berr"
+  du -skx "$p" 2>"$berr" | while IFS="$TAB" read -r size path; do
     [ -n "${path:-}" ] || continue
     # Never `confirmed`: ~/Downloads and ~/Library/Caches are not directories a
     # read-only tool gets to author an `rm -rf` for, however certain their kind.
     printf 'H\t%s\t%s\t%s\t%s\n' "$grp" "$size" "likely" "$path" >> "$RAWOUT"
   done
+  if [ -s "$berr" ]; then cat "$berr" >> "$ERRLOG"; affect "$grp"; fi
 }
 
 walk() {
@@ -228,9 +301,11 @@ walk() {
     [ -d "$p" ] || continue
     rp=$(physdir "$p") || continue
     [ -n "$rp" ] || continue
-    case "$rp" in *"$TAB"*|*"$NL"*) printf 'U\n' >> "$RAWOUT"; continue ;; esac
+    case "$rp" in *"$TAB"*|*"$NL"*) printf 'U\n' >> "$RAWOUT"; affect "${i##*:}"; continue ;; esac
     dev=$(stat -f %d "$rp" 2>/dev/null)
-    if [ -n "$HOMEDEV" ] && [ "$dev" != "$HOMEDEV" ]; then printf 'V\n' >> "$RAWOUT"; continue; fi
+    if [ -n "$HOMEDEV" ] && [ "$dev" != "$HOMEDEV" ]; then
+      printf 'V\n' >> "$RAWOUT"; affect "${i##*:}"; continue
+    fi
     sp[$n]=$rp; sg[$n]=${i##*:}; n=$((n + 1))
     printf '%s\n' "$rp" >> "$CLAIM"
   done
@@ -248,21 +323,31 @@ walk() {
     # `du -x` does not reject a root that STARTS on another volume, and sizes
     # from another volume are not comparable against this volume's total.
     dev=$(stat -f %d "$rp" 2>/dev/null)
-    if [ -n "$HOMEDEV" ] && [ "$dev" != "$HOMEDEV" ]; then printf 'V\n' >> "$RAWOUT"; continue; fi
+    if [ -n "$HOMEDEV" ] && [ "$dev" != "$HOMEDEV" ]; then
+      # A skipped root could have held either kind of hit, so neither repo group
+      # may still claim to be complete.
+      printf 'V\n' >> "$RAWOUT"; affect node_modules; affect rebuildable; continue
+    fi
 
     # -xdev on the FIND, not just -x on the du: without it find descends the
     # network mount long before du is ever reached, which is the whole failure.
     find "$rp" -maxdepth "$MAXDEPTH" -xdev -type d \
       \( -name node_modules -o -name .venv -o -name venv -o -name target \
          -o -name .next -o -name DerivedData \) -prune -print0 \
-      > "$WORK/hits" 2>>"$ERRLOG"
+      > "$WORK/hits" 2>"$WORK/ferr"
+    if [ -s "$WORK/ferr" ]; then
+      # A directory discovery could not read might have contained either kind.
+      cat "$WORK/ferr" >> "$ERRLOG"; affect node_modules; affect rebuildable
+    fi
 
     # du's OUTPUT is newline-delimited and tab-separated, so a path containing a
     # tab or a newline corrupts the cache no matter how careful discovery was.
     # Partition: representable paths are measured, the rest are counted only.
     : > "$WORK/cand"
     while IFS= read -r -d '' p; do
-      case "$p" in *"$TAB"*|*"$NL"*) printf 'U\n' >> "$RAWOUT"; continue ;; esac
+      case "$p" in
+        *"$TAB"*|*"$NL"*) printf 'U\n' >> "$RAWOUT"; affect "$(group_of "${p##*/}")"; continue ;;
+      esac
       printf '%s\n' "$p" >> "$WORK/cand"
     done < "$WORK/hits"
 
@@ -365,6 +450,20 @@ vol_row=$(df -k "$HOME" 2>/dev/null | LC_ALL=C awk 'NR == 2 {
   }')
 [ -n "$vol_row" ] || partial=1
 
+# The per-group `affected` flag. `partial` answers "was the scan as a whole less
+# than total" and drives the summary banner; `affected` answers "was THIS group's
+# own measurement short" and drives severity capping. Two different questions —
+# do not collapse them: a denial under ~/Library/Containers must not mute a
+# fully measured ~/Dev.
+AFF="$WORK/affected"
+LC_ALL=C awk -F'\t' '$1 == "A" && $2 != "" { print $2 }' "$RAWOUT" 2>/dev/null | sort -u > "$AFF"
+# The deadline is the one reason that cannot be attributed: the walk was killed
+# mid-stride and cannot say what it had left to do, so nothing claims complete.
+if [ "$deadline_hit" = 1 ]; then
+  LC_ALL=C awk -F'\t' '$1 == "H" { print $2 }' "$RAWOUT" 2>/dev/null >> "$AFF"
+  sort -u "$AFF" -o "$AFF"
+fi
+
 tmp="$CACHE_DIR/.disk.tsv.$$"
 {
   printf 'epoch\t-\t%s\t-\t-\n' "$START"
@@ -375,17 +474,25 @@ tmp="$CACHE_DIR/.disk.tsv.$$"
   [ "$n_unrep"   -gt 0 ] && printf 'note\tpath_unrepresentable\t%s\t-\t-\n' "$n_unrep"
   [ -n "$vol_row" ] && printf '%s\n' "$vol_row"
   # Group totals cover every hit; dir rows are capped at the top 20 per group.
-  LC_ALL=C awk -F'\t' -v topn="$TOPN" '
+  # Size, confidence and path travel in three PARALLEL arrays, never packed into
+  # one value. Packing them with SUBSEP and splitting again silently truncates
+  # any path containing awk's own separator byte (0x1c) — and a truncated path is
+  # a real, different directory that a `confirmed` row would authorise removing.
+  CW_AFF="$AFF" LC_ALL=C awk -F'\t' -v topn="$TOPN" '
+    BEGIN { while ((getline a < ENVIRON["CW_AFF"]) > 0) if (a != "") aff[a] = 1 }
     $1 == "H" {
-      g = $2; kb = $3 + 0; conf = $4; path = $5
+      g = $2
       if (!(g in tot)) glist[++gn] = g
-      tot[g] += kb; cnt[g]++
+      tot[g] += $3 + 0; cnt[g]++
       k = ++seen[g]
-      G[g, k] = kb SUBSEP conf SUBSEP path
+      KB[g, k] = $3 + 0; CF[g, k] = $4; PT[g, k] = $5
     }
     END {
       OFS = "\t"
-      for (gi = 1; gi <= gn; gi++) { g = glist[gi]; print "group", g, tot[g], cnt[g], "-" }
+      for (gi = 1; gi <= gn; gi++) {
+        g = glist[gi]
+        print "group", g, tot[g], cnt[g], (g in aff) ? 1 : 0
+      }
       for (gi = 1; gi <= gn; gi++) {
         g = glist[gi]
         m = seen[g]
@@ -393,13 +500,11 @@ tmp="$CACHE_DIR/.disk.tsv.$$"
         # a sort implementation for the top-N cut.
         for (i = 1; i <= m && i <= topn; i++) {
           best = i
-          for (j = i + 1; j <= m; j++) {
-            split(G[g, j], b, SUBSEP); split(G[g, best], c, SUBSEP)
-            if (b[1] + 0 > c[1] + 0) best = j
-          }
-          t = G[g, i]; G[g, i] = G[g, best]; G[g, best] = t
-          split(G[g, i], f, SUBSEP)
-          print "dir", f[3], f[1], g, f[2]
+          for (j = i + 1; j <= m; j++) if (KB[g, j] > KB[g, best]) best = j
+          t = KB[g, i]; KB[g, i] = KB[g, best]; KB[g, best] = t
+          t = CF[g, i]; CF[g, i] = CF[g, best]; CF[g, best] = t
+          t = PT[g, i]; PT[g, i] = PT[g, best]; PT[g, best] = t
+          print "dir", PT[g, i], KB[g, i], g, CF[g, i]
         }
       }
     }' "$RAWOUT"

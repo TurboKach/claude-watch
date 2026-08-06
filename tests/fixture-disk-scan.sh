@@ -22,6 +22,7 @@ TMP=$(mktemp -d) || exit 1
 trap 'chmod -R u+rwx "$TMP" 2>/dev/null; rm -rf "$TMP"' EXIT
 
 TAB=$'\t'
+NL=$'\n'
 CACHE=""
 OUT="$TMP/stdout"; ERR="$TMP/stderr"
 
@@ -32,6 +33,7 @@ dirsize() { CW_P="$1" LC_ALL=C awk -F'\t' '$1=="dir" && $2==ENVIRON["CW_P"]{prin
 dirconf() { CW_P="$1" LC_ALL=C awk -F'\t' '$1=="dir" && $2==ENVIRON["CW_P"]{print $5}' "$CACHE"; }
 gtot()    { CW_G="$1" LC_ALL=C awk -F'\t' '$1=="group" && $2==ENVIRON["CW_G"]{print $3}' "$CACHE"; }
 gcount()  { CW_G="$1" LC_ALL=C awk -F'\t' '$1=="group" && $2==ENVIRON["CW_G"]{print $4}' "$CACHE"; }
+gaff()    { CW_G="$1" LC_ALL=C awk -F'\t' '$1=="group" && $2==ENVIRON["CW_G"]{print $5}' "$CACHE"; }
 noteval() { CW_N="$1" LC_ALL=C awk -F'\t' '$1=="note" && $2==ENVIRON["CW_N"]{print $3}' "$CACHE"; }
 scancol() { LC_ALL=C awk -F'\t' -v n="$1" '$1=="scan"{print $n}' "$CACHE"; }   # 2=partial 3=deadline 4=scanned 5=total
 volcol()  { LC_ALL=C awk -F'\t' -v n="$1" '$1=="vol"{print $n}' "$CACHE"; }
@@ -73,6 +75,19 @@ kb "$SRC/we ird ; dir/node_modules/blob" 50            # space and a ; must surv
 mkdir -p "$SRC/tab${TAB}dir/node_modules"
 kb "$SRC/tab${TAB}dir/node_modules/blob" 60            # a TSV cannot carry this
 
+NLD="$SRC/nl${NL}dir"
+mkdir -p "$NLD/node_modules"
+kb "$NLD/node_modules/blob" 60                         # nor this
+
+# awk's own field separator, 0x1c. Packing size/confidence/path into one array
+# value and splitting on SUBSEP truncates this path to "$SRC/keep" — a real,
+# different, existing directory, which a `confirmed` row would authorise
+# removing. The decoy below is what such a forged row would name.
+SUB=$'\034'
+mkdir -p "$SRC/keep" "$SRC/keep${SUB}injected/node_modules"
+kb "$SRC/keep/precious" 16
+kb "$SRC/keep${SUB}injected/node_modules/blob" 40
+
 mkdir -p "$SRC/deep/a/b/c/node_modules"
 kb "$SRC/deep/a/b/c/node_modules/blob" 400             # depth 5: below the cap
 
@@ -109,11 +124,11 @@ eq "vol row is the volume holding \$HOME" "$(volcol 2)" "$(df -k "$SRC" | awk 'N
 eq "df_size_kb recorded" "$(volcol 5)" "$(df -k "$SRC" | awk 'NR==2{print $2}')"
 
 # --- sizes and counts ---
-# node_modules = repo 200 + active 150 + metachar 50; the tab path is skipped,
-# the depth-5 one is out of reach, and the one under Library/Containers is
-# deduped into the containers total.
-between "node_modules group total is 400K" "$(gtot node_modules)" 400 424
-eq      "node_modules counts 3 directories" "$(gcount node_modules)" "3"
+# node_modules = repo 200 + active 150 + metachar 50 + the 0x1c path 40; the tab
+# and newline paths are skipped, the depth-5 one is out of reach, and the one
+# under Library/Containers is deduped into the containers total.
+between "node_modules group total is 440K" "$(gtot node_modules)" 440 468
+eq      "node_modules counts 4 directories" "$(gcount node_modules)" "4"
 between "rebuildable group total is 100K"   "$(gtot rebuildable)" 100 112
 eq      "rebuildable counts 1 directory"    "$(gcount rebuildable)" "1"
 between "downloads group total is 500K"     "$(gtot downloads)" 500 520
@@ -134,6 +149,25 @@ if LC_ALL=C grep -q "$TAB.*$TAB.*tab" "$CACHE"; then
 else
   ok "the tab path never reaches the cache"
 fi
+# A raw newline would split one row in two: a truncated "…/nl" path on the first
+# line and a bare "dir/node_modules…" fragment starting the next.
+absent "no truncated row for the newline path" "$RP/nl"
+if LC_ALL=C grep -q '^dir/node_modules' "$CACHE"; then
+  bad "no orphaned fragment from the newline path"
+else
+  ok "no orphaned fragment from the newline path"
+fi
+
+# --- the SUBSEP path: intact, or nowhere. Never a row for a DIFFERENT path. ---
+absent "no forged row for the truncated 0x1c path" "$RP/keep"
+subrow=$(dirconf "$RP/keep${SUB}injected/node_modules")
+if [ -n "$subrow" ]; then
+  ok "the 0x1c path round-trips intact ($subrow)"
+elif [ "$(noteval path_unrepresentable)" -ge 3 ] 2>/dev/null; then
+  ok "the 0x1c path was dropped as unrepresentable"
+else
+  bad "the 0x1c path neither round-trips nor is counted"
+fi
 
 # --- the metacharacter path survives whole, and carries no command ---
 between "the space/; path is measured" "$(dirsize "$RP/we ird ; dir/node_modules")" 50 64
@@ -148,8 +182,15 @@ eq "partial=1 (a path was skipped)"    "$(scancol 2)" "1"
 eq "deadline_hit=0"                    "$(scancol 3)" "0"
 eq "roots_scanned=1"                   "$(scancol 4)" "1"
 eq "roots_total=1"                     "$(scancol 5)" "1"
-eq "note path_unrepresentable 1"       "$(noteval path_unrepresentable)" "1"
+eq "note path_unrepresentable 2"       "$(noteval path_unrepresentable)" "2"
 eq "no deadline note"                  "$(noteval deadline)" ""
+
+# --- per-group `affected`: the flag that gates severity capping downstream ---
+# It answers a DIFFERENT question from `partial`: this scan was partial, but only
+# the group that actually lost a path is short.
+eq "node_modules is affected (a path was dropped from it)" "$(gaff node_modules)" "1"
+eq "rebuildable is not affected"                           "$(gaff rebuildable)" "0"
+eq "downloads is not affected"                             "$(gaff downloads)" "0"
 eq "the lock is released"              "$([ -e "$DA/state/disk-scan.lock" ] && echo present || echo gone)" "gone"
 eq "no work directory is left behind"  "$(ls -d "$DA"/state/disk-scan.work.* 2>/dev/null | wc -l | tr -d ' ')" "0"
 
@@ -165,8 +206,13 @@ eq "repo/node_modules still confirmed"  "$(dirconf "$RP/repo/node_modules")" "co
 
 # ------------------------------------------- a root on another volume --------
 echo "root on another volume"
-OTHER=/System/Volumes/Preboot
-if [ -d "$OTHER" ] && [ "$(stat -f %d "$OTHER")" != "$(stat -f %d "$HB")" ]; then
+OTHER=""
+for cand in /System/Volumes/Preboot /System/Volumes/VM /System/Volumes/Update /Volumes/*; do
+  [ -d "$cand" ] || continue
+  [ "$(stat -f %d "$cand")" = "$(stat -f %d "$HB")" ] && continue
+  OTHER="$cand"; break
+done
+if [ -n "$OTHER" ]; then
   DC="$TMP/dataC"; CACHE="$DC/state/disk.tsv"
   HOME="$HB" CLAUDE_WATCH_HOME="$DC" CLAUDE_WATCH_REPO_ROOTS="$OTHER:$SRC/repo" \
     bash "$SCAN" > "$OUT" 2> "$ERR"
@@ -175,8 +221,58 @@ if [ -d "$OTHER" ] && [ "$(stat -f %d "$OTHER")" != "$(stat -f %d "$HB")" ]; the
   eq "roots_total=2"                  "$(scancol 5)" "2"
   eq "partial=1"                      "$(scancol 2)" "1"
 else
-  skp "root on another volume (no second volume to point at)"
+  # A visible, reasoned skip: on a machine with one volume this cannot be pinned,
+  # and passing silently would claim coverage the run did not have.
+  skp "root on another volume — no directory with a device id different from \$HOME's exists here (tried /System/Volumes/{Preboot,VM,Update} and /Volumes/*)"
 fi
+
+# ------------------------------------------ an unreadable directory (E9) -----
+# A directory we could not read is not idle, is not measured, and must never be
+# promoted: no row at all beats a wrong `confirmed`.
+echo "unreadable directory"
+UR="$TMP/unreadable"
+mkdir -p "$UR/locked/node_modules" "$UR/open/node_modules" "$UR/open/target"
+printf '{}\n' > "$UR/locked/package.json"
+printf '{}\n' > "$UR/open/package.json"
+kb "$UR/locked/node_modules/blob" 80
+kb "$UR/open/node_modules/blob" 90
+kb "$UR/open/target/blob" 70
+touch -t "$OLD" "$UR/locked/node_modules/blob" "$UR/open/node_modules/blob" "$UR/open/target/blob"
+chmod 000 "$UR/locked/node_modules"
+URP=$( cd -P "$UR" && pwd -P )
+DU2="$TMP/dataU"; CACHE="$DU2/state/disk.tsv"
+HOME="$HB" CLAUDE_WATCH_HOME="$DU2" CLAUDE_WATCH_REPO_ROOTS="$UR" \
+  bash "$SCAN" > "$OUT" 2> "$ERR"
+chmod 755 "$UR/locked/node_modules"
+absent "an unreadable directory gets no dir row at all" "$URP/locked/node_modules"
+eq "the readable sibling is still confirmed" "$(dirconf "$URP/open/node_modules")" "confirmed"
+if [ "$(noteval permission_denied)" -ge 1 ] 2>/dev/null; then
+  ok "note permission_denied is recorded"
+else
+  bad "note permission_denied is recorded (got '$(noteval permission_denied)')"
+fi
+eq "partial=1 after a denial"                   "$(scancol 2)" "1"
+eq "the denied group is affected"               "$(gaff node_modules)" "1"
+eq "the group that read cleanly is not"         "$(gaff rebuildable)" "0"
+
+# ------------------------------------- a failing idle probe never promotes ---
+# find can fail where du succeeded. Empty output from a failed probe is not
+# evidence of idleness, and reading it as such hands out a removal command for a
+# directory nobody could inspect.
+echo "failing idle probe"
+FBIN="$TMP/fbin"; mkdir -p "$FBIN"
+{
+  printf '#!/bin/sh\n'
+  printf 'for a in "$@"; do [ "$a" = "-newer" ] && exit 1; done\n'
+  printf 'exec /usr/bin/find "$@"\n'
+} > "$FBIN/find"
+chmod +x "$FBIN/find"
+DF="$TMP/dataF"; CACHE="$DF/state/disk.tsv"
+PATH="$FBIN:$PATH" HOME="$HB" CLAUDE_WATCH_HOME="$DF" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
+  bash "$SCAN" > "$OUT" 2> "$ERR"
+eq "a marker-bearing hit stays likely when the probe fails" \
+   "$(dirconf "$RP/repo/node_modules")" "likely"
+eq "and its group is marked affected" "$(gaff node_modules)" "1"
 
 # --------------------------------------------------------------- the lock ----
 echo "lock"
@@ -226,6 +322,64 @@ else
   eq "and the scan actually ran" "$(dirconf "$RP/repo/node_modules")" "confirmed"
   eq "and the lock is released" "$([ -e "$LOCK" ] && echo present || echo gone)" "gone"
 fi
+
+# 4. PID REUSE. An old lock whose pid has been recycled onto an unrelated
+# process answers kill -0 forever, so a liveness-only breaker never fires and
+# every later run silently serves a stale cache. The owner's start time is what
+# tells the two processes apart.
+ident() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
+rm -rf "$LOCK"; mkdir "$LOCK"
+printf '%s\n' "$$" > "$LOCK/pid"          # a pid that is very much alive
+printf 'Thu Jan 1 00:00:00 1970\n' > "$LOCK/id"   # but not this process
+touch -t "$OLD" "$LOCK"
+HOME="$HB" CLAUDE_WATCH_HOME="$DL" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
+  bash "$SCAN" > "$OUT" 2> "$ERR"
+eq "a recycled pid does not keep a stale lock alive" \
+   "$([ -e "$LOCK" ] && echo present || echo gone)" "gone"
+
+# The complement: same age, same pid, and the identity DOES match — a genuinely
+# live owner that happens to be slow must keep its lock.
+rm -rf "$LOCK"; mkdir "$LOCK"
+printf '%s\n' "$$" > "$LOCK/pid"
+ident "$$" > "$LOCK/id"
+touch -t "$OLD" "$LOCK"
+HOME="$HB" CLAUDE_WATCH_HOME="$DL" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
+  bash "$SCAN" > "$OUT" 2> "$ERR"; rcI=$?
+eq "a verified live owner keeps its lock past the age limit" \
+   "$([ -e "$LOCK" ] && echo present || echo gone)" "present"
+eq "and the loser still exits 0" "$rcI" "0"
+if grep -q 'another disk scan is already running' "$ERR"; then
+  ok "and still prints E11"
+else
+  bad "and still prints E11"; sed 's/^/        /' "$ERR"
+fi
+rm -rf "$LOCK"
+
+# 5. A REAL race: two scanners, same state directory, overlapping in time.
+# The first is slowed with a stub du so the second is guaranteed to arrive while
+# it holds the lock.
+echo "two scanners at once"
+SBIN="$TMP/sbin"; mkdir -p "$SBIN"
+printf '#!/bin/sh\nsleep 3\nexec /usr/bin/du "$@"\n' > "$SBIN/du"
+chmod +x "$SBIN/du"
+DX="$TMP/dataX"; CACHE="$DX/state/disk.tsv"
+( PATH="$SBIN:$PATH" HOME="$HB" CLAUDE_WATCH_HOME="$DX" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
+    bash "$SCAN" > "$TMP/outA" 2> "$TMP/errA" ) &
+racer=$!
+sleep 1
+HOME="$HB" CLAUDE_WATCH_HOME="$DX" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
+  bash "$SCAN" > "$OUT" 2> "$ERR"; rcB=$?
+wait "$racer"
+eq "the second scanner exits 0" "$rcB" "0"
+if grep -q 'another disk scan is already running' "$ERR"; then
+  ok "the second scanner refuses with E11"
+else
+  bad "the second scanner refuses with E11"; sed 's/^/        /' "$ERR"
+fi
+eq "the second scanner scanned nothing" "$(wc -c < "$OUT" | tr -d ' ')" "0"
+eq "the first scanner's cache is complete" "$(dirconf "$RP/repo/node_modules")" "confirmed"
+eq "no lock survives the race" \
+   "$([ -e "$DX/state/disk-scan.lock" ] && echo present || echo gone)" "gone"
 
 # ----------------------------------------------------------- the deadline ----
 # `timeout` is unavailable, so the deadline is the parent signalling the walk's
