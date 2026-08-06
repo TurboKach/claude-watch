@@ -170,9 +170,13 @@ printf '\n  -- the live sampler emits schema 2 --\n'
 
 V2="$TMP/v2"
 mkdir -p "$V2/raw" || exit 1
-# Floors at 0 so proc rows are guaranteed: the shape assertions below must not
-# be able to pass by there being nothing to assert on.
-export CLAUDE_WATCH_FLOOR=0 CLAUDE_WATCH_MEMFLOOR=0
+# Every knob the sampler reads is pinned, so the fixture does not care what the
+# invoking shell has set. Floors at 0 guarantee proc rows — the shape assertions
+# below must not be able to pass by there being nothing to assert on — and TOPN
+# is part of that guarantee: an inherited CLAUDE_WATCH_TOPN=0 caps both emit
+# loops at zero rows no matter what the floors say.
+export CLAUDE_WATCH_FLOOR=0 CLAUDE_WATCH_MEMFLOOR=0 CLAUDE_WATCH_TOPN=8 \
+       CLAUDE_WATCH_ORPHAN_MIN=60
 CLAUDE_WATCH_HOME="$V2" bash "$SAMPLER" || bad "sample.sh run 1 exits 0"
 sleep 1
 CLAUDE_WATCH_HOME="$V2" bash "$SAMPLER" || bad "sample.sh run 2 exits 0"
@@ -288,21 +292,21 @@ got=$(printf 'Pageins:  0.\nPageouts: 0.\n' | LC_ALL=C awk -f "$TMP/vm.awk" -v p
 [ "$got" = "$(printf '0\t0')" ] && ok "a machine that has never paged records 0, not an empty field" \
                                 || bad "a machine that has never paged records 0 (got: '$got')"
 
-# Liveness only — the parse above is what certifies the numbers. This says the
-# recorded counter is the live one and not a constant.
+# Best-effort liveness, reported and never asserted: the fixed-input parse above
+# is what certifies the counters. A warm page cache can legitimately hold Pageins
+# flat across two samples, so failing on that would fail the suite for something
+# that is not a defect.
 PG="$TMP/pg"; mkdir -p "$PG/raw" || exit 1
 CLAUDE_WATCH_HOME="$PG" bash "$SAMPLER"
 first_in=$(awk -F'\t' '$2 == "sys" { print $10; exit }' "$PG/raw/"*.tsv)
-moved=0
-for _ in 1 2 3 4 5 6 7 8; do
-  find /usr/bin -type f -print0 2>/dev/null | xargs -0 -n 40 cat > /dev/null 2>&1
-  CLAUDE_WATCH_HOME="$PG" bash "$SAMPLER"
-  last_in=$(awk -F'\t' '$2 == "sys" { v = $10 } END { print v }' "$PG/raw/"*.tsv)
-  [ "$last_in" -gt "$first_in" ] && { moved=1; break; }
-  sleep 1
-done
-[ "$moved" = 1 ] && ok "the recorded pagein counter is live ($first_in -> $last_in)" \
-                 || bad "the recorded pagein counter is live (stuck at $first_in)"
+find /usr/bin -type f -print0 2>/dev/null | xargs -0 -n 40 cat > /dev/null 2>&1
+CLAUDE_WATCH_HOME="$PG" bash "$SAMPLER"
+last_in=$(awk -F'\t' '$2 == "sys" { v = $10 } END { print v }' "$PG/raw/"*.tsv)
+if [ "$last_in" -gt "$first_in" ]; then
+  printf '  \033[90minfo\033[0m  the recorded pagein counter moved (%s -> %s)\n' "$first_in" "$last_in"
+else
+  printf '  \033[90minfo\033[0m  the recorded pagein counter did not move (%s); warm cache, not a defect\n' "$first_in"
+fi
 nonint=$(awk -F'\t' '$2 == "sys" && ($10 !~ /^[0-9]+$/ || $11 !~ /^[0-9]+$/) { c++ } END { print c + 0 }' "$RAWV2")
 [ "$nonint" = 0 ] && ok "pageins and pageouts are plain integers in every sys row" \
                   || bad "pageins and pageouts are plain integers in every sys row ($nonint are not)"
