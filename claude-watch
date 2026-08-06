@@ -707,30 +707,38 @@ list_repo_worktrees() {
 }
 
 # status<TAB>path<TAB>main<TAB>branch<TAB>age_days<TAB>dirty<TAB>unpushed<TAB>size_kb<TAB>why
-scan_worktrees() {
-  local days=$1 roots now
+# One definition of "which repositories do we look at", shared by the worktree
+# scan and the leftover-branch report. Written separately they drifted: the
+# branch report tested `-d .git` and so skipped linked worktrees, whose .git is
+# a FILE, and never looked at conductor workspaces — a branch left behind by a
+# successfully removed conductor worktree therefore went unreported.
+#
+# Conductor workspaces are normally reached through their owning repo's worktree
+# list, which only works when that repo sits under a scanned root; enumerating
+# them directly keeps one whose repo lives elsewhere discoverable. That happens
+# only as part of the DEFAULT roots, so an explicit CLAUDE_WATCH_REPO_ROOTS
+# stays authoritative and can still scope a run (and a test can isolate one).
+repo_candidates() {
+  local roots d
   roots="${CLAUDE_WATCH_REPO_ROOTS:-$HOME/Dev}"
+  printf '%s\n' "$roots" | tr ':' '\n' | while IFS= read -r root; do
+    [ -d "$root" ] || continue
+    for d in "$root"/*; do
+      [ -e "$d/.git" ] && printf '%s\n' "$d"
+    done
+  done
+  if [ -z "${CLAUDE_WATCH_REPO_ROOTS:-}" ]; then
+    for d in "$HOME"/conductor/workspaces/*/*; do
+      [ -e "$d/.git" ] && printf '%s\n' "$d"
+    done
+  fi
+}
+
+scan_worktrees() {
+  local days=$1 now
   now=$(date +%s)
   {
-    printf '%s\n' "$roots" | tr ':' '\n' | while IFS= read -r root; do
-      [ -d "$root" ] || continue
-      for d in "$root"/*; do
-        [ -e "$d/.git" ] || continue
-        list_repo_worktrees "$d"
-      done
-    done
-    # Conductor workspaces are normally reached through their owning repo's
-    # worktree list, which only works when that repo sits under a scanned root.
-    # Enumerate them directly too, so a workspace whose repo lives elsewhere is
-    # still discoverable rather than silently invisible. Only as part of the
-    # DEFAULT roots: an explicit CLAUDE_WATCH_REPO_ROOTS must stay authoritative,
-    # or the setting cannot scope a run (and tests cannot isolate one).
-    if [ -z "${CLAUDE_WATCH_REPO_ROOTS:-}" ]; then
-      for d in "$HOME"/conductor/workspaces/*/*; do
-        [ -e "$d/.git" ] || continue
-        list_repo_worktrees "$d"
-      done
-    fi
+    repo_candidates | while IFS= read -r d; do list_repo_worktrees "$d"; done
   } | sort -u -t"$(printf '\t')" -k2,2 | while IFS="$(printf '\t')" read -r main path branch locked; do
     is_agent_worktree "$path" || continue
     local age dirty unpushed size ct st why hasup
@@ -1014,11 +1022,16 @@ worktrees() {
       fi
     fi
   done 3< "$targets"
+
+  # Capture the repositories the scan actually visited BEFORE cleanup drops it,
+  # so a repo found only by the scan still gets its leftover branches reported.
+  local mains; mains=$(mktemp) && cut -f3 "$scan" | sort -u > "$mains"
   tmp_cleanup
 
   # Branches left behind by removed worktrees are reported, never deleted:
   # a branch is cheap to keep and the only copy of that work if it never merged.
-  local leftover; leftover=$(orphan_branches)
+  local leftover; leftover=$(orphan_branches "$mains")
+  rm -f "$mains"
   if [ -n "$leftover" ]; then
     printf '\n%sleftover agent branches (not deleted — review by hand)%s\n' "$C_DIM" "$C_RST"
     printf '%s\n' "$leftover"
@@ -1026,12 +1039,21 @@ worktrees() {
   return "$rmfail"
 }
 
+# $1 (optional) is a file of extra repositories — the main worktrees the scan
+# actually visited — so a repo discovered only via the scan is still checked.
 orphan_branches() {
-  local roots; roots="${CLAUDE_WATCH_REPO_ROOTS:-$HOME/Dev}"
-  printf '%s\n' "$roots" | tr ':' '\n' | while IFS= read -r root; do
-    [ -d "$root" ] || continue
-    for d in "$root"/*; do
-      [ -d "$d/.git" ] || continue
+  local extra="${1:-}" d
+  # Collapse every candidate onto its repo's MAIN worktree before reporting.
+  # Linked worktrees share one ref store, so asking each of them listed the same
+  # branch once per worktree.
+  { repo_candidates; [ -n "$extra" ] && [ -f "$extra" ] && cat "$extra"; } \
+    | while IFS= read -r d; do
+        [ -n "$d" ] && [ -e "$d/.git" ] || continue
+        git -C "$d" worktree list --porcelain 2>/dev/null \
+          | LC_ALL=C awk '/^worktree /{ print substr($0, 10); exit }'
+      done \
+    | sort -u | while IFS= read -r d; do
+      [ -n "$d" ] || continue
       git -C "$d" for-each-ref --format='%(refname:short)' \
         'refs/heads/claude/*' 'refs/heads/worktree-agent-*' 2>/dev/null \
         | while IFS= read -r b; do
@@ -1040,7 +1062,6 @@ orphan_branches() {
             printf '  %s  %s\n' "$(printf '%s' "$d" | sed "s|^$HOME|~|")" "$b"
           done
     done
-  done
 }
 
 status() {
