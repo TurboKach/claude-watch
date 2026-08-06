@@ -2,6 +2,9 @@
 *.log
 *.tsv
 *.tsv.gz
+# ...except the day file the aggregation fixtures assert against, which is test
+# input, not sampled data, and has to travel with the golden output beside it.
+!tests/fixtures/*.tsv
 # Sampled data lives in ~/.claude-watch, never in the repo — this is a guard
 # in case CLAUDE_WATCH_HOME is ever pointed here during testing.
 data/
