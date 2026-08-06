@@ -262,25 +262,38 @@ report() {
       # previous sample.
       if (ep != cur_ep) { flush(); cur_ep = ep }
       if (kind == "sys") {
+        # An epoch is a plain integer as `date +%s` writes it. Anything else —
+        # empty, zero-padded, non-numeric — is a damaged row, and it has to be
+        # rejected HERE rather than tolerated, because awk compares numeric
+        # strings numerically: "0100" and "100" are one epoch to `!=` but were
+        # two distinct keys to the old textual sysseen[], so tolerating them
+        # would drop a sample with nothing said. Rejected rows are counted and
+        # reported below, and contribute to nothing.
+        if ($1 !~ /^(0|[1-9][0-9]*)$/) { badep++; next }
         # Rows are append-only and time-ordered, so an epoch differing from the
         # previous one is a new sample: adjacency dedupes without keeping every
         # epoch. The gap histogram and the running max replace the two arrays a
         # month window would otherwise fill with ~259k entries.
         #
-        # Adjacency dedupes less than the old global set did, and what makes
-        # that safe is that the shortfall cannot be silent: an epoch can only
-        # recur non-adjacently by leaving its value and coming back, which
-        # takes a strict decrease at some transition, which is exactly what
-        # disorder counts. So every input that would inflate sysn also trips
-        # the warning below. (Verified exhaustively in fixture-aggregation.sh
-        # over all sample orderings up to length 7.)
-        if (ep != prev_ep) {
-          if (prev_ep != "") {
+        # Adjacency dedupes less than the old global set did. What makes that
+        # safe is that the shortfall cannot be silent: for canonical integer
+        # epochs, an epoch can only recur non-adjacently by leaving its value
+        # and coming back, which takes a strict decrease at some transition,
+        # which is exactly what disorder counts. So every input that inflates
+        # sysn also trips the disorder warning, and every input that could
+        # deflate it by spelling is rejected above and trips the other one.
+        # Nothing weaker is claimed: fixture-aggregation.sh F3 checks both
+        # halves against the real aggregation, not a model of it.
+        #
+        # have_prev, not prev_ep != "", marks the first row: "" is a field
+        # value a damaged file can contain, so it cannot also be a sentinel.
+        if (!have_prev || ep != prev_ep) {
+          if (have_prev) {
             if (ep < prev_ep) disorder++
             gap = ep - prev_ep
             if (gap > 0 && gap < 600) { hist[gap]++; dn++ }
           }
-          sysn++; prev_ep = ep; if (ep > lastep) lastep = ep
+          sysn++; prev_ep = ep; have_prev = 1; if (ep > lastep) lastep = ep
         }
         if (cores > peakload) peakload = cores          # $4 is load average on sys rows
         if (minfree == 0 || $6 + 0 < minfree) minfree = $6 + 0
@@ -317,6 +330,15 @@ report() {
 
     END {
       flush()   # close the final sample
+
+      # Ahead of the sysn == 0 exit: a file whose every sys row was rejected
+      # leaves no samples at all, and that is the one case where staying quiet
+      # would read as "the sampler wrote nothing" instead of "the reader threw
+      # everything away".
+      if (badep > 0)
+        printf("claude-watch: %s has %d sys rows whose epoch is not a plain integer — the sampler writes date +%%s, so an empty, padded or non-numeric epoch means the file is damaged. Those rows are excluded, so the sample count and coverage below are short by up to that many. Remove or repair the file to stop this\n",
+               ENVIRON["CW_SRC"], badep) > "/dev/stderr"
+
       if (sysn == 0) {
         if (JSON == "1") printf "{\"command\":\"report\",\"date\":\"%s\",\"samples\":0,\"sessions\":[],\"machine_cpu\":[],\"machine_mem\":[],\"orphans\":[]}\n", D
         else print "no system samples for " D

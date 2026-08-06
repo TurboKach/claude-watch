@@ -222,28 +222,133 @@ if load_report "$F2_DATE" F2; then
     || bad "F2 the warning names the inflation, not just the interval"
 fi
 
-# Detection completeness, by exhaustion rather than by argument: over every
-# ordering of up to 7 sys rows drawn from 4 epoch values, there is no input
-# where the adjacency count differs from the old global-dedupe count without
-# disorder also being non-zero. This is the property the whole design rests on,
-# so it is checked, not asserted in a comment.
-echo "F3. no input can inflate the sample count without tripping the warning"
-F3=$(python3 <<'PY'
+# ======================= F3. detection completeness, against the real reader ==
+# The property the linear design rests on: the sample count may differ from what
+# the old global textual dedupe produced, but it may never differ SILENTLY.
+#
+# This must be checked against the actual aggregation. An earlier version of
+# this test modelled the adjacency rule in Python and swept 21,844 integer
+# sequences; it passed while two real inputs drifted in silence, because the
+# model shared none of awk's behaviour on the values that matter:
+#
+#   * awk compares numeric-looking fields NUMERICALLY, so "0100" and "100" are
+#     one epoch to `!=` but were two keys to the old textual sysseen[];
+#   * "" is a field value a damaged file can hold, and it was also the "no
+#     previous row" sentinel.
+#
+# So the sweep below runs the real `report` binary. The value space is every
+# sequence of one to three sys rows over {0, 00, 100, 0100, "", xyz} — 258
+# files. That space is small but it is chosen, not arbitrary: it contains a
+# canonical zero and a canonical non-zero, both of their zero-padded spellings
+# (numeric equality vs textual inequality), the empty field (the old sentinel),
+# a non-numeric token, and — through repetition — equal adjacents, decreasing
+# pairs and the non-adjacent duplicate. Length three is the shortest that can
+# hold "leave a value and come back", which is the only shape that inflates the
+# count. Longer sequences compose these transitions without introducing a new
+# kind of one, since the rule is a function of (previous epoch, this epoch).
+#
+# For each file: `old` is the pre-rewrite count — distinct TEXTUAL epochs among
+# the rows the reader accepts — and the assertion is that samples != old
+# implies a non-empty stderr, plus that a non-canonical row is always named.
+F3_DATE=2026-02-05
+F3_LOG="$TMP/f3.log"
+: > "$F3_LOG"
+
+# EMPTY is a stand-in for the empty field: it keeps the generated list free of
+# empty tokens, which bash's word splitting would drop.
+python3 - > "$TMP/f3-seqs" <<'PY'
 from itertools import product
-bad = 0
-for n in range(1, 8):
-    for seq in product(range(1, 5), repeat=n):
-        sysn = 0; prev = None; disorder = 0
-        for ep in seq:                      # the aggregation's adjacency rule
-            if ep != prev:
-                if prev is not None and ep < prev: disorder += 1
-                sysn += 1; prev = ep
-        if sysn != len(set(seq)) and disorder == 0: bad += 1
-print(bad)
+vals = ["0", "00", "100", "0100", "EMPTY", "xyz"]
+for n in (1, 2, 3):
+    for s in product(vals, repeat=n):
+        print(" ".join(s))
 PY
-)
-[ "$F3" = 0 ] && ok "F3 zero silent-miscount orderings out of 21844" \
-              || bad "F3 zero silent-miscount orderings (found $F3)"
+
+# <space-separated tokens> — writes the day file, returns samples in $F3_SAMPLES,
+# the pre-rewrite textual count in $F3_OLD, and stderr in $ERR.
+f3_run() {
+  local tok v json rest
+  : > "$TMP/raw/$F3_DATE.tsv"
+  F3_OLD=0
+  local seen=" "
+  for tok in $1; do
+    v=$tok; [ "$v" = EMPTY ] && v=''
+    printf '%s\tsys\t-\t1.00\t1000000\t1000000\t0\t8\n' "$v" >> "$TMP/raw/$F3_DATE.tsv"
+    # The reader accepts a plain integer with no leading zero; `old` counts the
+    # distinct spellings of those, which is what sysseen[] used to hold.
+    case "$v" in
+      0|[1-9]*) [ -z "${v//[0-9]/}" ] || continue ;;
+      *) continue ;;
+    esac
+    case "$seen" in *" $v "*) ;; *) seen="$seen$v "; F3_OLD=$((F3_OLD + 1)) ;; esac
+  done
+  json=$(CLAUDE_WATCH_HOME="$TMP" "$CW" report "$F3_DATE" --json 2>"$ERR"); F3_RC=$?
+  rest=${json#*\"samples\":}
+  F3_SAMPLES=${rest%%,*}
+}
+
+echo "F3. no sample-count drift is silent, checked against the real aggregation"
+f3_bad=0; f3_unnamed=0; f3_rc=0; f3_n=0; f3_drift=0
+while IFS= read -r seq; do
+  f3_run "$seq"
+  f3_n=$((f3_n + 1))
+  [ "$F3_RC" -eq 0 ] || f3_rc=$((f3_rc + 1))
+  if [ "$F3_SAMPLES" != "$F3_OLD" ]; then
+    f3_drift=$((f3_drift + 1))
+    if [ ! -s "$ERR" ]; then
+      f3_bad=$((f3_bad + 1))
+      printf 'SILENT DRIFT: [%s] samples=%s old=%s\n' "$seq" "$F3_SAMPLES" "$F3_OLD" >> "$F3_LOG"
+    fi
+  fi
+  case " $seq " in
+    *" 00 "*|*" 0100 "*|*" EMPTY "*|*" xyz "*)
+      grep -q 'not a plain integer' "$ERR" || {
+        f3_unnamed=$((f3_unnamed + 1))
+        printf 'UNNAMED BAD EPOCH: [%s]\n' "$seq" >> "$F3_LOG"; } ;;
+  esac
+done < "$TMP/f3-seqs"
+
+[ "$f3_n" -eq 258 ] && ok "F3 swept $f3_n real report runs" \
+                    || bad "F3 swept $f3_n real report runs (wanted 258)"
+[ "$f3_rc" -eq 0 ] && ok "F3 every run exits 0" \
+                   || bad "F3 every run exits 0 ($f3_rc did not)"
+if [ "$f3_bad" -eq 0 ]; then
+  ok "F3 zero silent drifts ($f3_drift of $f3_n drifted, all reported)"
+else
+  bad "F3 zero silent drifts (found $f3_bad)"; sed 's/^/        /' "$F3_LOG" | head -10
+fi
+[ "$f3_unnamed" -eq 0 ] && ok "F3 every non-canonical epoch is named on stderr" \
+                        || bad "F3 every non-canonical epoch is named ($f3_unnamed silent)"
+
+# The two shapes that broke the modelled version of this test, by name, so a
+# future reader meets them directly rather than inside a sweep total.
+echo "F4. the two spellings that a Python model of awk cannot see"
+f3_run "100 0100 100"
+# awk reads 0100 == 100 numerically; the old textual dedupe saw two epochs. The
+# row is rejected, so the count is 1 against the old 2 — and it is announced.
+[ "$F3_SAMPLES" = 1 ] && ok "F4 zero-padded epoch does not fold into its neighbour" \
+                      || bad "F4 zero-padded epoch (samples=$F3_SAMPLES, wanted 1)"
+grep -q 'not a plain integer' "$ERR" \
+  && ok "F4 the padded epoch is reported, not silently dropped" \
+  || bad "F4 the padded epoch is reported, not silently dropped"
+
+f3_run "EMPTY 100 200"
+# "" used to re-arm the "no previous row" sentinel and swallow a sample.
+[ "$F3_SAMPLES" = 2 ] && ok "F4 an empty epoch cannot pose as the first row" \
+                      || bad "F4 empty epoch (samples=$F3_SAMPLES, wanted 2)"
+grep -q 'not a plain integer' "$ERR" \
+  && ok "F4 the empty epoch is reported, not silently dropped" \
+  || bad "F4 the empty epoch is reported, not silently dropped"
+
+# A file whose every sys row is damaged still says so, even though it exits down
+# the "no system samples" path before any of the aggregation runs.
+f3_run "xyz 0100"
+[ "$F3_SAMPLES" = 0 ] && ok "F4 an all-damaged file reports zero samples" \
+                      || bad "F4 all-damaged file (samples=$F3_SAMPLES, wanted 0)"
+grep -q 'not a plain integer' "$ERR" \
+  && ok "F4 an all-damaged file is not mistaken for an idle sampler" \
+  || bad "F4 an all-damaged file is not mistaken for an idle sampler"
+rm -f "$TMP/raw/$F3_DATE.tsv"
 
 # ==================================== G. 60k rows in well under the deadline ==
 # 20,000 samples — 55.6 hours at a 10s interval, so a bit over two days, not a
