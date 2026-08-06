@@ -899,6 +899,10 @@ repo_candidates() {
   roots="${CLAUDE_WATCH_REPO_ROOTS:-$HOME/Dev}"
   printf '%s\n' "$roots" | tr ':' '\n' | while IFS= read -r root; do
     [ -d "$root" ] || continue
+    # A root may be a directory OF repositories, or a repository itself — someone
+    # scoping a reap to one project points the variable straight at it. Only
+    # scanning children silently found nothing in that case.
+    [ -e "$root/.git" ] && printf '%s\n' "$root"
     for d in "$root"/*; do
       [ -e "$d/.git" ] && printf '%s\n' "$d"
     done
