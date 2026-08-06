@@ -798,6 +798,7 @@ orphans() {
   local i=0 roots="" total=0 root name age rss nproc cpu
   while IFS="$tab" read -r _ root name age rss nproc cpu; do
     i=$((i + 1)); roots="$roots $root"; total=$((total + rss))
+    name=$(printf '%s' "$name" | LC_ALL=C tr '\001-\037\177' ' ')
     printf '  %s[%d]%s %s%-24.24s%s %s  %8s  %s%d proc%s%s  %s%.1f×%s\n' \
       "$C_SEC" "$i" "$C_RST" "$C_KEY" "$name" "$C_RST" "$(fmt_dur "$age")" "$(fmt_mem "$rss")" \
       "$C_DIM" "$nproc" "$([ "$nproc" -eq 1 ] || printf 's')" "$C_RST" \
@@ -805,8 +806,13 @@ orphans() {
     local pid depth prss page argv pad
     while IFS="$tab" read -r _ _ pid depth prss page argv; do
       pad=$(LC_ALL=C awk -v d="$depth" 'BEGIN{s=""; for(j=0;j<d;j++) s = s "  "; print s}')
+      # argv is untrusted text being written to a terminal. Neutralise C0 and
+      # DEL so merely LISTING a process cannot execute an escape sequence that
+      # retitles the window or drives the clipboard. High bytes are left alone
+      # so UTF-8 paths still render. macOS ps happens to caret-encode these
+      # already; that is ps being helpful, not a guarantee worth depending on.
       printf '      %s%s%s%-6s%s %s\n' "$C_DIM" "$pad" "$([ "$depth" -eq 0 ] || printf '└')" \
-        "$pid" "$C_RST" "$(printf '%s' "$argv" | cut -c1-$((w - 16)))"
+        "$pid" "$C_RST" "$(printf '%s' "$argv" | LC_ALL=C tr '\001-\037\177' ' ' | cut -c1-$((w - 16)))"
     done < <(grep "^P${tab}${root}${tab}" "$scan")
     printf '\n'
   done < <(grep "^T${tab}" "$scan" | sort -t"$tab" -k4,4nr)
