@@ -105,7 +105,8 @@ DISK_PROBE_ENTRIES=120000
 # published group — i.e. only when there is a payload to print — and one probe
 # can still overrun it by its own duration, because a self-enforced deadline
 # cannot preempt a find already inside a tree. The entry cap bounds that
-# overrun.
+# overrun. The 5th second is margin for the whole-second truncation documented
+# at the SECONDS=0 rebase below: the effective budget is 4-5s, not exactly 5.
 DISK_PROBE_SECONDS=5
 # The idle stamp is built this many seconds BEFORE the cutoff, because
 # `find -newer` is a strict comparison: without the offset an entry sitting
@@ -771,15 +772,22 @@ disk_body() {
   done < "$cache"
 
   local stamp cutoff
-  # Rebase the clock rather than remember an offset. `t0=$SECONDS` sampled a
-  # counter whose phase is the shell's start time, so `SECONDS - t0 >= N` could
-  # fire after N-1 seconds of real time — a whole second of a small budget.
-  # Assigning 0 resets the counter AND its reference instant, so the test below
-  # is exact to the second. This is safe ONLY because disk_body is invoked
-  # through a process substitution (`< <(disk_body ...)`) and therefore runs in
-  # a subshell: the assignment cannot reach the parent's SECONDS. Re-wiring that
-  # call to a plain call would leak it. Sub-second clocks are not available:
-  # bash 3.2 on macOS has no EPOCHREALTIME and BSD date has no %N.
+  # Rebase the clock rather than remember an offset, so the test below reads
+  # `SECONDS` directly. Safe ONLY because disk_body is invoked through a process
+  # substitution (`< <(disk_body ...)`) and therefore runs in a subshell: the
+  # assignment cannot reach the parent's SECONDS. Re-wiring that call to a plain
+  # call would leak it.
+  #
+  # MEASURED, not assumed: this does NOT make the budget exact. Bash stores both
+  # the base and the reading as whole-second time() values, so `SECONDS=0`
+  # followed 50ms later by a second boundary already reads 1 — exactly as
+  # `SECONDS - t0` did. A budget of N can therefore fire after as little as
+  # N-1 seconds of real time, which is why DISK_PROBE_SECONDS carries a second
+  # of margin over the workload it has to cover. There is no cheaper fix: bash
+  # 3.2 on macOS has no EPOCHREALTIME and BSD date has no %N, and forking perl
+  # Time::HiRes per row would cost 15-20ms against a 100-240ms probe for no
+  # decision-relevant precision. The truncation errs toward downgrading, which
+  # is the safe direction.
   SECONDS=0
   # See DISK_IDLE_SLACK_S: the stamp sits just before the cutoff so that an
   # entry exactly on the 14d line reads as active under find's strict -newer.
