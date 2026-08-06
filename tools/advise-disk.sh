@@ -295,22 +295,39 @@ disk_probe_idle() {
   local d=$1 stamp=$2 sent fin out
   sent="${stamp##*/}-hot"
   fin="${stamp##*/}-done"
-  # One walk. An entry newer than the cutoff prints the sentinel and quits, so
-  # the active case is O(1); every other entry prints its path, so `head`
-  # bounds the idle case, which is the one that has to walk the whole tree.
-  # The sentinel is derived from the mktemp stamp name, so a file that could
-  # forge it does not realistically exist — and a forgery downgrades anyway.
+  # One walk. An entry newer than the cutoff prints the $sent sentinel and
+  # quits, so the active case is O(1); every other entry prints its path, so
+  # `head` bounds the idle case, which is the one that has to walk the whole
+  # tree.
   #
-  # The `$fin` line is printed ONLY if find itself exited 0 (`&&`), and head
+  # NUL framing, and that is the load-bearing part. A pathname may contain any
+  # byte except NUL and '/', so with newline-delimited output a directory
+  # literally named $'x\ncw-disk-idle.XXX-done' emits a LINE equal to $fin;
+  # last before an aborted walk (or at the head cut) it forged "the walk
+  # completed" and PROMOTED the row to idle, authorising an rm -rf for a tree
+  # nobody finished inspecting. So find frames its records with -print0, and
+  # `tr` then destroys every newline INSIDE the data (-> \001) before promoting
+  # the NULs to newlines. After that mapping a record boundary can only come
+  # from a separator find emitted: completion status travels out of band from
+  # path data, and the line-wise tests below are sound again. tr rather than a
+  # `read -r -d ''` loop because bash cannot hold NUL in a string and the loop
+  # costs ~5x the walk (0.42s vs 0.09s over /usr/share's 20k entries), which
+  # would break the per-probe budget the entry cap above is derived from.
+  #
+  # A forged $sent needs no such protection — it only ever downgrades — but it
+  # gets it anyway, and note that neither sentinel is forgeable as a whole
+  # record regardless: both are bare basenames, every path record starts '/'.
+  #
+  # The $fin record is emitted ONLY if find itself exited 0 (`&&`), and head
   # cuts it off if the walk exceeded the entry cap. So "the last line is $fin"
   # is a single test for: the walk finished, and it finished without error. A
   # find killed by SIGPIPE from head, or one that hit a permission-denied
-  # subtree (BSD find exits 1), prints no sentinel and the row downgrades —
+  # subtree (BSD find exits 1), emits no $fin and the row downgrades —
   # previously such a walk returned a short list, no sentinel, and read as
   # idle. This is the convention disk-scan.sh uses at scan time; stderr stays
   # discarded because here the exit status is the only part we act on.
-  out=$( { find "$d" \( -newer "$stamp" -exec printf '%s\n' "$sent" \; -quit \) -o -print 2>/dev/null \
-           && printf '%s\n' "$fin"; } | head -n "$(( DISK_PROBE_ENTRIES + 1 ))" )
+  out=$( { find "$d" \( -newer "$stamp" -exec printf '%s\0' "$sent" \; -quit \) -o -print0 2>/dev/null \
+           && printf '%s\0' "$fin"; } | tr '\n\0' '\001\n' | head -n "$(( DISK_PROBE_ENTRIES + 1 ))" )
   # `-quit` fires after the sentinel is printed, so the sentinel may be the
   # last line of find's output rather than the first — test all four positions.
   # Done with `case`, not `printf | grep -qxF`: under `set -o pipefail` (which

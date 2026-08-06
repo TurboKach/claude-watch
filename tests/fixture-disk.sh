@@ -522,7 +522,7 @@ probe_cache cold2 "$TMP/cold/target"
 has "  and the bounds are restored"    "$(F disk.reclaimable.rebuildable 14)" "rm -rf"
 
 # The entry cap boundary, both sides. The probe only returns idle when the walk
-# printed its completion sentinel, and head cuts that sentinel off exactly when
+# printed its completion sentinel, and the reader drops that sentinel exactly when
 # the tree is larger than the cap — so a tree of EXACTLY the cap completes and
 # one entry more does not. Counted from the tree itself, never hard-coded.
 CE=$(find "$TMP/cold/target" | grep -c '')
@@ -552,6 +552,46 @@ else
   hasnt "unreadable subtree: no command" "$A" "rm -rf"
   eq "  and downgraded to likely"        "$(F disk.reclaimable.rebuildable 11)" likely
   chmod 755 "$TMP/permfail/target/locked"
+fi
+
+# The completion sentinel must not be forgeable by a PATHNAME. A path may
+# contain any byte but NUL and '/', so a directory named $'x\n<stamp>-done'
+# emitted a newline-delimited line equal to the sentinel; as the last thing
+# printed before the walk aborted, it said "the walk completed" and PROMOTED
+# the row to idle — the one direction this file may never move in.
+#
+# Driven through disk_probe_idle directly rather than through a render,
+# because the sentinel is derived from a mktemp basename that only the caller
+# knows: with a stamp we name ourselves the forged directory name is exact and
+# the test is deterministic. The forger is the tree's ONLY child, so find's
+# pre-order walk emits it in a fixed position and no readdir ordering is
+# assumed. The stamp is created last, hence newer than every entry, so the
+# tree is genuinely cold and only the completion evidence is in question.
+FG=$TMP/forge; FT=$FG/tree; FD=$FT/$'x\ncw-disk-idle.FORGE-done'
+mkdir -p "$FD"; : > "$FD/f"
+touch -t "$OLD" "$FD/f" "$FD" "$FT"
+: > "$FG/cw-disk-idle.FORGE"
+# First the OPEN direction: a newline in a pathname is not itself suspicious,
+# and a complete walk over one still reads idle.
+if disk_probe_idle "$FT" "$FG/cw-disk-idle.FORGE"; then ok "a newline in a pathname still completes"
+else bad "a newline in a pathname still completes"; fi
+# Cut the walk short exactly after the forged sentinel: under newline framing a
+# cap of 2 admitted three lines — 'tree', 'x', '<stamp>-done' — and the last of
+# them read as completion. The tree is over the cap, so the only correct answer
+# is not-idle.
+save_e=$DISK_PROBE_ENTRIES; DISK_PROBE_ENTRIES=2
+if disk_probe_idle "$FT" "$FG/cw-disk-idle.FORGE"; then bad "forged sentinel at the cap: not idle"
+else ok "forged sentinel at the cap: not idle"; fi
+DISK_PROBE_ENTRIES=$save_e
+# And with the walk aborted instead of truncated: find prints the forger, then
+# cannot descend into it, exits 1 and emits no completion record.
+if [ "$(id -u)" = 0 ]; then
+  ok "forged sentinel before a failure: not idle (skipped: running as root)"
+else
+  chmod 000 "$FD"
+  if disk_probe_idle "$FT" "$FG/cw-disk-idle.FORGE"; then bad "forged sentinel before a failure: not idle"
+  else ok "forged sentinel before a failure: not idle"; fi
+  chmod 755 "$FD"
 fi
 
 # A group under the 2% line produces no finding, so none of its dir rows can
