@@ -469,8 +469,11 @@ scan_orphans() {
     function subcpu(p,   i, s) { s = C[p]; for (i = 1; i <= nk[p]; i++) s += subcpu(kid[p, i]); return s }
     function subn(p,     i, s) { s = 1;    for (i = 1; i <= nk[p]; i++) s += subn(kid[p, i]);   return s }
     function mark(p,     i)    { cl[p] = 1; for (i = 1; i <= nk[p]; i++) mark(kid[p, i]) }
+    # argv may legally contain tabs and newlines. Emitted raw they add fields to
+    # this TSV, shifting the numeric columns and truncating argv at the reader.
+    function clean(s) { gsub(/[\t\n\r]/, " ", s); return s }
     function walk(p, root, depth,   i) {
-      print "P", root, p, depth, R[p], S[p], A[p]
+      print "P", root, p, depth, R[p], S[p], clean(A[p])
       for (i = 1; i <= nk[p]; i++) walk(kid[p, i], root, depth + 1)
     }
     BEGIN { OFS = "\t" }
@@ -488,7 +491,7 @@ scan_orphans() {
         if (PA[p] != 1 || cl[p]) continue
         if (A[p] !~ MATCH || A[p] ~ EXCL) continue
         if (S[p] < MIN * 60) continue
-        print "T", p, shortname(A[p]), S[p], subrss(p), subn(p), subcpu(p)
+        print "T", p, clean(shortname(A[p])), S[p], subrss(p), subn(p), subcpu(p)
         walk(p, p, 0)
       }
     }'
@@ -508,14 +511,26 @@ etime_secs() {
 # Record a pid's identity (elapsed + argv) the FIRST time we decide to act on it,
 # so later checks compare against the moment of the decision rather than against
 # a moment after the grace period.
+#
+# record_id takes values the caller has ALREADY read and verified. Re-reading ps
+# here would reopen the very race the verification closed: between the verified
+# read and a second one, the pid can be recycled, and we would then enshrine the
+# replacement process as the expected identity and happily kill it later.
+record_id() {   # <idmap> <pid> <age_secs> <argv>
+  LC_ALL=C awk -F'\t' -v p="$2" '$1 == p { found = 1; exit } END { exit !found }' "$1" && return 0
+  printf '%s\t%s\t%s\n' "$2" "$3" "$4" >> "$1"
+}
+
+# For pids discovered later (children found by live_descendants) there is no
+# earlier verified read to reuse, so first sight is the anchor.
 remember_id() {   # <idmap> <pid>
   local map=$1 pid=$2 line
   LC_ALL=C awk -F'\t' -v p="$pid" '$1 == p { found = 1; exit } END { exit !found }' "$map" && return 0
   line=$(ps -o etime=,args= -p "$pid" 2>/dev/null)
   [ -n "$line" ] || return 1
-  printf '%s\t%s\t%s\n' "$pid" \
+  record_id "$map" "$pid" \
     "$(etime_secs "$(printf '%s' "$line" | LC_ALL=C awk '{print $1}')")" \
-    "$(printf '%s' "$line" | LC_ALL=C sed 's/^ *[^ ]* *//')" >> "$map"
+    "$(printf '%s' "$line" | LC_ALL=C sed 's/^ *[^ ]* *//')"
 }
 
 # Is this pid still the process we recorded? A pid that exits during the grace
@@ -575,7 +590,7 @@ kill_tree() {
       rm -f "$idmap"; return 1
     fi
     pids="$pids $pid"; freed=$((freed + rss))
-    remember_id "$idmap" "$pid"
+    record_id "$idmap" "$pid" "$now_age" "$now_argv"
   done < <(grep "^P${tab}${root}${tab}" "$scan" | sort -t"$tab" -k4,4nr)
 
   [ -n "$pids" ] || { printf '  %salready gone%s\n' "$C_DIM" "$C_RST"; return 0; }
