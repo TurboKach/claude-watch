@@ -262,14 +262,27 @@ report() {
       # previous sample.
       if (ep != cur_ep) { flush(); cur_ep = ep }
       if (kind == "sys") {
-        # An epoch is a plain integer as `date +%s` writes it. Anything else —
-        # empty, zero-padded, non-numeric — is a damaged row, and it has to be
-        # rejected HERE rather than tolerated, because awk compares numeric
-        # strings numerically: "0100" and "100" are one epoch to `!=` but were
-        # two distinct keys to the old textual sysseen[], so tolerating them
-        # would drop a sample with nothing said. Rejected rows are counted and
-        # reported below, and contribute to nothing.
-        if ($1 !~ /^(0|[1-9][0-9]*)$/) { badep++; next }
+        # An epoch is a plain integer of at most ten digits, as `date +%s`
+        # writes it. Anything else — empty, zero-padded, non-numeric, or longer
+        # — is a damaged row, and it has to be rejected HERE rather than
+        # tolerated, because awk holds numbers as doubles and compares
+        # numeric-looking fields numerically. "0100" and "100" are one epoch to
+        # `!=` but were two distinct keys to the old textual sysseen[], so
+        # tolerating them would drop a sample with nothing said.
+        #
+        # The ten-digit bound is what makes epoch comparison INJECTIVE, which
+        # everything below depends on: past 2^53 distinct integers stop being
+        # distinct doubles, so 9007199254740992 and ...93 compare equal and
+        # collapse into one sample (and never flush, since cur_ep does not
+        # change either). Ten digits caps an epoch at 9999999999 — 2286-11-20 —
+        # which is comfortably inside exact-integer range and outside any date
+        # this tool will see. Rejected rows are counted and reported below, and
+        # contribute to nothing.
+        #
+        # The bound is a length() test, not /[0-9]{1,10}/: macOS awk 20200816
+        # does not implement brace intervals and matches them as literal text,
+        # which would reject every real ten-digit epoch instead.
+        if ($1 !~ /^(0|[1-9][0-9]*)$/ || length($1) > 10) { badep++; next }
         # Rows are append-only and time-ordered, so an epoch differing from the
         # previous one is a new sample: adjacency dedupes without keeping every
         # epoch. The gap histogram and the running max replace the two arrays a
@@ -336,7 +349,7 @@ report() {
       # would read as "the sampler wrote nothing" instead of "the reader threw
       # everything away".
       if (badep > 0)
-        printf("claude-watch: %s has %d sys rows whose epoch is not a plain integer — the sampler writes date +%%s, so an empty, padded or non-numeric epoch means the file is damaged. Those rows are excluded, so the sample count and coverage below are short by up to that many. Remove or repair the file to stop this\n",
+        printf("claude-watch: %s has %d sys rows whose epoch is not a plain integer of at most ten digits — the sampler writes date +%%s, so an empty, padded, over-long or non-numeric epoch means the file is damaged. Those rows are excluded, so the sample count and coverage below are short by up to that many. Remove or repair the file to stop this\n",
                ENVIRON["CW_SRC"], badep) > "/dev/stderr"
 
       if (sysn == 0) {

@@ -234,22 +234,34 @@ fi
 #   * awk compares numeric-looking fields NUMERICALLY, so "0100" and "100" are
 #     one epoch to `!=` but were two keys to the old textual sysseen[];
 #   * "" is a field value a damaged file can hold, and it was also the "no
-#     previous row" sentinel.
+#     previous row" sentinel;
+#   * awk holds numbers as doubles, so past 2^53 two distinct decimal epochs
+#     compare EQUAL — the collision that makes epoch comparison non-injective
+#     and, with it, the length-three argument below unsound. The reader now
+#     bounds epochs at ten digits precisely so that cannot happen.
 #
 # So the sweep below runs the real `report` binary. The value space is every
-# sequence of one to three sys rows over {0, 00, 100, 0100, "", xyz} — 258
-# files. That space is small but it is chosen, not arbitrary: it contains a
+# sequence of one to three sys rows over
+#   {0, 00, 100, 0100, "", xyz, 9007199254740992, 9007199254740993}
+# — 584 files, about 9 seconds. Small, but every member earns its place: a
 # canonical zero and a canonical non-zero, both of their zero-padded spellings
 # (numeric equality vs textual inequality), the empty field (the old sentinel),
-# a non-numeric token, and — through repetition — equal adjacents, decreasing
-# pairs and the non-adjacent duplicate. Length three is the shortest that can
-# hold "leave a value and come back", which is the only shape that inflates the
-# count. Longer sequences compose these transitions without introducing a new
-# kind of one, since the rule is a function of (previous epoch, this epoch).
+# a non-numeric token, and BOTH sides of the exact-integer boundary — one alone
+# is not enough, since a collision needs two decimals that share one double,
+# and a sweep carrying only ...93 misses the case entirely (measured: 0 silent
+# drifts found against a build with the collision, 12 once ...92 joins it).
+# Repetition then supplies equal adjacents, decreasing pairs and the
+# non-adjacent duplicate. Length three is the shortest that can hold "leave a
+# value and come back", the only shape that inflates the count; longer
+# sequences compose the same transitions without introducing a new kind,
+# because the rule is a function of (previous epoch, this epoch) ONCE
+# comparison is injective — which is exactly what the ten-digit bound buys.
 #
-# For each file: `old` is the pre-rewrite count — distinct TEXTUAL epochs among
-# the rows the reader accepts — and the assertion is that samples != old
-# implies a non-empty stderr, plus that a non-canonical row is always named.
+# For each file: `old` is the pre-rewrite count computed the pre-rewrite way —
+# distinct TEXTUAL epochs over EVERY sys row, which is exactly what sysseen[]
+# held, including the spellings this reader now rejects. The assertion is that
+# samples != old always comes with a non-empty stderr, plus that a
+# non-canonical row is always named.
 F3_DATE=2026-02-05
 F3_LOG="$TMP/f3.log"
 : > "$F3_LOG"
@@ -258,7 +270,8 @@ F3_LOG="$TMP/f3.log"
 # empty tokens, which bash's word splitting would drop.
 python3 - > "$TMP/f3-seqs" <<'PY'
 from itertools import product
-vals = ["0", "00", "100", "0100", "EMPTY", "xyz"]
+vals = ["0", "00", "100", "0100", "EMPTY", "xyz",
+        "9007199254740992", "9007199254740993"]
 for n in (1, 2, 3):
     for s in product(vals, repeat=n):
         print(" ".join(s))
@@ -274,13 +287,10 @@ f3_run() {
   for tok in $1; do
     v=$tok; [ "$v" = EMPTY ] && v=''
     printf '%s\tsys\t-\t1.00\t1000000\t1000000\t0\t8\n' "$v" >> "$TMP/raw/$F3_DATE.tsv"
-    # The reader accepts a plain integer with no leading zero; `old` counts the
-    # distinct spellings of those, which is what sysseen[] used to hold.
-    case "$v" in
-      0|[1-9]*) [ -z "${v//[0-9]/}" ] || continue ;;
-      *) continue ;;
-    esac
-    case "$seen" in *" $v "*) ;; *) seen="$seen$v "; F3_OLD=$((F3_OLD + 1)) ;; esac
+    # sysseen[] keyed on the raw field text and accepted EVERY sys row, damaged
+    # spellings included, so `old` filters nothing. Filtering here would compare
+    # the reader against a flattering baseline rather than the one it replaced.
+    case "$seen" in *"|$v|"*) ;; *) seen="$seen|$v| "; F3_OLD=$((F3_OLD + 1)) ;; esac
   done
   json=$(CLAUDE_WATCH_HOME="$TMP" "$CW" report "$F3_DATE" --json 2>"$ERR"); F3_RC=$?
   rest=${json#*\"samples\":}
@@ -301,15 +311,15 @@ while IFS= read -r seq; do
     fi
   fi
   case " $seq " in
-    *" 00 "*|*" 0100 "*|*" EMPTY "*|*" xyz "*)
+    *" 00 "*|*" 0100 "*|*" EMPTY "*|*" xyz "*|*" 900719925474099[23] "*)
       grep -q 'not a plain integer' "$ERR" || {
         f3_unnamed=$((f3_unnamed + 1))
         printf 'UNNAMED BAD EPOCH: [%s]\n' "$seq" >> "$F3_LOG"; } ;;
   esac
 done < "$TMP/f3-seqs"
 
-[ "$f3_n" -eq 258 ] && ok "F3 swept $f3_n real report runs" \
-                    || bad "F3 swept $f3_n real report runs (wanted 258)"
+[ "$f3_n" -eq 584 ] && ok "F3 swept $f3_n real report runs" \
+                    || bad "F3 swept $f3_n real report runs (wanted 584)"
 [ "$f3_rc" -eq 0 ] && ok "F3 every run exits 0" \
                    || bad "F3 every run exits 0 ($f3_rc did not)"
 if [ "$f3_bad" -eq 0 ]; then
@@ -348,6 +358,36 @@ f3_run "xyz 0100"
 grep -q 'not a plain integer' "$ERR" \
   && ok "F4 an all-damaged file is not mistaken for an idle sampler" \
   || bad "F4 an all-damaged file is not mistaken for an idle sampler"
+
+# The precision boundary. 9007199254740992 and ...93 are distinct decimals and
+# distinct textual sysseen[] keys, but the SAME double: with no digit bound they
+# compare equal, collapse into one sample, and never flush, with nothing on
+# stderr. That collision is what would make epoch comparison non-injective and
+# the length-three sweep above unsound, so it is pinned by the real binary here
+# rather than left to a careful reading of the regex.
+echo "F5. the exact-integer boundary, where two epochs become one double"
+f3_run "9007199254740992 9007199254740993"
+[ "$F3_SAMPLES" = 0 ] && ok "F5 past 2^53 both rows are rejected, not merged" \
+                      || bad "F5 past 2^53 (samples=$F3_SAMPLES, wanted 0)"
+[ "$F3_OLD" = 2 ] && ok "F5 the old textual dedupe counted them as 2" \
+                  || bad "F5 old textual count (got $F3_OLD, wanted 2)"
+grep -q 'not a plain integer' "$ERR" \
+  && ok "F5 the collision is reported instead of silently merging" \
+  || bad "F5 the collision is reported instead of silently merging"
+
+# The bound itself: ten digits (through 9999999999, 2286-11-20) is canonical,
+# eleven is not. A real epoch must stay on the accepted side of that line.
+f3_run "1769299200 1769299210"
+[ "$F3_SAMPLES" = 2 ] && ok "F5 a real ten-digit epoch pair is canonical" \
+                      || bad "F5 real epochs (samples=$F3_SAMPLES, wanted 2)"
+[ -s "$ERR" ] && bad "F5 real epochs produce no stderr" \
+              || ok "F5 real epochs produce no stderr"
+f3_run "9999999999 99999999999"
+[ "$F3_SAMPLES" = 1 ] && ok "F5 ten digits in, eleven out" \
+                      || bad "F5 digit bound (samples=$F3_SAMPLES, wanted 1)"
+grep -q 'not a plain integer' "$ERR" \
+  && ok "F5 the over-long epoch is named" \
+  || bad "F5 the over-long epoch is named"
 rm -f "$TMP/raw/$F3_DATE.tsv"
 
 # ==================================== G. 60k rows in well under the deadline ==
