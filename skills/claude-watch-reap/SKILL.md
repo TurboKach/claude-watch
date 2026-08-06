@@ -38,6 +38,8 @@ claude-watch worktrees --remove --yes
 
 `--yes` is what makes these destructive. It is required here because a Claude Bash call has no tty, so the tool's own interactive confirmation is unreachable — which is exactly why step 2 is not optional.
 
+These two commands are **deliberately absent from this skill's `allowed-tools`**, which pre-approves only the read-only `--json` listings. `allowed-tools` grants permission; it does not restrict — every tool stays callable, and anything unlisted simply follows normal permission settings. So the reap surfaces a permission prompt, and that prompt is a second human gate on an irreversible action. Do not "fix" this by adding them.
+
 **`--yes` takes everything removable.** There is no way to pick a subset from here. If the user wants some but not others, tell them to run it themselves in a terminal, where `s` at the prompt steps through one at a time:
 
 ```
