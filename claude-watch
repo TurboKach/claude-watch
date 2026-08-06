@@ -655,6 +655,9 @@ orphans() {
 
   printf '\n'
   i=0
+  # A tree that was selected but not actually reaped (pid changed under us, or
+  # something survived SIGKILL) must not read as success to a --yes caller.
+  local reapfail=0
   for root in $roots; do
     i=$((i + 1))
     name=$(grep "^T${tab}${root}${tab}" "$scan" | cut -f3)
@@ -674,10 +677,10 @@ orphans() {
     else
       printf '  [%d] %s (%s)\n' "$i" "$name" "$(fmt_mem "$rss")"
     fi
-    kill_tree "$root" "$scan"
+    kill_tree "$root" "$scan" || reapfail=1
   done
   tmp_cleanup
-  return 0
+  return "$reapfail"
 }
 
 # Only paths that an agent tool creates on its own. Hand-made worktrees sitting
@@ -765,6 +768,8 @@ scan_worktrees() {
       st=UNSAFE; why="no upstream — nothing published (branch survives removal)"
     elif [ "${unpushed:-0}" -gt 0 ]; then
       st=UNSAFE; why="$(printf '%s unpushed' "${unpushed:-0}")"
+    elif ! liveness_verifiable "$path"; then
+      st=UNSAFE; why="path has bytes lsof escapes — liveness cannot be verified"
     elif [ "$LIVENESS_OK" != "1" ]; then
       # No usable cwd snapshot means we cannot rule out a live process inside.
       # Refuse to call anything stale rather than delete under a running agent.
@@ -797,10 +802,11 @@ still_removable() {
   # move into the worktree while the confirmation prompt is open.
   init_live_cwds
   [ "$LIVENESS_OK" = "1" ] || return 1
+  liveness_verifiable "$path" || return 1
   cwd_in_use_under "$path" && return 1
   session_cwd_under "$path" && return 1
   locked=$(list_repo_worktrees "$path" 2>/dev/null \
-           | LC_ALL=C awk -F'\t' -v p="$path" '$2 == p { print $4 }' | head -n1)
+           | CW_MATCH="$path" LC_ALL=C awk -F'\t' 'BEGIN { p = ENVIRON["CW_MATCH"] } $2 == p { print $4 }' | head -n1)
   [ "${locked:-0}" = "1" ] && return 1
   return 0
 }
@@ -827,9 +833,25 @@ init_live_cwds() {
 cwd_in_use_under() {
   local p=$1
   [ -n "${CWD_SNAP:-}" ] && [ -s "$CWD_SNAP" ] || return 1
-  LC_ALL=C awk -v t="$p" '
-    index($0, t) == 1 && (length($0) == length(t) || substr($0, length(t) + 1, 1) == "/") { hit = 1; exit }
+  # Two separate ways a backslash in the path defeats this match, both of which
+  # would make a LIVE worktree look unoccupied and therefore removable:
+  #
+  #   1. `awk -v t="$p"` runs backslash-escape processing over the value, so a
+  #      literal \t arrives as a tab. ENVIRON hands the bytes over untouched.
+  #   2. `lsof -F` escapes backslashes in the names it prints: a directory truly
+  #      named my\trepo is reported as my\\trepo. Normalise our side to match
+  #      rather than trying to unescape lsof's.
+  CW_MATCH="$p" LC_ALL=C awk '
+    BEGIN { t = ENVIRON["CW_MATCH"]; gsub(/\\/, "\\\\", t); n = length(t) }
+    index($0, t) == 1 && (length($0) == n || substr($0, n + 1, 1) == "/") { hit = 1; exit }
     END { exit !hit }' "$CWD_SNAP"
+}
+
+# lsof also renders control bytes with escapes we do not model, so a path
+# containing one cannot be matched reliably. Rather than risk deleting a live
+# worktree, such a path is never treated as verifiable.
+liveness_verifiable() {
+  case "$1" in *[[:cntrl:]]*) return 1 ;; *) return 0 ;; esac
 }
 
 # Kept as a cheap secondary signal: it catches a session whose root IS the
@@ -945,6 +967,9 @@ worktrees() {
 
   printf '\n'
   i=0
+  # A worktree that was selected but not actually removed (it changed under us,
+  # or git refused) must not read as success to a --remove --yes caller.
+  local rmfail=0
   # Targets are read on fd 3, not stdin: the confirmation prompt below reads
   # stdin, and a path list piped into the loop would be eaten by it. Reading a
   # line at a time also keeps paths containing spaces intact, which splitting an
@@ -972,6 +997,7 @@ worktrees() {
     # orphan killer applies to pids.
     if ! still_removable "$path"; then
       printf '    %s✗ changed since it was listed — skipping%s\n' "$C_RED" "$C_RST"
+      rmfail=1
       continue
     fi
     # git worktree remove, never rm -rf: git re-checks for local modifications
@@ -982,6 +1008,7 @@ worktrees() {
       git -C "$main" worktree prune 2>/dev/null
       if [ -d "$path" ]; then
         printf '    %s✗ git refused to remove it — left untouched%s\n' "$C_RED" "$C_RST"
+        rmfail=1
       else
         printf '    %s✓ pruned%s\n' "$C_OK" "$C_RST"
       fi
@@ -996,7 +1023,7 @@ worktrees() {
     printf '\n%sleftover agent branches (not deleted — review by hand)%s\n' "$C_DIM" "$C_RST"
     printf '%s\n' "$leftover"
   fi
-  return 0
+  return "$rmfail"
 }
 
 orphan_branches() {
