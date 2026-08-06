@@ -551,6 +551,24 @@ same_process() {   # <idmap> <pid>
   return 0
 }
 
+# Walk the ppid chain upward to confirm membership. Used before anchoring the
+# identity of a pid we only just discovered: enumeration and acting on it are
+# separate moments, and in between the pid can exit and be recycled onto an
+# unrelated process. Anchoring that stranger would make it look like ours and
+# get it killed in the force pass.
+is_descendant_of() {   # <pid> <root>
+  local p=$1 root=$2 guard=0
+  [ "$p" = "$root" ] && return 0
+  while [ "$guard" -lt 64 ]; do
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+    [ -n "$p" ] || return 1
+    [ "$p" = "$root" ] && return 0
+    [ "$p" = "1" ] || [ "$p" = "0" ] && return 1
+    guard=$((guard + 1))
+  done
+  return 1
+}
+
 # Current subtree of a pid, deepest first, read live from ps rather than from
 # any earlier snapshot.
 live_descendants() {
@@ -608,8 +626,15 @@ kill_tree() {
   # between an enumeration and the STOP that was meant to prevent it.
   local stopped="" prev="" pass=0
   while [ "$pass" -lt 4 ]; do
-    for pid in $pids; do kill -STOP "$pid" 2>/dev/null; remember_id "$idmap" "$pid"; done
-    stopped="$stopped $pids"
+    for pid in $pids; do
+      # Only anchor something still provably in this tree. A pid recycled between
+      # the enumeration and this moment is someone else's, and recording it here
+      # is what would later authorise SIGKILL against it.
+      is_descendant_of "$pid" "$root" || continue
+      kill -STOP "$pid" 2>/dev/null
+      remember_id "$idmap" "$pid"
+      stopped="$stopped $pid"
+    done
     prev=$(printf '%s\n' $pids | sort -u | tr '\n' ' ')
     pids=$(live_descendants "$root")
     [ "$(printf '%s\n' $pids | sort -u | tr '\n' ' ')" = "$prev" ] && break
