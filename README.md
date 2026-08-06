@@ -82,11 +82,83 @@ SYSTEM
 claude-watch                    # today so far
 claude-watch report yesterday   # yesterday's digest
 claude-watch report 2026-08-01  # any retained day
+claude-watch advise             # what should I fix, ranked
 claude-watch status             # is sampling alive, how recent, how much data
 claude-watch doctor             # check the install end to end
 ```
 
 The digest prints automatically on your first shell of a new day.
+
+## `claude-watch advise` — what should I fix
+
+`report` tells you what used the machine. `advise` tells you what to do about it: every domain checked, ranked worst-first, each finding carrying the threshold that fired and the command that clears it.
+
+```
+claude-watch advise  CRITICAL disk — 4.7% free — 19.8 GiB of 422 GiB on /System/Volumes/Data
+  24h · 5084 samples · 14h07m observed · interval 10s
+
+  DISK  CRITICAL 4.7% free (19.8 GiB of 422 GiB); 25.5 GiB of rebuildable build output (a floor)
+    disk facts are 2d07h old (refreshed every 6h) — nothing has rescanned since. For current
+    numbers: claude-watch disk --refresh (~10s, 120s cap)
+    CRITICAL disk.volume_low
+      4.7% free — 19.8 GiB of 422 GiB on /System/Volumes/Data
+      under the 10% line (CLAUDE_WATCH_DISK_CRIT_PCT) AND under the 25 GiB line
+      (CLAUDE_WATCH_DISK_CRIT_GIB); critical needs both. df reports a 460 GiB APFS container,
+      which is not the denominator: this volume can only use 422 GiB.
+      critical at 25.0 GiB — CLAUDE_WATCH_DISK_CRIT_GIB · 19.8 GiB 95.3% of this domain
+    CRITICAL disk.reclaimable.rebuildable
+      25.5 GiB of rebuildable build output (.venv, venv, target, .next, DerivedData) — 6.0%
+      of the volume, a floor
+      25.5 GiB across 57 directories, a floor. Rebuild cost: .next comes back in seconds; a
+      Rust target takes minutes to tens of minutes; … Confidence: 2 confirmed, 0 likely,
+      0 unverified (only confirmed hits get a command).
+      critical at 8.4 GiB — CLAUDE_WATCH_DISK_GROUP_WARN_PCT · 25.5 GiB 6.0% of this domain
+      → cache is 2d old; (cd '/Users/you/Dev/engine' && cargo clean) — frees 11.0 GiB ·
+        rm -rf '/Users/you/Dev/site/.next' — frees 1.2 GiB
+
+  LEAKS  INFO 2 removable worktrees (596 KiB reclaimable)
+    INFO leaks.worktrees
+      2 removable agent worktrees, 596 KiB reclaimable
+      largest 312 KiB, oldest 143d; warns at 1 GiB reclaimable
+      info at 1.0 GiB — CLAUDE_WATCH_LEAKS_WORKTREE_WARN_GIB · 0.0 GiB 0.0% of this domain
+      → run /claude-watch-reap and choose worktrees to remove them
+        (largest: '/Users/you/conductor/workspaces/site/monaco')
+
+  CPU and memory advice are not in this version. … A quiet CPU report does not mean a cool
+  machine.
+  not measured here: cpu, memory
+```
+
+Every finding names the **threshold that fired and the knob that sets it**, so the number is yours to argue with. A removal command is printed only for a hit whose kind is *proven* — a `Cargo.toml` beside the `target`, a `pyvenv.cfg` inside the `.venv` — and never for a directory matched on name alone: hand-made `venv`s full of notes exist, and a read-only tool does not get to author `rm -rf` because a glob matched. The idle check is also **re-`stat`ed at print time**, so a `cargo build` an hour after the scan downgrades the finding instead of handing you a command that deletes a live cache.
+
+```bash
+claude-watch advise                     # last 24h
+claude-watch advise --window week       # or month, or 6h / 2w / 14d
+claude-watch advise --show-thresholds   # every threshold, and what set it
+claude-watch advise --json              # the contract; see below
+claude-watch disk                       # the disk domain alone, from cache
+claude-watch disk --refresh             # the only thing here that scans
+```
+
+**Window.** Default `24h`. `week` = `7d`, `month` = `30d`, and `Nh` / `Nd` / `Nw` are accepted; anything else exits 2 naming every accepted form. The window is clamped to `CLAUDE_WATCH_KEEP_DAYS` (30) and the output says so when it clamps. A month asked of two days of data reports two days and says which — a month heading over two days of evidence is a confidently wrong answer.
+
+**`advise` never scans.** It reads the disk facts cached by `claude-watch disk --refresh`, which are used silently for **6 hours**, then still used but flagged stale with their age. If nothing has ever scanned, the disk domain is reported `unknown` with the remedy — it will not go away and scan on its own, because the one thing this project never does is start work you did not ask for. A refresh takes ~10s here and is stopped at a hard **120-second deadline**; whatever landed by then is written and labelled a floor.
+
+**Every reclaim total is a floor**, not a total, on every path — the scan is depth-capped, skips paths a TSV cannot carry, and skips roots on other volumes.
+
+**Thresholds** are named constants with a `CLAUDE_WATCH_*` override each; `advise --show-thresholds` prints all of them with each value's source (`default`, or the variable that overrode it). Retune there rather than editing the installed script, which `git pull` will overwrite.
+
+Why a disk domain in a Claude-session monitor: agent sessions are what generate the build artifacts. Every worktree an agent creates gets its own `target`, `.venv` or `node_modules`, and nothing ever removes them.
+
+### When `advise` says something is wrong with itself
+
+| symptom | what it means | do |
+|---|---|---|
+| `disk facts are Nd old` | nothing has rescanned since | `claude-watch disk --refresh` |
+| a domain reads `unknown` / `unmeasured` | that domain was not measured — never read it as clean | `claude-watch status`, then `claude-watch doctor` |
+| `disk scan stopped at its 120s deadline` | more tree than the deadline allows | narrow `CLAUDE_WATCH_REPO_ROOTS`, or re-run when the machine is idle |
+| `could not read N directories (permission denied)` | TCC — `~/Library/Caches` and `~/Library/Containers` deny by default | grant Full Disk Access to your terminal, or narrow the roots. Only the groups whose own measurement was blocked are capped at `info`; the rest keep their real severity |
+| the scan hangs on a network mount | the deadline's honest residual | the parent stops waiting and returns with a partial result, but a worker blocked in **uninterruptible I/O does not die on a signal** and may linger until the mount responds. Keep network mounts out of `CLAUDE_WATCH_REPO_ROOTS` |
 
 ## Reaping — `orphans` and `worktrees`
 
@@ -159,9 +231,11 @@ They are symlinked rather than copied, so the skill stays in step with the flags
 
 ### `--json`
 
-`report`, `orphans`, `worktrees` and `status` all take `--json`, so an agent reads values instead of pattern-matching a layout that is free to change:
+`advise`, `disk`, `report`, `orphans`, `worktrees` and `status` all take `--json`, so an agent reads values instead of pattern-matching a layout that is free to change:
 
 ```bash
+claude-watch advise --json
+claude-watch disk --json
 claude-watch report today --json
 claude-watch orphans --json
 claude-watch worktrees --json
@@ -169,6 +243,16 @@ claude-watch status --json
 ```
 
 `--json` is read-only by construction: it prints and exits before any confirmation or kill path is reachable.
+
+Exit codes, because `1` already means three different things across this CLI:
+
+| code | meaning |
+|---|---|
+| `0` | ran. Findings may be `critical` — **a full disk is not a tool failure.** `doctor` is the health gate, not `advise` |
+| `1` | the data directory is unreadable, or `disk --refresh` could not write its cache |
+| `2` | usage error: bad flag, bad `--window`, bad threshold value |
+
+`advise --json` carries `schema_version`, a `primary` object that is the single authoritative state, and a `domains[]` array already sorted worst-first with each domain's `priority` and each finding's integer `severity_rank`. A consumer never re-derives severity or re-ranks; unknown enum values are to be treated as *unmeasured*, never as healthy. `disk --json` returns the same disk domain object, minus `priority`.
 
 ```json
 {"command":"orphans","min_minutes":60,"trees":[
@@ -181,6 +265,13 @@ claude-watch status --json
 Worktree records carry an explicit `removable` boolean alongside `status` and `reason`, so an agent never has to infer eligibility from the status string.
 
 `unpushed` is the number of commits reachable from `HEAD` but from no remote-tracking ref, which the top-level `"unpushed_basis":"local-remote-refs"` states outright. It deliberately does not depend on a configured upstream — agent tools create branches without tracking config, and asking `@{u}` reported their entire history as unpublished — and it does not fetch, so a commit pushed from another machine keeps counting until this clone learns of it. Erring in that direction only ever makes a worktree look *less* removable.
+
+### Data format changes
+
+**2026-08-06.** Two breaking changes landed with `advise`, both in one release:
+
+- **`status --json`: `disk` → `data_size`.** That field has always meant *the size of the data directory* (`"4.1M"`), and `disk` now means the volume. One word with two meanings inside one agent contract was not survivable, so the field was renamed rather than overloaded.
+- **Sampler schema v2.** `tools/sample.sh` records additional fields — including physical memory size and swap cap — so the deferred CPU/memory analyzer needs no second collection pass. Existing day files stay readable: rows written before the change are the **estimate era** and are identified per row, not per file, so a window spanning the change is read correctly and a truncated row degrades that row alone. Anything parsing raw TSV by fixed column index needs re-checking against the current sampler.
 
 ### Why a skill and not an MCP server
 
@@ -231,7 +322,18 @@ The shell hook costs ~1.3ms on a normal shell start: the date comparison is an i
 | `CLAUDE_WATCH_TOPN` | `8` | max machine-wide rows per sample |
 | `CLAUDE_WATCH_ORPHAN_MIN` | `60` | minutes before an unparented dev process is flagged |
 | `CLAUDE_WATCH_KEEP_DAYS` | `30` | raw retention |
-| `CLAUDE_WATCH_REPO_ROOTS` | `~/Dev` | colon-separated roots scanned for agent worktrees |
+| `CLAUDE_WATCH_REPO_ROOTS` | `~/Dev` | colon-separated roots scanned for agent worktrees **and for reclaimable build output** |
+| `CLAUDE_WATCH_DISK_CACHE` | `$CLAUDE_WATCH_HOME/state/disk.tsv` | where `disk --refresh` writes its facts |
+| `CLAUDE_WATCH_DISK_CRIT_PCT` | `10` | volume `critical` below this % free **and** below `_CRIT_GIB` |
+| `CLAUDE_WATCH_DISK_CRIT_GIB` | `25` | the absolute half of the same test |
+| `CLAUDE_WATCH_DISK_WARN_PCT` | `20` | volume `warn` below this % free **and** below `_WARN_GIB` |
+| `CLAUDE_WATCH_DISK_WARN_GIB` | `50` | the absolute half of the same test |
+| `CLAUDE_WATCH_DISK_GROUP_WARN_PCT` | `2` | a reclaimable group is worth surfacing at this % of the volume |
+| `CLAUDE_WATCH_LEAKS_ORPHAN_WARN_HOURS` | `24` | orphan tree age that warns |
+| `CLAUDE_WATCH_LEAKS_ORPHAN_WARN_MB` | `200` | orphan tree size that warns |
+| `CLAUDE_WATCH_LEAKS_WORKTREE_WARN_GIB` | `1` | reclaimable worktree space that warns |
+
+Each threshold is `AND`ed with its partner where two are listed: on a 4TB volume, 10% is 400GiB, so `or` would report `critical` with 399GiB free. Non-integer or negative values exit 2. `claude-watch advise --show-thresholds` prints the effective table and where each value came from.
 
 What counts as a leaked dev process lives in one file, `tools/orphan-policy.sh`, read by both the sampler that records orphans and the command that kills them. For a destructive command, the list you are shown and the thing that actually gets killed coming from a single rule is a safety property, not a style preference.
 
@@ -252,6 +354,7 @@ Fixture-based tests for the report aggregation are the remaining gap; the smoke 
 - **macOS only** — uses `ps`, `vm_stat`, `lsof` and `launchd`.
 - **CPU and memory only.** GPU and Neural Engine power are not measured; real per-process watts need `sudo powermetrics`. A process heating the machine mostly via GPU will under-report here.
 - **10-second resolution** in `claude-watch`. Spikes shorter than that are under-sampled.
+- **`advise` covers disk and leaks, not CPU or memory.** They are listed in its `deferred_domains` and it says so in its own footer, because a tool built to answer "why is my laptop hot" must not stay quiet about the part it cannot see. Even `report`'s CPU figures are partial by construction: anything under `CLAUDE_WATCH_FLOOR` (5% of one core) or outside the top `CLAUDE_WATCH_TOPN` (8) per sample is never recorded, so twenty processes at 4% — 0.8 cores — produce no rows at all. **A quiet CPU report is not a cool machine.**
 
 ## Uninstall
 
