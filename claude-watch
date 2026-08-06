@@ -660,8 +660,20 @@ kill_tree() {
   done
   [ -n "$pids" ] || { printf '  %salready gone%s\n' "$C_DIM" "$C_RST"; rm -f "$idmap"; return 0; }
 
-  for pid in $pids; do kill -TERM "$pid" 2>/dev/null; done
-  for pid in $pids; do kill -CONT "$pid" 2>/dev/null; done
+  # Identity-check here too, not only in the force pass. A stopped process can be
+  # killed by something else (or the SIGSTOP may never have landed) and its pid
+  # reused during the freeze, and TERM or CONT to that replacement is already
+  # damage by the time the later KILL pass validates anything.
+  # TERM the whole tree before resuming any of it, so a process that traps TERM
+  # has fewer live relatives to fork from once it runs again.
+  for pid in $pids; do
+    same_process "$idmap" "$pid" || continue
+    kill -TERM "$pid" 2>/dev/null
+  done
+  for pid in $pids; do
+    same_process "$idmap" "$pid" || continue
+    kill -CONT "$pid" 2>/dev/null
+  done
   waited=0
   while [ "$waited" -lt 30 ]; do
     still=0
