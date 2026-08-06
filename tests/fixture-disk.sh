@@ -470,6 +470,46 @@ else
   chmod 755 "$TMP/permfail/target/locked"
 fi
 
+# A group under the 2% line produces no finding, so none of its dir rows can
+# ever be printed — and probing them spends the budget the publishable rows
+# need. The sub-threshold group is listed FIRST, exactly as the real cache
+# orders it, and DISK_RESTAT_MAX is forced to 2 so the budget is provably
+# smaller than the work: without the filter both probes land on rows that are
+# then discarded and the rebuildable group loses every command. The marker
+# re-check keys off the basename, not the group label, so `target` trees stand
+# in for node_modules trees here and the case needs no second tree shape.
+mk_target "$TMP/nm1"; mk_target "$TMP/nm2"; mk_target "$TMP/nm3"
+mk_target "$TMP/rb1"; mk_target "$TMP/rb2"
+good_cache "$TMP/filter.tsv" "group	node_modules	8845750	3	0
+dir	$TMP/nm1/target	3000000	node_modules	confirmed
+dir	$TMP/nm2/target	2000000	node_modules	confirmed
+dir	$TMP/nm3/target	1000000	node_modules	confirmed
+group	rebuildable	26738688	2	0
+dir	$TMP/rb1/target	9000000	rebuildable	confirmed
+dir	$TMP/rb2/target	8000000	rebuildable	confirmed"
+save_r=$DISK_RESTAT_MAX; DISK_RESTAT_MAX=2
+from_cache "$TMP/filter.tsv"
+DISK_RESTAT_MAX=$save_r
+A=$(F disk.reclaimable.rebuildable 14)
+has "budget goes to the published group" "$A" "rm -rf '$TMPR/rb1/target'"
+has "  both published rows revalidated" "$A" "rm -rf '$TMPR/rb2/target'"
+has "  and the render agrees with the cache" "$(F disk.reclaimable.rebuildable 13)" "Confidence: 2 confirmed, 0 likely"
+eq "  sub-threshold group emits nothing" "$(nfind)" 2
+
+# Predicate parity: disk_body's probe filter and disk_findings' publish test are
+# one function, so the group that gets a finding is exactly the group that gets
+# its rows revalidated. Asserted at the boundary, where a one-KB disagreement
+# between two copies of the test would show.
+good_cache "$TMP/parityin.tsv" "group	rebuildable	8845751	1	0
+dir	$TMP/rb1/target	8845751	rebuildable	confirmed"
+from_cache "$TMP/parityin.tsv"
+eq "group exactly at the 2% line: finding" "$(nfind)" 2
+has "  and its command is printed"     "$(F disk.reclaimable.rebuildable 14)" "rm -rf '$TMPR/rb1/target'"
+good_cache "$TMP/parityout.tsv" "group	rebuildable	8845750	1	0
+dir	$TMP/rb1/target	8845750	rebuildable	confirmed"
+from_cache "$TMP/parityout.tsv"
+eq "one KB below: no finding at all"   "$(nfind)" 1
+
 # The 14d boundary, pinned without a wall-clock race. `find -newer` is strict,
 # so an entry sitting exactly on the stamp reads as idle — which is precisely
 # why disk_body builds the stamp at `date -v-14d -v-1S`, one second BEFORE the

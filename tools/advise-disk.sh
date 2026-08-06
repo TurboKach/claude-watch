@@ -118,6 +118,20 @@ disk_is_uint() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; 
 # has already mis-split a row that contains a tab.
 disk_clean() { local s=${1//$'\t'/ }; printf '%s' "${s//$'\n'/ }"; }
 
+# A group under DISK_GROUP_WARN_PCT produces no finding, so none of its dir rows
+# can ever be printed. Three call sites: the findings loop, the summary loop, and
+# disk_body's probe filter. If they ever disagree, the probe filter is the
+# dangerous side — a group disk_findings publishes but disk_body refused to
+# revalidate loses every one of its commands, silently. Hence one function.
+# Anything non-numeric or a zero denominator answers "not published", which costs
+# a command and never authors one.
+disk_group_published() {   # <size_kb> <total_kb>
+  local sz=$1 total=$2
+  disk_is_uint "$sz" || return 1
+  [ -n "$total" ] && [ "$total" -gt 0 ] 2>/dev/null || return 1
+  [ $(( sz * 100 )) -ge $(( DISK_GROUP_WARN_PCT * total )) ]
+}
+
 disk_rank() {
   case $1 in critical) printf 4 ;; warn) printf 3 ;; info) printf 2 ;;
              unknown)  printf 1 ;; *) printf 0 ;; esac
@@ -455,10 +469,8 @@ disk_findings() {
   local i j
   for (( i = 0; i < ${#glabel[@]}; i++ )); do
     local lab=${glabel[$i]} sz=${gsize[$i]} cnt=${gcount[$i]} aff=${gaff[$i]}
-    disk_is_uint "$sz" || continue
-    [ "$total" -gt 0 ] || continue
     # >= 2% of volume_total_kb, and nothing below that line is surfaced at all.
-    [ $(( sz * 100 )) -ge $(( DISK_GROUP_WARN_PCT * total )) ] || continue
+    disk_group_published "$sz" "$total" || continue
 
     # Inheritance (§5): severity copied from disk.volume_low, never downward.
     local gsev=warn
@@ -510,9 +522,7 @@ disk_findings() {
   # ---- summary ------------------------------------------------------------
   local base ngroups=0 rtotalkb=0 onelabel=''
   for (( i = 0; i < ${#glabel[@]}; i++ )); do
-    disk_is_uint "${gsize[$i]}" || continue
-    [ "$total" -gt 0 ] || continue
-    [ $(( ${gsize[$i]} * 100 )) -ge $(( DISK_GROUP_WARN_PCT * total )) ] || continue
+    disk_group_published "${gsize[$i]}" "$total" || continue
     ngroups=$((ngroups + 1)); rtotalkb=$(( rtotalkb + ${gsize[$i]} )); onelabel=${glabel[$i]}
   done
   base="$(disk_pct "$avail" "$total")% free ($(disk_h "$avail") of $(disk_h "$total"))"
@@ -683,7 +693,8 @@ advise_disk() {
   now=$(date +%s 2>/dev/null) || now=$epoch
   age=$(( now - epoch )); [ "$age" -ge 0 ] || age=0
 
-  disk_findings ok "$used" "$avail" "$dfsize" "$mount" "$age" < <(disk_body "$cache" "$now")
+  disk_findings ok "$used" "$avail" "$dfsize" "$mount" "$age" \
+    < <(disk_body "$cache" "$now" "$(( used + avail ))")
   return 0
 }
 
@@ -702,7 +713,20 @@ advise_disk() {
 #  3. A 6th column with each dir's age in seconds, for the transcripts age
 #     breakdown. '-' when it cannot be read.
 disk_body() {
-  local cache=$1 now=$2
+  local cache=$1 now=$2 total=${3:-0}
+  disk_thresholds
+  # Pass 1: which groups will produce a finding. Newline-delimited so a label
+  # containing a space cannot alias another; a label containing a newline cannot
+  # reach here (advise_disk rejects the row first). Two passes, not one, because
+  # nothing in §3c orders `group` rows before `dir` rows, so a single-pass
+  # version would be silently correct only on caches this scanner happens to
+  # write.
+  local pub=$'\n' pk pa pb pc pd
+  while IFS=$'\t' read -r pk pa pb pc pd || [ -n "$pk" ]; do
+    [ "$pk" = group ] || continue
+    disk_group_published "$pb" "$total" && pub="$pub$pa"$'\n'
+  done < "$cache"
+
   local stamp cutoff t0=$SECONDS
   # See DISK_IDLE_SLACK_S: the stamp sits just before the cutoff so that an
   # entry exactly on the 14d line reads as active under find's strict -newer.
@@ -721,6 +745,20 @@ disk_body() {
         if [ -d "$a" ]; then
           mt=$(stat -f %m "$a" 2>/dev/null)
           disk_is_uint "$mt" && age=$(( now - mt )) && [ "$age" -ge 0 ] || age='-'
+        fi
+        if [ "$conf" = confirmed ]; then
+          case $pub in
+            *$'\n'"$c"$'\n'*) : ;;
+            # This group is below the group-warn line, so it produces no finding
+            # and this row can never be printed. Probing it burns the budget the
+            # publishable rows need — on the machine this was diagnosed on, 1.02s
+            # of the 2s budget went on seven node_modules rows that are discarded
+            # downstream, and they sort first in the cache. Downgrade rather than
+            # pass `confirmed` through unchecked, so the invariant "a confirmed
+            # row reaching disk_findings has passed the print-time gate" holds
+            # unconditionally.
+            *) conf=likely ;;
+          esac
         fi
         if [ "$conf" = confirmed ]; then
           if ! disk_path_safe "$a"; then
