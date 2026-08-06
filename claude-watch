@@ -229,7 +229,7 @@ report() {
       first = 1
       for (i = 1; i <= pkn; i++) {
         key = bk[i]; if (psum[key] <= 0) break
-        printf "%s{\"name\":\"%s\",\"cpu_seconds\":%d,\"peak_cores\":%.2f,\"avg_cores\":%.2f,\"seen_pct\":%.1f}",
+        printf "%s{\"name\":\"%s\",\"cpu_seconds\":%.1f,\"peak_cores\":%.2f,\"avg_cores\":%.2f,\"seen_pct\":%.1f}",
                (first ? "" : ","), jesc(key), psum[key] * iv, ppeak[key], psum[key] / pn[key], pn[key] * 100 / sysn
         first = 0
       }
@@ -494,6 +494,23 @@ scan_orphans() {
     }'
 }
 
+# Current subtree of a pid, deepest first, read live from ps rather than from
+# any earlier snapshot.
+live_descendants() {
+  ps -Ao pid=,ppid= 2>/dev/null | LC_ALL=C awk -v r="$1" '
+    { kids[$2] = kids[$2] " " $1 }
+    END {
+      n = 1; q[1] = r; d[r] = 0
+      for (i = 1; i <= n; i++) {
+        m = split(kids[q[i]], k, " ")
+        for (j = 1; j <= m; j++) if (k[j] != "") { q[++n] = k[j]; d[k[j]] = d[q[i]] + 1 }
+      }
+      maxd = 0
+      for (i = 1; i <= n; i++) if (d[q[i]] > maxd) maxd = d[q[i]]
+      for (lv = maxd; lv >= 0; lv--) for (i = 1; i <= n; i++) if (d[q[i]] == lv) print q[i]
+    }'
+}
+
 # Kill one tree. Two safety properties, both load-bearing:
 #   1. Deepest-first. Killing the root first reparents its live children to
 #      launchd, where they simply return as brand-new orphans still holding
@@ -523,7 +540,22 @@ kill_tree() {
 
   [ -n "$pids" ] || { printf '  %salready gone%s\n' "$C_DIM" "$C_RST"; return 0; }
 
-  for pid in $pids; do kill -TERM "$pid" 2>/dev/null; done
+  # The stored list is what we VERIFIED; it is not what we may KILL. A root can
+  # fork after the listing — including while the confirmation prompt is open —
+  # and a child missing from the stored list would be reparented to launchd when
+  # its parent dies, surviving as a brand-new orphan while we reported success.
+  # That is precisely the bug the subtree walk exists to prevent.
+  #
+  # SIGSTOP first so the tree cannot fork out from under the enumeration, then
+  # re-enumerate to catch anything created before the stop landed. SIGTERM is
+  # paired with SIGCONT because a stopped process cannot act on TERM.
+  for pid in $pids; do kill -STOP "$pid" 2>/dev/null; done
+  pids=$(live_descendants "$root")
+  for pid in $pids; do kill -STOP "$pid" 2>/dev/null; done
+  pids=$(live_descendants "$root")
+  [ -n "$pids" ] || { printf '  %salready gone%s\n' "$C_DIM" "$C_RST"; return 0; }
+
+  for pid in $pids; do kill -TERM "$pid" 2>/dev/null; kill -CONT "$pid" 2>/dev/null; done
   waited=0
   while [ "$waited" -lt 30 ]; do
     still=0
