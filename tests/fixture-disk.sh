@@ -437,6 +437,39 @@ DISK_PROBE_SECONDS=$save_s
 probe_cache cold2 "$TMP/cold/target"
 has "  and the bounds are restored"    "$(F disk.reclaimable.rebuildable 14)" "rm -rf"
 
+# The entry cap boundary, both sides. The probe only returns idle when the walk
+# printed its completion sentinel, and head cuts that sentinel off exactly when
+# the tree is larger than the cap — so a tree of EXACTLY the cap completes and
+# one entry more does not. Counted from the tree itself, never hard-coded.
+CE=$(find "$TMP/cold/target" | grep -c '')
+save_e=$DISK_PROBE_ENTRIES
+DISK_PROBE_ENTRIES=$CE
+probe_cache capat "$TMP/cold/target"
+has "tree exactly at the entry cap: cmd" "$(F disk.reclaimable.rebuildable 14)" "rm -rf"
+DISK_PROBE_ENTRIES=$(( CE - 1 ))
+probe_cache capover "$TMP/cold/target"
+hasnt "one entry over the cap: no cmd"  "$(F disk.reclaimable.rebuildable 14)" "rm -rf"
+DISK_PROBE_ENTRIES=$save_e
+
+# An unreadable subtree must fail CLOSED. BSD find exits 1 and prints a short
+# list with no sentinel; before the completion sentinel existed that read as
+# "no recent entry found" = idle, and authored an rm -rf for a tree nobody
+# could inspect. Root can read anything, so root skips rather than lies.
+if [ "$(id -u)" = 0 ]; then
+  ok "unreadable subtree fails closed (skipped: running as root)"
+else
+  mk_target "$TMP/permfail"
+  mkdir -p "$TMP/permfail/target/locked"; : > "$TMP/permfail/target/locked/f"
+  touch -t "$OLD" "$TMP/permfail/target/locked/f" "$TMP/permfail/target/locked" \
+                  "$TMP/permfail/target" "$TMP/permfail"
+  chmod 000 "$TMP/permfail/target/locked"
+  probe_cache permfail "$TMP/permfail/target"
+  A=$(F disk.reclaimable.rebuildable 14)
+  hasnt "unreadable subtree: no command" "$A" "rm -rf"
+  eq "  and downgraded to likely"        "$(F disk.reclaimable.rebuildable 11)" likely
+  chmod 755 "$TMP/permfail/target/locked"
+fi
+
 # The 14d boundary, pinned without a wall-clock race. `find -newer` is strict,
 # so an entry sitting exactly on the stamp reads as idle — which is precisely
 # why disk_body builds the stamp at `date -v-14d -v-1S`, one second BEFORE the

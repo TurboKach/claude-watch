@@ -260,18 +260,39 @@ disk_marker_present() {
 # OR the walk could not be completed inside its budget. Both non-idle answers
 # collapse to the same conservative outcome by design.
 disk_probe_idle() {
-  local d=$1 stamp=$2 sent out n
+  local d=$1 stamp=$2 sent fin out
   sent="${stamp##*/}-hot"
+  fin="${stamp##*/}-done"
   # One walk. An entry newer than the cutoff prints the sentinel and quits, so
   # the active case is O(1); every other entry prints its path, so `head`
   # bounds the idle case, which is the one that has to walk the whole tree.
   # The sentinel is derived from the mktemp stamp name, so a file that could
   # forge it does not realistically exist — and a forgery downgrades anyway.
-  out=$(find "$d" \( -newer "$stamp" -exec printf '%s\n' "$sent" \; -quit \) -o -print 2>/dev/null \
-        | head -n "$DISK_PROBE_ENTRIES")
-  printf '%s\n' "$out" | grep -qxF "$sent" && return 1
-  n=$(printf '%s\n' "$out" | grep -c '')
-  [ "$n" -ge "$DISK_PROBE_ENTRIES" ] && return 1
+  #
+  # The `$fin` line is printed ONLY if find itself exited 0 (`&&`), and head
+  # cuts it off if the walk exceeded the entry cap. So "the last line is $fin"
+  # is a single test for: the walk finished, and it finished without error. A
+  # find killed by SIGPIPE from head, or one that hit a permission-denied
+  # subtree (BSD find exits 1), prints no sentinel and the row downgrades —
+  # previously such a walk returned a short list, no sentinel, and read as
+  # idle. This is the convention disk-scan.sh uses at scan time; stderr stays
+  # discarded because here the exit status is the only part we act on.
+  out=$( { find "$d" \( -newer "$stamp" -exec printf '%s\n' "$sent" \; -quit \) -o -print 2>/dev/null \
+           && printf '%s\n' "$fin"; } | head -n "$(( DISK_PROBE_ENTRIES + 1 ))" )
+  # `-quit` fires after the sentinel is printed, so the sentinel may be the
+  # last line of find's output rather than the first — test all four positions.
+  # Done with `case`, not `printf | grep -qxF`: under `set -o pipefail` (which
+  # tests/fixture-disk.sh sets) grep -q closing the pipe early makes the
+  # pipeline return 141 even on a match, and `&& return 1` then does not fire —
+  # a hot tree reading as idle.
+  case $out in
+    "$sent"|"$sent"$'\n'*|*$'\n'"$sent"|*$'\n'"$sent"$'\n'*) return 1 ;;
+  esac
+  # No explicit entry count: a walk over the cap loses its $fin line to head,
+  # which subsumes the old `n >= DISK_PROBE_ENTRIES` test. The cap boundary
+  # shifts by one in the SAFE direction — a tree of exactly DISK_PROBE_ENTRIES
+  # entries now completes, one of cap + 1 does not.
+  [ "${out##*$'\n'}" = "$fin" ] || return 1
   return 0
 }
 
