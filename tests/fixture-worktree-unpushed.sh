@@ -57,6 +57,22 @@ trap 'rm -rf "$TMP"' EXIT
 # (rev-list, status, worktree remove) as child processes, and only the
 # environment reaches those. HOME moves too — plenty of tools read it directly,
 # and it keeps the scan away from the real ~/.claude.
+#
+# Redirecting the config FILES is not enough on its own, because git also takes
+# configuration straight from the environment, at command scope — which outranks
+# every file. GIT_CONFIG_COUNT with its GIT_CONFIG_KEY_<n>/GIT_CONFIG_VALUE_<n>
+# pairs, and the older GIT_CONFIG_PARAMETERS, both inject settings that survive
+# any GIT_CONFIG_GLOBAL. A suite launched with core.hooksPath armed that way ran
+# the caller's hooks on every commit below and still reported all green. The
+# same is true of the execution vectors that are not config at all: GIT_EXEC_PATH
+# substitutes the subcommand binaries, GIT_SSH_COMMAND, GIT_ASKPASS and
+# GIT_EXTERNAL_DIFF each name a program to run, and GIT_DIR / GIT_WORK_TREE /
+# GIT_OBJECT_DIRECTORY would point the sandbox at a real repository.
+#
+# Rather than chase that list — the config pairs alone are numbered from zero
+# with no ceiling — clear the whole GIT_* namespace first and put back only what
+# this fixture chooses. Anything git grows later is covered by construction.
+unset ${!GIT_@}
 export HOME="$TMP/home"
 export XDG_CONFIG_HOME="$TMP/home/.config"
 mkdir -p "$TMP/home" "$TMP/empty-hooks" "$TMP/empty-template" || exit 1
