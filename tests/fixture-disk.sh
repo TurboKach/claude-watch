@@ -594,6 +594,48 @@ else
   chmod 755 "$FD"
 fi
 
+# The HOT signal must not depend on a forked utility. `\( -newer -exec printf
+# \; -quit \)` is an implicit AND: when the child fails the predicate is FALSE,
+# so -quit never runs, find falls through to `-o -print0`, walks the whole tree
+# and exits 0, and the completion record is emitted — a tree with an entry
+# newer than the stamp read as IDLE and got an rm -rf. Not hypothetical: -exec
+# resolves its utility through PATH, and fork/exec fails transiently under the
+# memory pressure this tool exists to report on.
+#
+# Forced deterministically by putting a `printf` that exits 1 first on PATH.
+# The shell's own printf is a BUILTIN, so nothing else in the probe sees the
+# shim — only `find -exec` resolves through PATH.
+mkdir -p "$TMP/shim"
+printf '#!/bin/sh\nexit 1\n' > "$TMP/shim/printf"; chmod 755 "$TMP/shim/printf"
+save_path=$PATH
+# Direct, with a stamp we name: the tree is fresh, the stamp is 60 days old, so
+# every entry is newer than it and the only correct answer is not-idle.
+EF=$TMP/execfail; mkdir -p "$EF/tree/sub"; : > "$EF/tree/sub/f"
+: > "$EF/cw-disk-idle.EXEC"; touch -t "$OLD" "$EF/cw-disk-idle.EXEC"
+PATH=$TMP/shim:$PATH
+if disk_probe_idle "$EF/tree" "$EF/cw-disk-idle.EXEC"; then bad "a failing -exec cannot promote a hot tree"
+else ok "a failing -exec cannot promote a hot tree"; fi
+PATH=$save_path
+# And through the render, on the shape that matters: a cold tree with a live
+# write three levels down, which is exactly the confirmed row the gate exists
+# to downgrade.
+mk_target "$TMP/execfail2"
+touch "$TMP/execfail2/target/debug/deps/libfoo.rlib"
+touch -t "$OLD" "$TMP/execfail2/target/debug/deps" "$TMP/execfail2/target/debug" \
+                "$TMP/execfail2/target"
+PATH=$TMP/shim:$PATH
+probe_cache execfail2 "$TMP/execfail2/target"
+PATH=$save_path
+A=$(F disk.reclaimable.rebuildable 14)
+hasnt "  and no command reaches the render" "$A" "rm -rf"
+eq "  confidence downgraded to likely"      "$(F disk.reclaimable.rebuildable 11)" likely
+# The open direction, so the shim is not just breaking every probe: the same
+# PATH over a genuinely cold tree still completes and still prints its command.
+PATH=$TMP/shim:$PATH
+probe_cache execok "$TMP/cold/target"
+PATH=$save_path
+has "  a cold tree still gets its command" "$(F disk.reclaimable.rebuildable 14)" "rm -rf '$TMPR/cold/target'"
+
 # A group under the 2% line produces no finding, so none of its dir rows can
 # ever be printed — and probing them spends the budget the publishable rows
 # need. The sub-threshold group is listed FIRST, exactly as the real cache

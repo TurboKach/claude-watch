@@ -292,13 +292,29 @@ disk_marker_present() {
 # OR the walk could not be completed inside its budget. Both non-idle answers
 # collapse to the same conservative outcome by design.
 disk_probe_idle() {
-  local d=$1 stamp=$2 sent fin out
-  sent="${stamp##*/}-hot"
-  fin="${stamp##*/}-done"
-  # One walk. An entry newer than the cutoff prints the $sent sentinel and
-  # quits, so the active case is O(1); every other entry prints its path, so
-  # `head` bounds the idle case, which is the one that has to walk the whole
+  local d=$1 fin=${2##*/}-done stamp=$2 out last rest
+  # One walk. An entry newer than the cutoff prints its own path TWICE and
+  # quits, so the active case is O(1); every other entry prints its path once,
+  # so `head` bounds the idle case, which is the one that has to walk the whole
   # tree.
+  #
+  # The doubled record is the hot signal, and it is a find PRIMITIVE rather
+  # than `-exec printf` on purpose. `\( -newer -exec printf \; -quit \)` is an
+  # implicit AND, so a failed child — `-exec` resolves its utility through
+  # PATH, and fork/exec can fail transiently under exactly the memory pressure
+  # this tool runs under — makes the predicate FALSE. `-quit` then never runs,
+  # find falls through to `-o -print0`, walks the whole tree and exits 0, the
+  # completion record below is emitted, and a tree with a fresh entry in it
+  # reads as idle: an rm -rf authored for a directory in active use. -print0
+  # cannot fail that way; it is always true and forks nothing.
+  #
+  # Why a doubled record and not a literal marker: find has no primitive that
+  # prints a chosen string, and `-quit` exits 0, so neither find's status nor a
+  # short walk can carry the signal (both are indistinguishable from a clean
+  # early finish). What find does guarantee is that a normal walk visits each
+  # path once, so two IDENTICAL ADJACENT records cannot arise from traversal —
+  # only from the -newer branch. And if that assumption ever failed, an idle
+  # tree would read hot: the safe direction.
   #
   # NUL framing, and that is the load-bearing part. A pathname may contain any
   # byte except NUL and '/', so with newline-delimited output a directory
@@ -314,9 +330,9 @@ disk_probe_idle() {
   # costs ~5x the walk (0.42s vs 0.09s over /usr/share's 20k entries), which
   # would break the per-probe budget the entry cap above is derived from.
   #
-  # A forged $sent needs no such protection — it only ever downgrades — but it
-  # gets it anyway, and note that neither sentinel is forgeable as a whole
-  # record regardless: both are bare basenames, every path record starts '/'.
+  # A doubled hot record needs no such protection — it only ever downgrades.
+  # $fin is not forgeable as a whole record either: it is a bare mktemp
+  # basename, and every path record starts '/' because $d is always absolute.
   #
   # The $fin record is emitted ONLY if find itself exited 0 (`&&`), and head
   # cuts it off if the walk exceeded the entry cap. So "the last line is $fin"
@@ -325,23 +341,36 @@ disk_probe_idle() {
   # subtree (BSD find exits 1), emits no $fin and the row downgrades —
   # previously such a walk returned a short list, no sentinel, and read as
   # idle. This is the convention disk-scan.sh uses at scan time; stderr stays
-  # discarded because here the exit status is the only part we act on.
-  out=$( { find "$d" \( -newer "$stamp" -exec printf '%s\0' "$sent" \; -quit \) -o -print0 2>/dev/null \
-           && printf '%s\0' "$fin"; } | tr '\n\0' '\001\n' | head -n "$(( DISK_PROBE_ENTRIES + 1 ))" )
-  # `-quit` fires after the sentinel is printed, so the sentinel may be the
-  # last line of find's output rather than the first — test all four positions.
-  # Done with `case`, not `printf | grep -qxF`: under `set -o pipefail` (which
-  # tests/fixture-disk.sh sets) grep -q closing the pipe early makes the
-  # pipeline return 141 even on a match, and `&& return 1` then does not fire —
-  # a hot tree reading as idle.
-  case $out in
-    "$sent"|"$sent"$'\n'*|*$'\n'"$sent"|*$'\n'"$sent"$'\n'*) return 1 ;;
-  esac
-  # No explicit entry count: a walk over the cap loses its $fin line to head,
-  # which subsumes the old `n >= DISK_PROBE_ENTRIES` test. The cap boundary
-  # shifts by one in the SAFE direction — a tree of exactly DISK_PROBE_ENTRIES
-  # entries now completes, one of cap + 1 does not.
+  # discarded because here the exit status is the only part we act on. `printf`
+  # is a bash builtin here (no PATH, no fork), and every other command in the
+  # pipeline can only DELETE records: tr, head or tail failing empties $out,
+  # which loses the $fin record and downgrades.
+  #
+  # `tail -n 3` because the last three records are the entire evidence — the
+  # doubled hot pair sits directly under $fin, since -quit fires the moment it
+  # is printed — and $out must not be the whole listing: the tests below slice
+  # it, and slicing a multi-megabyte bash string three times per probe cost
+  # 1.9s of the 5s budget on the maintainer's 20-row cache (MEASURED: 4.65s vs
+  # 2.77s end to end), which silently spent the budget and downgraded twelve
+  # rows that are genuinely idle. It does not move the entry cap: head still
+  # cuts at cap + 1, so an over-cap walk still loses its $fin.
+  out=$( { find "$d" \( -newer "$stamp" -print0 -print0 -quit \) -o -print0 2>/dev/null \
+           && printf '%s\0' "$fin"; } | tr '\n\0' '\001\n' \
+         | head -n "$(( DISK_PROBE_ENTRIES + 1 ))" | tail -n 3 )
+  # Evidence 1: the walk reached its end, cleanly, inside the cap. No explicit
+  # entry count: a walk over the cap loses its $fin line to head, which subsumes
+  # the old `n >= DISK_PROBE_ENTRIES` test. The cap boundary shifts by one in
+  # the SAFE direction — a tree of exactly DISK_PROBE_ENTRIES entries now
+  # completes, one of cap + 1 does not.
   [ "${out##*$'\n'}" = "$fin" ] || return 1
+  # Evidence 2: nothing was newer than the stamp. Tested only AFTER $fin has
+  # been dropped, because -quit fires straight after the doubled record, so on
+  # a hot tree the pair sits at the very end, under $fin.
+  out=${out%$'\n'"$fin"}
+  last=${out##*$'\n'}
+  rest=${out%$'\n'*}
+  # `rest = out` means there is a single record, so there is no pair to compare.
+  [ "$rest" = "$out" ] || [ "${rest##*$'\n'}" != "$last" ] || return 1
   return 0
 }
 
