@@ -158,5 +158,24 @@ else
 fi
 rm -rf "$tmp"
 
+# Fixture suites live in their own files and are discovered, not listed, so
+# adding tests/fixture-*.sh is all it takes to get them run. Each is hermetic
+# (its own mktemp sandbox) and each is run under bash for the §4.15 reason, not
+# under whatever shell invoked this. Their internal counts roll up here; their
+# output is only shown when they fail, so a green run stays readable.
+echo "fixtures"
+for f in "$REPO"/tests/fixture-*.sh; do
+  [ -e "$f" ] || continue
+  fname=$(basename "$f")
+  flog=$(mktemp) || continue
+  if bash "$f" > "$flog" 2>&1; then
+    ok "$fname ($(tail -n1 "$flog"))"
+  else
+    bad "$fname"
+    sed 's/^/      /' "$flog"
+  fi
+  rm -f "$flog"
+done
+
 printf '\n%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ]

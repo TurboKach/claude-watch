@@ -123,7 +123,18 @@ Two invariants worth protecting:
     itself still alive. `gone by end of day` could essentially never fire. Fixed by taking the last
     sample epoch (`eps[sysn]`), since sys rows are written every sample.
 
-17. **`pgrep -f codex` is useless on macOS.** The path `/var/run/com.apple.security.cryptexd/codex.system/...` appears in the inherited environment of nearly every process, so the string "codex" in argv matches almost everything. Any future Codex detection needs a different key.
+17. **"Has an upstream" is not "has been published".** Conductor and `git worktree add -b` create
+    branches with no tracking configuration at all, so `git rev-parse @{u}` fails for essentially
+    every agent worktree. Treating that as "nothing published" reported the branch's ENTIRE history
+    as unpushed and pinned the worktree UNSAFE for ever — work merged and pushed weeks earlier read
+    as never published. Ask the commits instead: `git rev-list --count HEAD --not --remotes`. It
+    needs no upstream and still counts genuinely unpushed work. It reads local refs only (no fetch),
+    so a commit pushed from another machine keeps counting until this clone learns of it — which
+    errs toward UNSAFE, the safe direction. **`scan_worktrees()` and `still_removable()` must use the
+    byte-identical test**; when they drifted, every freshly-STALE worktree was refused at removal
+    time with "changed since it was listed". Covered by `tests/fixture-worktree-unpushed.sh`.
+
+18. **`pgrep -f codex` is useless on macOS.** The path `/var/run/com.apple.security.cryptexd/codex.system/...` appears in the inherited environment of nearly every process, so the string "codex" in argv matches almost everything. Any future Codex detection needs a different key.
 
 ---
 

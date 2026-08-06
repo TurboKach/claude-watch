@@ -939,7 +939,7 @@ scan_worktrees() {
     repo_candidates | while IFS= read -r d; do list_repo_worktrees "$d"; done
   } | sort -u -t"$(printf '\t')" -k2,2 | while IFS="$(printf '\t')" read -r main path branch locked; do
     is_agent_worktree "$path" || continue
-    local age dirty unpushed size ct st why hasup
+    local age dirty unpushed size ct st why
     if [ ! -d "$path" ]; then
       printf 'PRUNABLE\t%s\t%s\t%s\t0\t0\t0\t0\tdirectory no longer exists\n' "$path" "$main" "$branch"
       continue
@@ -950,16 +950,22 @@ scan_worktrees() {
     dirty=$(git -C "$path" status --porcelain 2>/dev/null | grep -c . || true)
     size=$(du -sk "$path" 2>/dev/null | cut -f1); [ -n "$size" ] || size=0
 
-    # A branch with no upstream has NOTHING published, so `git log @{u}..` fails
-    # and a naive count reads 0 — "nothing unpushed" exactly when everything is.
-    # Ask about the upstream first and treat its absence as unpublished.
-    if git -C "$path" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
-      hasup=yes
-      unpushed=$(git -C "$path" log --oneline '@{u}..' 2>/dev/null | grep -c . || true)
-    else
-      hasup=no
-      unpushed=$(git -C "$path" log --oneline 2>/dev/null | grep -c . || true)
-    fi
+    # "Published" is a property of the COMMITS, not of tracking configuration.
+    # Asking `@{u}` instead conflated the two: agent tools (Conductor, and
+    # `git worktree add -b`) create branches with no tracking config at all, so
+    # every one of them fell to the else branch and reported its ENTIRE history
+    # as unpushed — work that had been merged and pushed weeks ago read as never
+    # published, and the worktree was pinned UNSAFE for ever.
+    #
+    # `HEAD --not --remotes` asks the question directly: how many commits are
+    # reachable from HEAD but from no remote-tracking ref. It needs no upstream,
+    # and it still counts genuinely unpushed work, so the safety property is kept
+    # rather than traded away. `--remotes` reads local refs only (no fetch), so a
+    # commit pushed from another machine is not yet visible here — that errs
+    # TOWARD unsafe, which is the direction we want. And `git worktree remove`
+    # keeps the branch, so removal cannot lose a commit at all; only the `dirty`
+    # check below guards real data loss.
+    unpushed=$(git -C "$path" rev-list --count HEAD --not --remotes 2>/dev/null || printf 0)
 
     # Liveness first. An agent worktree in active use looks exactly like a stale
     # one on disk — git's own lock flag and a fresh commit are what tell them
@@ -970,8 +976,6 @@ scan_worktrees() {
     elif session_cwd_under "$path";           then st=ACTIVE;   why="a live session is sitting in it"
     elif [ "${dirty:-0}" -gt 0 ]; then
       st=UNSAFE; why="$(printf '%s uncommitted' "${dirty:-0}")"
-    elif [ "$hasup" = "no" ]; then
-      st=UNSAFE; why="no upstream — nothing published (branch survives removal)"
     elif [ "${unpushed:-0}" -gt 0 ]; then
       st=UNSAFE; why="$(printf '%s unpushed' "${unpushed:-0}")"
     elif ! liveness_verifiable "$path"; then
@@ -997,11 +1001,10 @@ still_removable() {
   local path=$1 days=${2:-7} ct locked age_days now
   [ -d "$path" ] || return 0                        # already gone; prune handles it
   [ "$(git -C "$path" status --porcelain 2>/dev/null | grep -c . || true)" -eq 0 ] || return 1
-  if git -C "$path" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
-    [ "$(git -C "$path" log --oneline '@{u}..' 2>/dev/null | grep -c . || true)" -eq 0 ] || return 1
-  else
-    return 1                                        # no upstream: nothing published
-  fi
+  # Byte-for-byte the same "is it published" test scan_worktrees uses. If these
+  # two ever disagree the listing offers a worktree that this function then
+  # refuses, and every removal reports "changed since it was listed" instead.
+  [ "$(git -C "$path" rev-list --count HEAD --not --remotes 2>/dev/null || printf 0)" -eq 0 ] || return 1
   ct=$(git -C "$path" log -1 --format=%ct 2>/dev/null || printf '0')
   now=$(date +%s)
   # Two different thresholds, both of which the listing applied:
@@ -1110,7 +1113,10 @@ worktrees() {
 
   if [ "$json" = "1" ]; then
     LC_ALL=C awk -F'\t' -v D="$days" "$JESC_AWK"'
-      BEGIN { printf "{\"command\":\"worktrees\",\"stale_after_days\":%d,\"worktrees\":[", D }
+      # unpushed_basis names what "unpushed" was measured against, so a consumer
+      # knows it is a local-refs answer with no fetch behind it: commits pushed
+      # from another machine still count until this clone learns about them.
+      BEGIN { printf "{\"command\":\"worktrees\",\"stale_after_days\":%d,\"unpushed_basis\":\"local-remote-refs\",\"worktrees\":[", D }
       {
         rm = ($1 == "STALE" || $1 == "PRUNABLE") ? "true" : "false"
         if (n++) printf ","
