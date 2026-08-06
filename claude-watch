@@ -1373,9 +1373,13 @@ doctor() {
   local dcache="${CLAUDE_WATCH_DISK_CACHE:-$STATE/disk.tsv}" dlock="$STATE/disk-scan.lock"
   local dmsg dok=0 dage dpid did
   if [ -d "$dlock" ]; then
-    dpid=$(cat "$dlock/pid" 2>/dev/null); did=$(cat "$dlock/id" 2>/dev/null)
-    if [ -z "$dpid" ] || [ -z "$did" ] || ! kill -0 "$dpid" 2>/dev/null ||
-       [ "$(ps -o lstart= -p "$dpid" 2>/dev/null | tr -s ' ')" != "$did" ]; then
+    # $dlock/pid is one atomic file: line 1 the pid, line 2 the owner's start
+    # time. LC_ALL=C matches the scanner's own derivation — `ps lstart` is
+    # locale-formatted, and a differently-spelled month here would report a
+    # perfectly healthy running scan as an orphan.
+    dpid=$(sed -n 1p "$dlock/pid" 2>/dev/null); did=$(sed -n 2p "$dlock/pid" 2>/dev/null)
+    if ! kill -0 "${dpid:-0}" 2>/dev/null ||
+       { [ -n "$did" ] && [ "$(LC_ALL=C ps -o lstart= -p "$dpid" 2>/dev/null | tr -s ' ')" != "$did" ]; }; then
       dmsg=" — orphaned scan lock, remove $dlock"; dok=1
     fi
   fi

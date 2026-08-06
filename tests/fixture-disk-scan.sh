@@ -273,6 +273,70 @@ PATH="$FBIN:$PATH" HOME="$HB" CLAUDE_WATCH_HOME="$DF" CLAUDE_WATCH_REPO_ROOTS="$
 eq "a marker-bearing hit stays likely when the probe fails" \
    "$(dirconf "$RP/repo/node_modules")" "likely"
 eq "and its group is marked affected" "$(gaff node_modules)" "1"
+# Anything that shortened a group shortened the scan: `partial` must follow the
+# affected flag, not just the five note reasons.
+eq "and the scan is partial"          "$(scancol 2)" "1"
+
+# A discovery walk can come back non-zero having printed NOTHING. Noticing only
+# stderr leaves that partial walk looking complete.
+echo "silently non-zero discovery"
+QBIN="$TMP/qbin"; mkdir -p "$QBIN"
+{
+  printf '#!/bin/sh\n'
+  printf 'for a in "$@"; do [ "$a" = "-print0" ] && { /usr/bin/find "$@"; exit 1; }; done\n'
+  printf 'exec /usr/bin/find "$@"\n'
+} > "$QBIN/find"
+chmod +x "$QBIN/find"
+DQ="$TMP/dataQ"; CACHE="$DQ/state/disk.tsv"
+PATH="$QBIN:$PATH" HOME="$HB" CLAUDE_WATCH_HOME="$DQ" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
+  bash "$SCAN" > "$OUT" 2> "$ERR"
+eq "the hits it did find are still measured" \
+   "$([ -n "$(dirsize "$RP/repo/node_modules")" ] && echo yes || echo no)" "yes"
+eq "but neither repo group claims completeness" "$(gaff node_modules)$(gaff rebuildable)" "11"
+eq "and the scan is partial"                    "$(scancol 2)" "1"
+
+# --------------------------------------- freshness is recursive, not depth-1 --
+# node_modules/pkg/lib/active.js written this morning inside a months-old `pkg`
+# is a directory in active use. A depth-1 probe sees only `pkg`, calls it idle,
+# and hands out a removal command for a directory being worked in.
+echo "recursive idle probe"
+DEEP="$TMP/deep"
+mkdir -p "$DEEP/fresh/node_modules/pkg/lib" "$DEEP/idle/node_modules/pkg/lib"
+printf '{}\n' > "$DEEP/fresh/package.json"
+printf '{}\n' > "$DEEP/idle/package.json"
+kb "$DEEP/fresh/node_modules/pkg/lib/active.js" 8
+kb "$DEEP/idle/node_modules/pkg/lib/old.js" 8
+# Backdate every directory AND the idle tree's file, leaving exactly one fresh
+# file, four levels down, in the tree that must not be promoted.
+touch -t "$OLD" "$DEEP/idle/node_modules/pkg/lib/old.js"
+for d in "$DEEP/fresh/node_modules/pkg/lib" "$DEEP/fresh/node_modules/pkg" "$DEEP/fresh/node_modules" \
+         "$DEEP/idle/node_modules/pkg/lib"  "$DEEP/idle/node_modules/pkg"  "$DEEP/idle/node_modules"; do
+  touch -t "$OLD" "$d"
+done
+DEEPP=$( cd -P "$DEEP" && pwd -P )
+DP="$TMP/dataP"; CACHE="$DP/state/disk.tsv"
+HOME="$HB" CLAUDE_WATCH_HOME="$DP" CLAUDE_WATCH_REPO_ROOTS="$DEEP" \
+  bash "$SCAN" > "$OUT" 2> "$ERR"
+eq "a deep fresh file blocks promotion" \
+   "$(dirconf "$DEEPP/fresh/node_modules")" "likely"
+eq "a deep but idle tree is still confirmed" \
+   "$(dirconf "$DEEPP/idle/node_modules")" "confirmed"
+
+# ------------------------------------------ a root that cannot be entered ----
+# A mode-000 root passes `[ -d ]` and then fails to resolve. Counting it as
+# scanned would emit affected=0 on a group whose measurement is missing whatever
+# that root held — a short number wearing full confidence.
+echo "unenterable root"
+BLK="$TMP/blocked"; mkdir -p "$BLK/node_modules"; chmod 000 "$BLK"
+DK="$TMP/dataK"; CACHE="$DK/state/disk.tsv"
+HOME="$HB" CLAUDE_WATCH_HOME="$DK" CLAUDE_WATCH_REPO_ROOTS="$BLK:$SRC/repo" \
+  bash "$SCAN" > "$OUT" 2> "$ERR"
+chmod 755 "$BLK"
+eq "an unenterable root does not count as scanned" "$(scancol 4)" "1"
+eq "roots_total still counts it"                   "$(scancol 5)" "2"
+eq "partial=1"                                     "$(scancol 2)" "1"
+eq "node_modules cannot claim completeness"        "$(gaff node_modules)" "1"
+eq "rebuildable cannot either"                     "$(gaff rebuildable)" "1"
 
 # --------------------------------------------------------------- the lock ----
 echo "lock"
@@ -280,8 +344,12 @@ DL="$TMP/dataL"; mkdir -p "$DL/state"
 LOCK="$DL/state/disk-scan.lock"
 CACHE="$DL/state/disk.tsv"
 
+# The owner file is ONE atomic file: line 1 pid, line 2 identity.
+ident() { LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
+own()   { printf '%s\n%s\n' "$1" "$2"; }
+
 # 1. a live owner: the loser prints E11 and never scans.
-mkdir "$LOCK"; printf '%s\n' "$$" > "$LOCK/pid"
+mkdir "$LOCK"; own "$$" "$(ident "$$")" > "$LOCK/pid"
 HOME="$HB" CLAUDE_WATCH_HOME="$DL" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
   bash "$SCAN" > "$OUT" 2> "$ERR"; rcL=$?
 eq "a held lock exits 0" "$rcL" "0"
@@ -291,7 +359,7 @@ else
   bad "E11 (no cache) verbatim on stderr"; sed 's/^/        /' "$ERR"
 fi
 eq "the loser wrote no cache" "$([ -f "$CACHE" ] && echo wrote || echo none)" "none"
-eq "the loser did not take the lock" "$(cat "$LOCK/pid")" "$$"
+eq "the loser did not take the lock" "$(sed -n 1p "$LOCK/pid")" "$$"
 
 # 1b. same, with a cache present: the message names its age.
 printf 'epoch\t-\t1\t-\t-\n' > "$CACHE"
@@ -309,10 +377,10 @@ DEAD=$( bash -c 'echo $$' )    # a pid that has already exited
 if kill -0 "$DEAD" 2>/dev/null; then
   skp "stale lock (pid $DEAD was recycled)"
 else
-  printf '%s\n' "$DEAD" > "$LOCK/pid"
+  own "$DEAD" 'Thu Jan 1 00:00:00 1970' > "$LOCK/pid"
   HOME="$HB" CLAUDE_WATCH_HOME="$DL" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
     bash "$SCAN" > "$OUT" 2> "$ERR"
-  eq "a young lock is kept even with a dead owner" "$(cat "$LOCK/pid")" "$DEAD"
+  eq "a young lock is kept even with a dead owner" "$(sed -n 1p "$LOCK/pid")" "$DEAD"
 
   # 3. old AND dead: broken, and the scan runs.
   touch -t "$OLD" "$LOCK"
@@ -327,21 +395,44 @@ fi
 # process answers kill -0 forever, so a liveness-only breaker never fires and
 # every later run silently serves a stale cache. The owner's start time is what
 # tells the two processes apart.
-ident() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
 rm -rf "$LOCK"; mkdir "$LOCK"
-printf '%s\n' "$$" > "$LOCK/pid"          # a pid that is very much alive
-printf 'Thu Jan 1 00:00:00 1970\n' > "$LOCK/id"   # but not this process
+# a pid that is very much alive, recorded as a process that is not this one
+own "$$" 'Thu Jan 1 00:00:00 1970' > "$LOCK/pid"
 touch -t "$OLD" "$LOCK"
 HOME="$HB" CLAUDE_WATCH_HOME="$DL" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
   bash "$SCAN" > "$OUT" 2> "$ERR"
 eq "a recycled pid does not keep a stale lock alive" \
    "$([ -e "$LOCK" ] && echo present || echo gone)" "gone"
 
+# 4b. INCOMPLETE METADATA ON A LIVE OWNER. Breaking a live owner's lock puts two
+# scanners on the same disk, so anything short of positive evidence of death has
+# to keep it. Both shapes an interrupted write could leave behind:
+for shape in truncated empty; do
+  rm -rf "$LOCK"; mkdir "$LOCK"
+  case "$shape" in
+    truncated) printf '%s\n' "$$" > "$LOCK/pid" ;;   # pid, no identity yet
+    empty)     : > "$LOCK/pid" ;;                    # nothing at all
+  esac
+  touch -t "$OLD" "$LOCK"
+  HOME="$HB" CLAUDE_WATCH_HOME="$DL" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
+    bash "$SCAN" > "$OUT" 2> "$ERR"
+  case "$shape" in
+    truncated)
+      eq "a live owner with $shape metadata keeps its lock" \
+         "$([ -e "$LOCK" ] && echo present || echo gone)" "present" ;;
+    empty)
+      # No pid at all is the crashed-before-writing case: nothing to test for
+      # liveness, so the age limit is all there is and the lock must be broken —
+      # otherwise a killed first scan wedges every later run forever.
+      eq "a stale lock with no owner recorded is broken" \
+         "$([ -e "$LOCK" ] && echo present || echo gone)" "gone" ;;
+  esac
+done
+
 # The complement: same age, same pid, and the identity DOES match — a genuinely
 # live owner that happens to be slow must keep its lock.
 rm -rf "$LOCK"; mkdir "$LOCK"
-printf '%s\n' "$$" > "$LOCK/pid"
-ident "$$" > "$LOCK/id"
+own "$$" "$(ident "$$")" > "$LOCK/pid"
 touch -t "$OLD" "$LOCK"
 HOME="$HB" CLAUDE_WATCH_HOME="$DL" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
   bash "$SCAN" > "$OUT" 2> "$ERR"; rcI=$?
@@ -354,6 +445,37 @@ else
   bad "and still prints E11"; sed 's/^/        /' "$ERR"
 fi
 rm -rf "$LOCK"
+
+# 4c. `ps lstart` is locale-formatted: ru_RU renders "четверг, 6 августа 2026 г."
+# where C renders "Thu Aug 6 2026". doctor derives the identity itself and
+# compares it against the file the scanner wrote, so if the two disagree about
+# locale, doctor calls a perfectly healthy running scan an orphan.
+OTHERLOC=""
+for L in ru_RU.UTF-8 de_DE.UTF-8 fr_FR.UTF-8; do
+  [ "$(LC_ALL=$L ps -o lstart= -p $$ 2>/dev/null | tr -s ' ')" != "$(ident "$$")" ] || continue
+  OTHERLOC=$L; break
+done
+if [ -n "$OTHERLOC" ]; then
+  DZ="$TMP/dataZ"; mkdir -p "$DZ/state"
+  mkdir "$DZ/state/disk-scan.lock"
+  own "$$" "$(ident "$$")" > "$DZ/state/disk-scan.lock/pid"
+  printf 'epoch\t-\t1\t-\t-\n' > "$DZ/state/disk.tsv"
+  # Doctor's output goes to a FILE first. Under `set -o pipefail` an
+  # `if doctor | grep -q ...` can never reach its failure branch: doctor exits
+  # non-zero whenever any check fails, which poisons the pipeline status
+  # regardless of what grep found — an assertion that always passes.
+  LC_ALL="$OTHERLOC" LANG="$OTHERLOC" CLAUDE_WATCH_HOME="$DZ" \
+    bash "$REPO/claude-watch" doctor > "$TMP/doctor.out" 2>/dev/null
+  if grep -q 'orphaned scan lock' "$TMP/doctor.out"; then
+    bad "doctor under $OTHERLOC does not call a live lock orphaned"
+    grep 'disk cache' "$TMP/doctor.out" | sed 's/^/        /'
+  else
+    ok "doctor under $OTHERLOC does not call a live lock orphaned"
+  fi
+  rm -rf "$DZ"
+else
+  skp "locale-sensitive identity — no installed locale renders ps lstart differently from C"
+fi
 
 # 5. A REAL race: two scanners, same state directory, overlapping in time.
 # The first is slowed with a stub du so the second is guaranteed to arrive while
@@ -380,6 +502,24 @@ eq "the second scanner scanned nothing" "$(wc -c < "$OUT" | tr -d ' ')" "0"
 eq "the first scanner's cache is complete" "$(dirconf "$RP/repo/node_modules")" "confirmed"
 eq "no lock survives the race" \
    "$([ -e "$DX/state/disk-scan.lock" ] && echo present || echo gone)" "gone"
+
+# 6. A scanner that LOST its lock must not delete the winner's. Otherwise the
+# breaker and the next run both scan — the concurrency the lock exists to stop.
+echo "a lost lock is not deleted on the way out"
+DY="$TMP/dataY"; mkdir -p "$DY/state"
+YLOCK="$DY/state/disk-scan.lock"
+( PATH="$SBIN:$PATH" HOME="$HB" CLAUDE_WATCH_HOME="$DY" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
+    bash "$SCAN" > "$TMP/outY" 2> "$TMP/errY" ) &
+slow=$!
+sleep 1
+eq "the slow scanner took the lock" "$([ -d "$YLOCK" ] && echo yes || echo no)" "yes"
+rm -rf "$YLOCK"; mkdir "$YLOCK"          # a breaker replaces it mid-scan
+own 999999 'Thu Jan 1 00:00:00 1970' > "$YLOCK/pid"
+wait "$slow"
+eq "the replacement lock survives the loser's cleanup" \
+   "$([ -d "$YLOCK" ] && echo present || echo gone)" "present"
+eq "and it still belongs to the replacement" "$(sed -n 1p "$YLOCK/pid")" "999999"
+rm -rf "$YLOCK"
 
 # ----------------------------------------------------------- the deadline ----
 # `timeout` is unavailable, so the deadline is the parent signalling the walk's

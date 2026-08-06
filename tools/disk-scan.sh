@@ -86,19 +86,36 @@ lose_lock() {
 # mkdir is the arbiter because it is atomic on APFS. `[ -f ] && touch` is TOCTOU:
 # both runs lose the race and both proceed.
 lock_held=0
+MY_OWNER=""
 
 # A pid is not an identity: pids are recycled, and a recycled one answers kill -0
 # forever, so an age-plus-liveness breaker would never fire and every later run
 # would silently serve a stale cache with no symptom. The process start time
 # pins WHICH process that pid is.
-# Kept byte-identical to doctor's copy in `claude-watch`, which compares against
-# the file this writes.
-proc_ident() { ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
+#
+# Residual, stated rather than hidden: lstart has one-second resolution, so a pid
+# recycled onto a process started in the SAME second as the dead owner still
+# collides. That needs a pid to wrap all the way around inside one second; the
+# consequence is a lock held one cycle too long, not a second scanner.
+#
+# `claude-watch doctor` reads the file this writes and must derive the identity
+# byte-identically — both run under LC_ALL=C, because `ps lstart` is
+# locale-formatted and a differently-spelled month would read as a dead owner.
+proc_ident() { LC_ALL=C ps -o lstart= -p "$1" 2>/dev/null | tr -s ' '; }
 
-take_lock() {  # record who holds it: pid first, then the identity that pins it
+# $LOCK/pid carries BOTH facts, written as ONE file so it can never be observed
+# half-written: line 1 the pid, line 2 the identity that pins it. Two separate
+# writes had a window in which a stalled owner looked metadata-less, and a
+# contender past the age limit would then break a LIVE owner's lock.
+take_lock() {
+  local ident tmpf="$LOCK/.owner.$$"
+  ident=$(proc_ident "$$")
+  MY_OWNER=$(printf '%s\n%s\n' "$$" "$ident")
   lock_held=1
-  printf '%s\n' "$$" > "$LOCK/pid" 2>/dev/null
-  proc_ident "$$" > "$LOCK/id" 2>/dev/null
+  # Composed in the lock directory, then renamed into place: same directory, so
+  # the rename is atomic, and a reader sees either no file or the whole thing.
+  printf '%s\n%s\n' "$$" "$ident" > "$tmpf" 2>/dev/null &&
+    mv "$tmpf" "$LOCK/pid" 2>/dev/null
 }
 
 acquire_lock() {
@@ -112,17 +129,20 @@ acquire_lock() {
   # lock and both proceed; a liveness test alone leaves a kill -9'd owner's lock
   # in place forever, after which every run silently serves a stale cache.
   local lpid lid lmt age stash
-  lpid=$(cat "$LOCK/pid" 2>/dev/null)
-  lid=$(cat "$LOCK/id" 2>/dev/null)
+  lpid=$(sed -n 1p "$LOCK/pid" 2>/dev/null)
+  lid=$(sed -n 2p "$LOCK/pid" 2>/dev/null)
   lmt=$(stat -f %m "$LOCK" 2>/dev/null || printf '0')
   age=$(( $(date +%s) - lmt ))
   [ "$age" -gt "$LOCK_STALE" ] || return 1
-  # Live means: that pid exists AND it is still the same process that took the
-  # lock. A missing identity file can only mean the owner died between mkdir and
-  # the write — over $LOCK_STALE seconds ago, so it is certainly dead.
-  if [ -n "$lpid" ] && [ -n "$lid" ] && kill -0 "$lpid" 2>/dev/null &&
-     [ "$(proc_ident "$lpid")" = "$lid" ]; then
-    return 1
+
+  # Breaking a live owner's lock is the worse error of the two: it puts two
+  # scanners on the same disk. So anything short of positive evidence of death
+  # keeps the lock. A live pid whose recorded identity is missing or unreadable
+  # is treated as LIVE — only a live pid that demonstrably belongs to a
+  # DIFFERENT process than the one that took the lock counts as recycled.
+  if [ -n "$lpid" ] && kill -0 "$lpid" 2>/dev/null; then
+    [ -n "$lid" ] || return 1                          # incomplete metadata: live
+    [ "$(proc_ident "$lpid")" = "$lid" ] && return 1   # same process: live
   fi
 
   # Break by rename, not by rm: only one of two racing breakers can rename the
@@ -135,6 +155,17 @@ acquire_lock() {
   return 0
 }
 
+# Release only what we still own. A lock we took, lost to a breaker, and then
+# blindly `rm -rf`'d would be the REPLACEMENT's lock — after which the breaker
+# and the next run both scan. Deleting nothing is always the safe answer here:
+# an over-held lock expires, a wrongly deleted one puts two scanners on the disk.
+release_lock() {
+  [ "$lock_held" = 1 ] || return 0
+  [ "$(cat "$LOCK/pid" 2>/dev/null)" = "$MY_OWNER" ] || return 0
+  rm -rf "$LOCK" 2>/dev/null
+  return 0
+}
+
 worker=""
 tmp=""
 WORK=""
@@ -144,7 +175,7 @@ tmp_cleanup() {
   [ -n "$worker" ] && kill -0 "$worker" 2>/dev/null && kill -KILL -"$worker" 2>/dev/null
   [ -n "$tmp" ]    && rm -f "$tmp"
   [ -n "$WORK" ]   && rm -rf "$WORK"
-  [ "$lock_held" = 1 ] && rm -rf "$LOCK"
+  release_lock
   return 0
 }
 trap 'tmp_cleanup' EXIT
@@ -202,12 +233,22 @@ confidence_of() {  # <path> <basename> <group>
                           [ -e "$g" ] && { marker=1; break; }
                         done ;;
   esac
-  # The idle probe must SUCCEED to count. A find that failed on permissions also
-  # prints nothing, and reading that silence as "nothing newer than 14 days" is
-  # how a directory nobody could actually inspect earns a removal command.
-  # No reference file, or a failed probe, means no idle evidence — and idle plus
-  # a marker is the only thing that authorises a printed `rm -rf`.
-  newer=$(find "$p" -mindepth 1 -maxdepth 1 -newer "$REF" -print -quit 2>>"$ERRLOG"); nrc=$?
+  # The probe is RECURSIVE, not depth-1. `node_modules/pkg/lib/active.js` written
+  # this morning inside a `pkg` directory whose own mtime is months old is a
+  # directory in active use, and a depth-1 probe calls it idle — which is exactly
+  # the promotion the confidence gate exists to prevent.
+  #
+  # Cost, measured over the 37 real hits under ~/Dev rather than guessed:
+  # depth-1 0.11s, recursive 6.94s, worst single hit 0.80s. `-quit` makes the
+  # active case cheap (it stops at the first fresh file); only genuinely idle
+  # trees are walked in full, and the 120s deadline covers the pathological one.
+  #
+  # The probe must also SUCCEED to count. A find that failed on permissions
+  # prints nothing too, and reading that silence as "nothing newer than 14 days"
+  # is how a directory nobody could inspect earns a removal command. No reference
+  # file, or a failed probe, means no idle evidence — and idle plus a marker is
+  # the only thing that authorises a printed `rm -rf`.
+  newer=$(find "$p" -xdev -mindepth 1 -newer "$REF" -print -quit 2>>"$ERRLOG"); nrc=$?
   if [ -f "$REF" ] && [ "$nrc" = 0 ] && [ -z "$newer" ]; then idle=1; fi
   [ "$nrc" = 0 ] || affect "$grp"
   if   [ "$marker" = 1 ] && [ "$idle" = 1 ]; then printf 'confirmed'
@@ -233,18 +274,29 @@ confidence_of() {  # <path> <basename> <group>
 affect() { printf 'A\t%s\n' "$1" >> "$RAWOUT"; }
 
 measure() {  # <file of newline-delimited paths> — one batched du for the lot
-  local f=$1 size path base grp conf berr="$WORK/berr"
+  local f=$1 size path base grp conf drc berr="$WORK/berr" dout="$WORK/dout"
   [ -s "$f" ] || return 0
   : > "$berr"
   # Discovery is NUL-delimited so a path with a space or a `;` survives; the
   # paths in $f have already been filtered to those a TSV can carry.
-  tr '\n' '\0' < "$f" | xargs -0 du -skx 2>"$berr" | while IFS="$TAB" read -r size path; do
+  # du runs to a FILE, not into a pipe, so its exit status is readable: in a
+  # pipeline the status belongs to the reader and a non-zero du disappears.
+  tr '\n' '\0' < "$f" | xargs -0 du -skx > "$dout" 2>"$berr"
+  drc=$?
+  while IFS="$TAB" read -r size path; do
     [ -n "${path:-}" ] || continue
     base=${path##*/}
     grp=$(group_of "$base")
     conf=$(confidence_of "$path" "$base" "$grp")
     printf 'H\t%s\t%s\t%s\t%s\n' "$grp" "$size" "$conf" "$path" >> "$RAWOUT"
-  done
+  done < "$dout"
+  # A non-zero du that printed nothing to stderr is still a short measurement.
+  if [ "$drc" != 0 ] && [ ! -s "$berr" ]; then
+    while IFS= read -r path; do
+      [ -n "$path" ] || continue
+      affect "$(group_of "${path##*/}")"
+    done < "$f"
+  fi
   [ -s "$berr" ] || return 0
   cat "$berr" >> "$ERRLOG"
   # A batched du mixes groups, so attribute each error to the hit that contains
@@ -273,19 +325,23 @@ measure() {  # <file of newline-delimited paths> — one batched du for the lot
 }
 
 measure_fixed() {  # <path> <group> — the shortlist: kind is known from the path
-  local p=$1 grp=$2 size path berr="$WORK/berr"
+  local p=$1 grp=$2 size path drc berr="$WORK/berr" dout="$WORK/dout"
   : > "$berr"
-  du -skx "$p" 2>"$berr" | while IFS="$TAB" read -r size path; do
+  du -skx "$p" > "$dout" 2>"$berr"
+  drc=$?
+  while IFS="$TAB" read -r size path; do
     [ -n "${path:-}" ] || continue
     # Never `confirmed`: ~/Downloads and ~/Library/Caches are not directories a
     # read-only tool gets to author an `rm -rf` for, however certain their kind.
     printf 'H\t%s\t%s\t%s\t%s\n' "$grp" "$size" "likely" "$path" >> "$RAWOUT"
-  done
-  if [ -s "$berr" ]; then cat "$berr" >> "$ERRLOG"; affect "$grp"; fi
+  done < "$dout"
+  [ -s "$berr" ] && cat "$berr" >> "$ERRLOG"
+  { [ "$drc" != 0 ] || [ -s "$berr" ]; } && affect "$grp"
+  return 0
 }
 
 walk() {
-  local root rp dev p i n
+  local root rp dev p i n frc
   local sp=() sg=()
 
   # Register the fixed shortlist as claimed prefixes BEFORE the roots, so that
@@ -318,8 +374,14 @@ walk() {
     # is a single find blocked on a mount, where this line is never reached.
     if past_deadline; then printf 'D\n' >> "$RAWOUT"; return 0; fi
     if [ ! -d "$root" ]; then printf 'S\n' >> "$RAWOUT"; continue; fi
+    # A mode-000 root passes `[ -d ]` — the test only stats it — and then fails
+    # to resolve. Recording that as "scanned" reports affected=0 on a group whose
+    # measurement is missing whatever that root held, and affected=0 on an
+    # incomplete number is what tells the reader a short total is trustworthy.
+    # A root we could not enter is an UNATTRIBUTABLE failure: neither repo group
+    # may still claim to be complete, and the root does not count as scanned.
     rp=$(physdir "$root")
-    if [ -z "$rp" ]; then printf 'S\n' >> "$RAWOUT"; continue; fi
+    if [ -z "$rp" ]; then affect node_modules; affect rebuildable; continue; fi
     # `du -x` does not reject a root that STARTS on another volume, and sizes
     # from another volume are not comparable against this volume's total.
     dev=$(stat -f %d "$rp" 2>/dev/null)
@@ -335,8 +397,11 @@ walk() {
       \( -name node_modules -o -name .venv -o -name venv -o -name target \
          -o -name .next -o -name DerivedData \) -prune -print0 \
       > "$WORK/hits" 2>"$WORK/ferr"
-    if [ -s "$WORK/ferr" ]; then
-      # A directory discovery could not read might have contained either kind.
+    frc=$?
+    # Exit status AND stderr: a walk can come back non-zero having printed
+    # nothing, and a silently partial discovery has the same unsafe result as a
+    # noisy one. A directory discovery could not read might have held either kind.
+    if [ "$frc" != 0 ] || [ -s "$WORK/ferr" ]; then
       cat "$WORK/ferr" >> "$ERRLOG"; affect node_modules; affect rebuildable
     fi
 
@@ -457,6 +522,10 @@ vol_row=$(df -k "$HOME" 2>/dev/null | LC_ALL=C awk 'NR == 2 {
 # fully measured ~/Dev.
 AFF="$WORK/affected"
 LC_ALL=C awk -F'\t' '$1 == "A" && $2 != "" { print $2 }' "$RAWOUT" 2>/dev/null | sort -u > "$AFF"
+# Anything that shortened a group shortened the scan. Deriving `partial` from the
+# note reasons alone left it at 0 for a failed idle probe or a silently non-zero
+# du — a whole-scan flag saying "total" over a measurement that was not.
+[ -s "$AFF" ] && partial=1
 # The deadline is the one reason that cannot be attributed: the walk was killed
 # mid-stride and cannot say what it had left to do, so nothing claims complete.
 if [ "$deadline_hit" = 1 ]; then
