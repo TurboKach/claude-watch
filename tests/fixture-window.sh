@@ -209,6 +209,44 @@ run_advise "$H1" --window 24h
 expect "schema 1 only: cpu_basis.proc estimate" "$(jq_ "d['cpu_basis']['proc']")" estimate
 expect "schema 1 only: cpu_basis_since null"    "$(jq_ "d['cpu_basis_since']")" None
 
+# ========= 8b. advise and report derive the SAME iv from the same bytes ======
+# advise copies U0's interval algorithm rather than paraphrasing it, because iv
+# multiplies into observed_seconds and therefore into every rate and every
+# threshold decision. Two implementations that drift by one bucket disagree
+# about how busy the machine was, in two commands the user reads side by side.
+#
+# The gap list is {10,10,20,20}: dn=4, need=int(4/2)+1=3, so the upper median is
+# 20. The natural c >= dn/2 returns 10. This is the input where the two
+# formulations diverge, so it is the input that proves they were not both typed
+# from memory.
+H8="$TMP/h8"; mkdir -p "$H8/raw"
+T0=$((NOW - 3600))
+{ sys1 "$T0"; sys1 $((T0 + 10)); sys1 $((T0 + 20)); sys1 $((T0 + 40)); sys1 $((T0 + 60)); } \
+  > "$H8/raw/$DAY0.tsv"
+RIV=$(CLAUDE_WATCH_HOME="$H8" "$CW" report "$DAY0" --json 2>/dev/null \
+      | python3 -c 'import json,sys; print(json.load(sys.stdin)["interval_seconds"])' 2>/dev/null)
+run_advise "$H8" --window 24h
+expect "upper median: report says iv 20"           "$RIV" 20
+expect "upper median: advise agrees with report"   "$(jq_ "d['interval_seconds']")" "$RIV"
+expect "upper median: observed_seconds = 5 x 20"   "$(jq_ "d['window']['observed_seconds']")" 100
+
+# A damaged epoch must be excluded and SAID, not silently dropped: awk holds
+# numbers as doubles, so an over-long epoch stops comparing distinctly and two
+# samples collapse into one with nothing reported.
+H9="$TMP/h9"; mkdir -p "$H9/raw"
+{ sys1 $((NOW - 60)); sys1 $((NOW - 30)); } > "$H9/raw/$DAY0.tsv"
+printf 'notanepoch\tsys\t-\t1.0\t1\t1\t0\t14\n'        >> "$H9/raw/$DAY0.tsv"
+printf '90071992547409920\tsys\t-\t1.0\t1\t1\t0\t14\n' >> "$H9/raw/$DAY0.tsv"
+run_advise "$H9" --window 24h
+expect "damaged epochs are excluded from the count" "$(jq_ "d['samples']")" 2
+if grep -q 'window_read_failed' "$J"; then ok "damaged epochs report window_read_failed"
+else bad "damaged epochs report window_read_failed"; fi
+if grep -qF 'not a plain integer of at most ten digits' "$E"; then
+  ok "damaged epochs are reported on stderr, not swallowed"
+else
+  bad "damaged epochs are reported on stderr, not swallowed"; sed 's/^/        /' "$E"
+fi
+
 # ================== 9. the emitter: ordering, tabs, the unknown invariant ====
 # Findings are fed through a stand-in analyzer so the emitter is tested as the
 # pure function it is, with no disk or process state involved.

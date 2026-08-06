@@ -121,27 +121,42 @@ cw_read_window() {
 # emits it as M rows; v2's cpu/memory analyzer folds into the same pass rather
 # than paying for a second read.
 #
-# The interval derivation is U0's algorithm, verbatim — the rank is
-# int(dn/2)+1 reached by c >= need (an upper median), the bucket walk is numeric
-# 1..599 because for (g in hist) is undefined-order in awk, and iv falls back to
-# 10 when dn == 0. An off-by-one bucket rescales every rate downstream.
+# The interval derivation is U0's algorithm, VERBATIM, down to the epoch guard
+# and the have_prev sentinel. It is copied rather than described because advise
+# and report must derive the same iv from the same bytes: iv multiplies into
+# observed_seconds and therefore into every rate and every threshold decision,
+# so two implementations that drift by one bucket silently disagree about how
+# busy the machine was, in two commands the user reads side by side.
+#
+# The parts that are not obvious, in U0 wording:
+#   - the rank is int(dn/2)+1 reached by c >= need, an UPPER median. The natural
+#     c >= dn/2 picks the wrong bucket for every even dn.
+#   - the bucket walk is numeric 1..599; for (g in hist) is undefined-order.
+#   - iv falls back to 10 when dn == 0 (one sample, or every gap over 600s).
+#   - the ten-digit epoch bound is what makes epoch comparison injective: awk
+#     holds numbers as doubles, so past 2^53 distinct integers stop being
+#     distinct and two samples collapse into one. It is a length() test, not a
+#     brace interval, because macOS awk 20200816 matches braces as literal text.
+#   - have_prev, not prev_ep != "", marks the first row: "" is a value a damaged
+#     file can contain, so it cannot also be a sentinel.
 CW_WINDOW_AWK='
   $2 == "sys" {
-    ep = $1 + 0
-    if (ep != prev_ep) {
-      if (prev_ep != "") {
+    if ($1 !~ /^(0|[1-9][0-9]*)$/ || length($1) > 10) { badep++; next }
+    ep = $1
+    if (!have_prev || ep != prev_ep) {
+      if (have_prev) {
         if (ep < prev_ep) disorder++
         gap = ep - prev_ep
         if (gap > 0 && gap < 600) { hist[gap]++; dn++ }
       }
-      sysn++; prev_ep = ep
+      sysn++; prev_ep = ep; have_prev = 1
       if (ep > lastep) lastep = ep
-      if (firstep == "" || ep < firstep) firstep = ep
+      if (!have_first || ep < firstep) { firstep = ep; have_first = 1 }
     }
     ncpu = $8 + 0
     if (NF >= 13 && $9 + 0 == 2) {
       memsize = $12 + 0; swapcap = $13 + 0
-      if (schema2_since == "" || ep < schema2_since) schema2_since = ep
+      if (!have_s2 || ep < schema2_since) { schema2_since = ep; have_s2 = 1 }
     }
     next
   }
@@ -160,8 +175,9 @@ CW_WINDOW_AWK='
     printf "M\tswap_cap_mb\t%s\n", (swapcap > 0 ? swapcap "" : "")
     printf "M\tlast_epoch\t%s\n", (sysn > 0 ? lastep "" : "")
     printf "M\tfirst_epoch\t%s\n", (sysn > 0 ? firstep "" : "")
-    printf "M\tschema2_since\t%s\n", (schema2_since == "" ? "" : schema2_since "")
+    printf "M\tschema2_since\t%s\n", (have_s2 ? schema2_since "" : "")
     printf "M\tdisorder\t%d\n", disorder
+    printf "M\tbadep\t%d\n", badep
   }
 '
 
@@ -587,7 +603,8 @@ cw_window_pass() {
   cw_read_window "$CW_WIN_SECONDS" | LC_ALL=C awk -F'\t' "$CW_WINDOW_AWK" > "$meta"
   CW_INTERVAL_SECONDS=10; CW_SAMPLES=0; CW_OBSERVED_SECONDS=0; CW_READ_SECONDS=0
   CW_NCPU=""; CW_MEMSIZE_KB=""; CW_SWAP_CAP_MB=""
-  CW_WIN_LAST_EPOCH=""; CW_WIN_FIRST_EPOCH=""; CW_SCHEMA2_SINCE=""; CW_DISORDER=0
+  CW_WIN_LAST_EPOCH=""; CW_WIN_FIRST_EPOCH=""; CW_SCHEMA2_SINCE=""
+  CW_DISORDER=0; CW_BADEP=0
   while IFS=$'\t' read -r _ k v; do
     case "$k" in
       iv)               CW_INTERVAL_SECONDS="$v" ;;
@@ -601,8 +618,21 @@ cw_window_pass() {
       first_epoch)      CW_WIN_FIRST_EPOCH="$v" ;;
       schema2_since)    CW_SCHEMA2_SINCE="$v" ;;
       disorder)         CW_DISORDER="$v" ;;
+      badep)            CW_BADEP="$v" ;;
     esac
   done < "$meta"
+
+  # Both of these are U0's errors, raised for the window rather than for one day
+  # file. They go to stderr so --json stdout stays clean, and exit stays 0: the
+  # numbers below are short, not absent, and saying which is the point.
+  if [ "${CW_DISORDER:-0}" -gt 0 ]; then
+    printf 'claude-watch advise: the window has %d out-of-order sample epochs — interval and coverage may be wrong; a raw file may be truncated or interleaved\n' \
+      "$CW_DISORDER" >&2
+  fi
+  if [ "${CW_BADEP:-0}" -gt 0 ]; then
+    printf 'claude-watch advise: the window has %d sys rows whose epoch is not a plain integer of at most ten digits — the sampler writes date +%%s, so a damaged epoch means a damaged file. Those rows are excluded, so samples and observed time below are short by up to that many\n' \
+      "$CW_BADEP" >&2
+  fi
 
   # E8 — a corrupt archive is a short window, and saying so is the whole point.
   CW_FAILED_DAYS=""
@@ -699,7 +729,13 @@ cw_render() {
   local wreasons=""
   [ "${CW_SAMPLES:-0}" -eq 0 ] && wreasons="no_samples"
   [ "$CW_SAMPLER_OK" != 1 ] && wreasons="${wreasons:+$wreasons,}sampler_stale"
-  [ -n "$CW_FAILED_DAYS" ] && wreasons="${wreasons:+$wreasons,}window_read_failed"
+  # A damaged epoch is a partial read of the window, so it travels as the same
+  # machine-readable reason a failed decompression does. The enum in §3e is
+  # closed, and silently dropping rows with no reason at all is the failure this
+  # whole tool exists to prevent.
+  if [ -n "$CW_FAILED_DAYS" ] || [ "${CW_BADEP:-0}" -gt 0 ]; then
+    wreasons="${wreasons:+$wreasons,}window_read_failed"
+  fi
 
   A_MODE="$mode" \
   A_NOW="$CW_NOW" \
