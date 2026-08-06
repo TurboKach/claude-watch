@@ -1,0 +1,1398 @@
+1785944382	sys	-	7.36	18101520	1201888	601	14
+1785944382	session	/Users/testuser/Dev/wizards	1.19	1843232	chrome-headless-shell@1.1	●spellfall: done
+1785944382	session	/Users/testuser/Dev	0.02	1455888	-	claude-watch-resource-monitor
+1785944382	orphan	node --test	0.00	28256	374529
+1785944404	sys	-	8.31	18385056	799280	601	14
+1785944404	session	/Users/testuser/Dev/wizards	10.49	2089136	chrome-headless-shell@10.5	●spellfall: done
+1785944404	session	/Users/testuser/Dev	0.05	1459312	zsh@0.0	claude-watch-resource-monitor
+1785944404	proc	airportd	0.15	38832	479
+1785944404	proc	WiFiAgent	0.07	38688	738
+1785944404	proc	NordVPN	0.06	295968	1010
+1785944404	proc	Telegram	0.06	400864	49068
+1785944404	orphan	node --test	0.00	28256	374551
+1785944407	sys	-	8.31	18330704	821840	601	14
+1785944407	session	/Users/testuser/Dev/wizards	9.92	2089232	chrome-headless-shell@9.9	●spellfall: done
+1785944407	session	/Users/testuser/Dev	1.97	1463216	bash@1.0	claude-watch-resource-monitor
+1785944407	proc	launchd	0.07	22032	1
+1785944407	orphan	node --test	0.00	28256	374554
+1785944409	sys	-	9.97	18334912	835888	601	14
+1785944409	session	/Users/testuser/Dev/wizards	9.61	2093488	chrome-headless-shell@9.6	●spellfall: done
+1785944409	session	/Users/testuser/Dev	1.99	1463232	bash@0.9	claude-watch-resource-monitor
+1785944409	orphan	node --test	0.00	28256	374556
+1785944471	sys	-	9.43	18297680	921408	601	14
+1785944471	session	/Users/testuser/Dev/wizards	1.18	1906736	chrome-headless-shell@1.1	●spellfall: done
+1785944471	session	/Users/testuser/Dev	0.02	1456032	-	claude-watch-resource-monitor
+1785944471	proc	plugin-container	0.00	1014416	45867
+1785944471	proc	firefox	0.01	838912	45856
+1785944471	proc	plugin-container	0.00	554096	28891
+1785944471	proc	plugin-container	0.00	511616	53104
+1785944471	proc	plugin-container	0.00	474160	26135
+1785944471	proc	plugin-container	0.00	447152	29605
+1785944471	proc	plugin-container	0.00	430080	26655
+1785944471	orphan	node --test	0.00	28272	374618
+1785944685	sys	-	2.64	18036208	1466896	601	14
+1785944685	session	/Users/testuser/Dev/wizards	0.02	1166608	-	●spellfall: done
+1785944685	session	/Users/testuser/Dev	0.16	1445472	-	claude-watch-resource-monitor
+1785944685	proc	XprotectService	0.34	37056	84939
+1785944685	proc	NordVPN	0.12	308816	1010
+1785944685	proc	iTerm2	0.09	292704	22008
+1785944685	proc	plugin-container	0.00	1014320	45867
+1785944685	proc	firefox	0.04	826224	45856
+1785944685	proc	plugin-container	0.00	554640	28891
+1785944685	proc	plugin-container	0.00	511728	53104
+1785944685	proc	plugin-container	0.00	474176	26135
+1785944685	proc	plugin-container	0.00	447168	29605
+1785944685	proc	Telegram	0.05	430384	49068
+1785944685	proc	plugin-container	0.01	430096	26655
+1785944685	orphan	node --test	0.00	28288	374832
+1785944695	sys	-	2.71	18011600	1489232	601	14
+1785944695	session	/Users/testuser/Dev/wizards	0.03	1125296	-	●spellfall: done
+1785944695	session	/Users/testuser/Dev	0.15	1445472	-	claude-watch-resource-monitor
+1785944695	proc	airportd	0.40	38816	479
+1785944695	proc	WiFiAgent	0.27	38864	738
+1785944695	proc	iTerm2	0.11	292624	22008
+1785944695	proc	plugin-container	0.00	1017536	45867
+1785944695	proc	firefox	0.01	826240	45856
+1785944695	proc	plugin-container	0.00	554720	28891
+1785944695	proc	plugin-container	0.00	511712	53104
+1785944695	proc	plugin-container	0.00	474176	26135
+1785944695	proc	plugin-container	0.00	447168	29605
+1785944695	proc	Telegram	0.04	430688	49068
+1785944695	proc	plugin-container	0.02	430096	26655
+1785944695	orphan	node --test	0.00	28288	374842
+1785944705	sys	-	3.29	17979440	1457216	601	14
+1785944705	session	/Users/testuser/Dev/wizards	0.09	1125296	-	●spellfall: done
+1785944705	session	/Users/testuser/Dev	0.08	1449904	sleep@0.0	claude-watch-resource-monitor
+1785944705	proc	airportd	0.11	38704	479
+1785944705	proc	iTerm2	0.10	292640	22008
+1785944705	proc	plugin-container	0.00	1017648	45867
+1785944705	proc	firefox	0.01	826208	45856
+1785944705	proc	plugin-container	0.00	555776	28891
+1785944705	proc	plugin-container	0.00	511712	53104
+1785944705	proc	plugin-container	0.00	474160	26135
+1785944705	proc	plugin-container	0.00	447152	29605
+1785944705	proc	Telegram	0.04	430544	49068
+1785944705	proc	plugin-container	0.01	430080	26655
+1785944705	orphan	node --test	0.00	28288	374852
+1785944715	sys	-	3.51	17916688	1523984	601	14
+1785944715	session	/Users/testuser/Dev/wizards	0.04	1125296	-	●spellfall: done
+1785944715	session	/Users/testuser/Dev	0.13	1450448	-	claude-watch-resource-monitor
+1785944715	proc	airportd	0.29	38736	479
+1785944715	proc	NordVPN	0.14	308864	1010
+1785944715	proc	iTerm2	0.10	292624	22008
+1785944715	proc	configd	0.08	14288	342
+1785944715	proc	mDNSResponder	0.05	16080	515
+1785944715	proc	plugin-container	0.00	1014592	45867
+1785944715	proc	firefox	0.01	826240	45856
+1785944715	proc	plugin-container	0.00	555856	28891
+1785944715	proc	plugin-container	0.00	511712	53104
+1785944715	proc	plugin-container	0.00	474160	26135
+1785944715	proc	plugin-container	0.00	447152	29605
+1785944715	proc	Telegram	0.04	430544	49068
+1785944715	proc	plugin-container	0.02	430080	26655
+1785944715	orphan	node --test	0.00	28304	374862
+1785944725	sys	-	3.50	17878096	1567840	601	14
+1785944725	session	/Users/testuser/Dev/wizards	0.07	1125296	-	●spellfall: done
+1785944725	session	/Users/testuser/Dev	0.21	1446016	-	claude-watch-resource-monitor
+1785944725	proc	Finder	0.17	114672	660
+1785944725	proc	com.apple.appkit.xpc.openAndSavePanelService	0.14	62256	21110
+1785944725	proc	NordVPN	0.12	308848	1010
+1785944725	proc	airportd	0.09	38768	479
+1785944725	proc	iTerm2	0.08	292608	22008
+1785944725	proc	plugin-container	0.00	1018528	45867
+1785944725	proc	firefox	0.01	826240	45856
+1785944725	proc	plugin-container	0.00	555952	28891
+1785944725	proc	plugin-container	0.00	511728	53104
+1785944725	proc	plugin-container	0.00	474160	26135
+1785944725	proc	plugin-container	0.00	447152	29605
+1785944725	proc	plugin-container	0.02	430080	26655
+1785944725	orphan	node --test	0.00	28304	374872
+1785944736	sys	-	3.51	17891248	1543312	601	14
+1785944736	session	/Users/testuser/Dev/wizards	0.04	1125248	-	●spellfall: done
+1785944736	session	/Users/testuser/Dev	0.15	1446080	-	claude-watch-resource-monitor
+1785944736	proc	airportd	0.17	38816	479
+1785944736	proc	WiFiAgent	0.14	38720	738
+1785944736	proc	iTerm2	0.07	292592	22008
+1785944736	proc	plugin-container	0.00	1017536	45867
+1785944736	proc	firefox	0.04	839120	45856
+1785944736	proc	plugin-container	0.00	556032	28891
+1785944736	proc	plugin-container	0.00	511728	53104
+1785944736	proc	plugin-container	0.00	474176	26135
+1785944736	proc	plugin-container	0.00	447168	29605
+1785944736	proc	plugin-container	0.01	430096	26655
+1785944736	orphan	node --test	0.00	28304	374883
+1785944746	sys	-	3.05	18010720	1531696	601	14
+1785944746	session	/Users/testuser/Dev/wizards	0.04	1125344	-	●spellfall: done
+1785944746	session	/Users/testuser/Dev	0.22	1446384	-	claude-watch-resource-monitor
+1785944746	proc	iTerm2	0.16	293152	22008
+1785944746	proc	plugin-container	0.00	1014336	45867
+1785944746	proc	firefox	0.01	826240	45856
+1785944746	proc	plugin-container	0.00	556096	28891
+1785944746	proc	plugin-container	0.00	511744	53104
+1785944746	proc	plugin-container	0.00	474176	26135
+1785944746	proc	plugin-container	0.00	447168	29605
+1785944746	proc	plugin-container	0.01	430096	26655
+1785944746	orphan	node --test	0.00	28304	374893
+1785944756	sys	-	2.74	18003760	1540592	601	14
+1785944756	session	/Users/testuser/Dev/wizards	0.35	1125792	-	●spellfall: done
+1785944756	session	/Users/testuser/Dev	0.11	1446464	sleep@0.0	claude-watch-resource-monitor
+1785944756	proc	iTerm2	0.20	292704	22008
+1785944756	proc	NordVPN	0.10	308848	1010
+1785944756	proc	plugin-container	0.00	1014352	45867
+1785944756	proc	firefox	0.01	826240	45856
+1785944756	proc	plugin-container	0.00	556208	28891
+1785944756	proc	plugin-container	0.00	511728	53104
+1785944756	proc	plugin-container	0.00	474176	26135
+1785944756	proc	plugin-container	0.00	447168	29605
+1785944756	proc	plugin-container	0.00	430096	26655
+1785944756	orphan	node --test	0.00	28304	374903
+1785944766	sys	-	2.91	17993536	1497920	601	14
+1785944766	session	/Users/testuser/Dev/wizards	0.05	1125792	-	●spellfall: done
+1785944766	session	/Users/testuser/Dev	0.09	1446464	-	claude-watch-resource-monitor
+1785944766	proc	airportd	0.69	38768	479
+1785944766	proc	iTerm2	0.18	292704	22008
+1785944766	proc	WiFiAgent	0.15	38896	738
+1785944766	proc	NordVPN	0.07	308864	1010
+1785944766	proc	plugin-container	0.00	1014336	45867
+1785944766	proc	firefox	0.01	826240	45856
+1785944766	proc	plugin-container	0.00	556320	28891
+1785944766	proc	plugin-container	0.00	511728	53104
+1785944766	proc	plugin-container	0.00	474160	26135
+1785944766	proc	plugin-container	0.00	447152	29605
+1785944766	proc	plugin-container	0.00	430080	26655
+1785944766	orphan	node --test	0.00	28304	374913
+1785944776	sys	-	2.76	18158384	1250016	601	14
+1785944776	session	/Users/testuser/Dev/wizards	0.08	1125936	-	●spellfall: done
+1785944776	session	/Users/testuser/Dev	0.15	1446592	-	claude-watch-resource-monitor
+1785944776	proc	iTerm2	0.21	292720	22008
+1785944776	proc	com.docker.backend services	0.12	182048	20631
+1785944776	proc	airportd	0.11	38784	479
+1785944776	proc	plugin-container	0.00	1014336	45867
+1785944776	proc	firefox	0.01	826208	45856
+1785944776	proc	plugin-container	0.00	556400	28891
+1785944776	proc	plugin-container	0.00	511728	53104
+1785944776	proc	plugin-container	0.00	474160	26135
+1785944776	proc	plugin-container	0.00	447152	29605
+1785944776	proc	plugin-container	0.00	430096	26655
+1785944776	orphan	node --test	0.00	28304	374923
+1785944786	sys	-	2.49	18154800	1296080	601	14
+1785944786	session	/Users/testuser/Dev/wizards	0.14	1125968	-	●spellfall: done
+1785944786	session	/Users/testuser/Dev	0.00	1446576	sleep@0.0	claude-watch-resource-monitor
+1785944786	proc	iTerm2	0.24	292704	22008
+1785944786	proc	NordVPN	0.14	308848	1010
+1785944786	proc	plugin-container	0.00	1017728	45867
+1785944786	proc	firefox	0.02	826256	45856
+1785944786	proc	plugin-container	0.00	556480	28891
+1785944786	proc	plugin-container	0.00	511744	53104
+1785944786	proc	plugin-container	0.00	474160	26135
+1785944786	proc	plugin-container	0.00	447152	29605
+1785944786	proc	plugin-container	0.00	430080	26655
+1785944786	orphan	node --test	0.00	28304	374933
+1785944795	sys	-	2.18	18124400	1241840	601	14
+1785944795	session	/Users/testuser/Dev/wizards	0.11	1126064	-	●spellfall: done
+1785944795	session	/Users/testuser/Dev	0.13	1459520	zsh@0.0	claude-watch-resource-monitor
+1785944795	proc	XprotectService	0.27	37056	84939
+1785944795	proc	iTerm2	0.18	292720	22008
+1785944795	proc	NordVPN	0.05	308864	1010
+1785944795	proc	plugin-container	0.00	1014736	45867
+1785944795	proc	firefox	0.01	826256	45856
+1785944795	proc	plugin-container	0.00	556560	28891
+1785944795	proc	plugin-container	0.00	511744	53104
+1785944795	proc	plugin-container	0.00	474176	26135
+1785944795	proc	plugin-container	0.00	447168	29605
+1785944795	proc	plugin-container	0.00	430096	26655
+1785944795	orphan	node --test	0.00	28304	374942
+1785944805	sys	-	2.07	18523408	950480	601	14
+1785944805	session	/Users/testuser/Dev/wizards	0.12	1126320	-	●spellfall: done
+1785944805	session	/Users/testuser/Dev	0.16	1445856	-	claude-watch-resource-monitor
+1785944805	proc	iTerm2	0.16	292704	22008
+1785944805	proc	NordVPN	0.13	308848	1010
+1785944805	proc	airportd	0.06	38880	479
+1785944805	proc	Telegram	0.05	401376	49068
+1785944805	proc	plugin-container	0.00	1014752	45867
+1785944805	proc	firefox	0.01	838848	45856
+1785944805	proc	plugin-container	0.00	556640	28891
+1785944805	proc	plugin-container	0.00	511744	53104
+1785944805	proc	plugin-container	0.00	474192	26135
+1785944805	proc	plugin-container	0.00	447168	29605
+1785944805	proc	plugin-container	0.00	430096	26655
+1785944805	orphan	node --test	0.00	28304	374952
+1785944816	sys	-	2.21	18253152	1177568	601	14
+1785944816	session	/Users/testuser/Dev/wizards	0.14	1126880	-	●spellfall: done
+1785944816	session	/Users/testuser/Dev	0.11	1446144	-	claude-watch-resource-monitor
+1785944816	proc	airportd	0.27	38800	479
+1785944816	proc	iTerm2	0.18	292736	22008
+1785944816	proc	NordVPN	0.06	309024	1010
+1785944816	proc	plugin-container	0.01	1014736	45867
+1785944816	proc	firefox	0.01	826240	45856
+1785944816	proc	plugin-container	0.00	556736	28891
+1785944816	proc	plugin-container	0.00	511744	53104
+1785944816	proc	plugin-container	0.00	474176	26135
+1785944816	proc	plugin-container	0.00	447168	29605
+1785944816	proc	plugin-container	0.00	430096	26655
+1785944816	orphan	node --test	0.00	28304	374963
+1785944816	sys	-	2.21	18253056	1173344	601	14
+1785944816	session	/Users/testuser/Dev/wizards	0.14	1126880	-	●spellfall: done
+1785944816	session	/Users/testuser/Dev	0.11	1463744	-	claude-watch-resource-monitor
+1785944816	proc	airportd	0.39	38800	479
+1785944816	proc	WiFiAgent	0.17	38880	738
+1785944816	proc	iTerm2	0.14	292720	22008
+1785944816	proc	plugin-container	0.00	1014736	45867
+1785944816	proc	firefox	0.01	826240	45856
+1785944816	proc	plugin-container	0.00	556736	28891
+1785944816	proc	plugin-container	0.00	511744	53104
+1785944816	proc	plugin-container	0.00	474176	26135
+1785944816	proc	plugin-container	0.00	447168	29605
+1785944816	proc	plugin-container	0.00	430096	26655
+1785944816	orphan	node --test	0.00	28304	374963
+1785944816	sys	-	2.21	18246208	1185824	601	14
+1785944816	session	/Users/testuser/Dev/wizards	0.10	1126880	-	●spellfall: done
+1785944816	session	/Users/testuser/Dev	0.25	1463712	zsh@0.0	claude-watch-resource-monitor
+1785944816	proc	airportd	0.39	38800	479
+1785944816	proc	WiFiAgent	0.17	38880	738
+1785944816	proc	iTerm2	0.14	292736	22008
+1785944816	proc	plugin-container	0.00	1014736	45867
+1785944816	proc	firefox	0.01	826240	45856
+1785944816	proc	plugin-container	0.00	556736	28891
+1785944816	proc	plugin-container	0.00	511744	53104
+1785944816	proc	plugin-container	0.01	474176	26135
+1785944816	proc	plugin-container	0.00	447168	29605
+1785944816	proc	plugin-container	0.00	430096	26655
+1785944816	orphan	node --test	0.00	28304	374963
+1785944816	sys	-	2.21	18250384	1173104	601	14
+1785944816	session	/Users/testuser/Dev/wizards	0.09	1126880	-	●spellfall: done
+1785944816	session	/Users/testuser/Dev	0.18	1463760	zsh@0.0	claude-watch-resource-monitor
+1785944816	proc	airportd	0.43	38800	479
+1785944816	proc	WiFiAgent	0.31	38704	738
+1785944816	proc	iTerm2	0.13	292736	22008
+1785944816	proc	plugin-container	0.00	1014736	45867
+1785944816	proc	firefox	0.01	826240	45856
+1785944816	proc	plugin-container	0.00	556736	28891
+1785944816	proc	plugin-container	0.00	511744	53104
+1785944816	proc	plugin-container	0.01	474176	26135
+1785944816	proc	plugin-container	0.00	447168	29605
+1785944816	proc	plugin-container	0.00	430096	26655
+1785944816	orphan	node --test	0.00	28304	374963
+1785944826	sys	-	2.19	18308112	988432	601	14
+1785944826	session	/Users/testuser/Dev/wizards	0.07	1218384	-	●spellfall: done
+1785944826	session	/Users/testuser/Dev	0.16	1450688	-	claude-watch-resource-monitor
+1785944826	proc	iTerm2	0.21	292720	22008
+1785944826	proc	plugin-container	0.00	1017664	45867
+1785944826	proc	firefox	0.01	826240	45856
+1785944826	proc	plugin-container	0.00	556832	28891
+1785944826	proc	plugin-container	0.00	511728	53104
+1785944826	proc	plugin-container	0.00	474160	26135
+1785944826	proc	plugin-container	0.00	447152	29605
+1785944826	proc	plugin-container	0.00	430080	26655
+1785944826	orphan	node --test	0.00	28304	374973
+1785944836	sys	-	2.00	18376784	965712	601	14
+1785944836	session	/Users/testuser/Dev/wizards	0.03	1350608	-	●spellfall: done
+1785944836	session	/Users/testuser/Dev	0.05	1446256	-	claude-watch-resource-monitor
+1785944836	proc	com.docker.backend services	0.29	182032	20631
+1785944836	proc	iTerm2	0.20	292752	22008
+1785944836	proc	NordVPN	0.12	308896	1010
+1785944836	proc	ps	0.06	2720	68564
+1785944836	proc	plugin-container	0.00	1014352	45867
+1785944836	proc	firefox	0.01	826240	45856
+1785944836	proc	plugin-container	0.00	556912	28891
+1785944836	proc	plugin-container	0.00	511728	53104
+1785944836	proc	plugin-container	0.00	474160	26135
+1785944836	proc	plugin-container	0.00	447152	29605
+1785944836	proc	plugin-container	0.00	430080	26655
+1785944836	orphan	node --test	0.00	28304	374983
+1785944846	sys	-	2.01	18357728	985136	601	14
+1785944846	session	/Users/testuser/Dev/wizards	0.08	1342816	-	●spellfall: done
+1785944846	session	/Users/testuser/Dev	0.03	1446256	-	claude-watch-resource-monitor
+1785944846	proc	iTerm2	0.24	292720	22008
+1785944846	proc	airportd	0.21	39024	479
+1785944846	proc	plugin-container	0.00	1014336	45867
+1785944846	proc	firefox	0.01	826224	45856
+1785944846	proc	plugin-container	0.00	557008	28891
+1785944846	proc	plugin-container	0.00	511744	53104
+1785944846	proc	plugin-container	0.00	474160	26135
+1785944846	proc	plugin-container	0.00	447152	29605
+1785944846	proc	plugin-container	0.00	430080	26655
+1785944846	orphan	node --test	0.00	28304	374993
+1785944856	sys	-	1.94	18395776	940176	601	14
+1785944856	session	/Users/testuser/Dev/wizards	0.21	1383136	-	●spellfall: done
+1785944856	session	/Users/testuser/Dev	0.00	1446256	-	claude-watch-resource-monitor
+1785944856	proc	launchd	0.49	22352	1
+1785944856	proc	airportd	0.22	38816	479
+1785944856	proc	iTerm2	0.22	292720	22008
+1785944856	proc	WiFiAgent	0.09	38752	738
+1785944856	proc	plugin-container	0.00	1014368	45867
+1785944856	proc	firefox	0.01	826176	45856
+1785944856	proc	plugin-container	0.00	557072	28891
+1785944856	proc	plugin-container	0.00	511744	53104
+1785944856	proc	plugin-container	0.00	474176	26135
+1785944856	proc	plugin-container	0.00	447168	29605
+1785944856	proc	plugin-container	0.00	430096	26655
+1785944856	orphan	node --test	0.00	28304	375003
+1785944866	sys	-	1.87	18389136	943552	601	14
+1785944866	session	/Users/testuser/Dev/wizards	0.20	1381056	codex@0.0	●spellfall: done
+1785944866	session	/Users/testuser/Dev	0.02	1446208	-	claude-watch-resource-monitor
+1785944866	proc	iTerm2	0.18	292736	22008
+1785944866	proc	com.nordvpn.macos.helper	0.07	29408	581
+1785944866	proc	NordVPN	0.05	308880	1010
+1785944866	proc	plugin-container	0.00	1014368	45867
+1785944866	proc	firefox	0.01	826144	45856
+1785944866	proc	plugin-container	0.00	557184	28891
+1785944866	proc	plugin-container	0.00	511760	53104
+1785944866	proc	plugin-container	0.00	474176	26135
+1785944866	proc	plugin-container	0.00	447168	29605
+1785944866	proc	plugin-container	0.00	430096	26655
+1785944866	orphan	node --test	0.00	28304	375013
+1785944876	sys	-	1.82	18409168	907584	601	14
+1785944876	session	/Users/testuser/Dev/wizards	0.17	1399600	codex@0.0	●spellfall: done
+1785944876	session	/Users/testuser/Dev	0.03	1446288	sleep@0.0	claude-watch-resource-monitor
+1785944876	proc	iTerm2	0.21	292720	22008
+1785944876	proc	NordVPN	0.12	308928	1010
+1785944876	proc	Telegram	0.06	402336	49068
+1785944876	proc	plugin-container	0.00	1014368	45867
+1785944876	proc	firefox	0.01	826240	45856
+1785944876	proc	plugin-container	0.00	557264	28891
+1785944876	proc	plugin-container	0.00	511744	53104
+1785944876	proc	plugin-container	0.00	474176	26135
+1785944876	proc	plugin-container	0.00	447168	29605
+1785944876	proc	plugin-container	0.00	430096	26655
+1785944876	orphan	node --test	0.00	28304	375024
+1785944887	sys	-	1.69	18419200	835984	601	14
+1785944887	session	/Users/testuser/Dev/wizards	0.09	1403536	-	●spellfall: done
+1785944887	session	/Users/testuser/Dev	0.07	1446288	-	claude-watch-resource-monitor
+1785944887	proc	airportd	0.29	38816	479
+1785944887	proc	XprotectService	0.26	37056	84939
+1785944887	proc	iTerm2	0.17	292752	22008
+1785944887	proc	launchd	0.15	22304	1
+1785944887	proc	WiFiAgent	0.15	38720	738
+1785944887	proc	sysmond	0.06	4160	6110
+1785944887	proc	plugin-container	0.02	1017488	45867
+1785944887	proc	firefox	0.01	826240	45856
+1785944887	proc	plugin-container	0.00	557376	28891
+1785944887	proc	plugin-container	0.00	511760	53104
+1785944887	proc	plugin-container	0.00	474160	26135
+1785944887	proc	plugin-container	0.00	447152	29605
+1785944887	proc	plugin-container	0.00	430096	26655
+1785944887	orphan	node --test	0.00	28304	375034
+1785944897	sys	-	1.66	18437360	886352	601	14
+1785944897	session	/Users/testuser/Dev/wizards	0.10	1420656	codex@0.0	●spellfall: done
+1785944897	session	/Users/testuser/Dev	0.04	1446288	-	claude-watch-resource-monitor
+1785944897	proc	iTerm2	0.17	292720	22008
+1785944897	proc	airportd	0.08	38800	479
+1785944897	proc	WiFiAgent	0.06	38736	738
+1785944897	proc	com.docker.backend services	0.05	182048	20631
+1785944897	proc	plugin-container	0.00	1014432	45867
+1785944897	proc	firefox	0.01	826240	45856
+1785944897	proc	plugin-container	0.00	557440	28891
+1785944897	proc	plugin-container	0.00	511760	53104
+1785944897	proc	plugin-container	0.00	474160	26135
+1785944897	proc	plugin-container	0.00	447152	29605
+1785944897	proc	plugin-container	0.00	430096	26655
+1785944897	orphan	node --test	0.00	28304	375044
+1785944907	sys	-	2.02	18438496	883136	601	14
+1785944907	session	/Users/testuser/Dev/wizards	0.06	1421552	codex@0.0	●spellfall: done
+1785944907	session	/Users/testuser/Dev	0.11	1446288	-	claude-watch-resource-monitor
+1785944907	proc	airportd	0.20	38896	479
+1785944907	proc	iTerm2	0.16	292752	22008
+1785944907	proc	NordVPN	0.11	308912	1010
+1785944907	proc	ControlCenter	0.05	100096	656
+1785944907	proc	plugin-container	0.00	1014432	45867
+1785944907	proc	firefox	0.01	826240	45856
+1785944907	proc	plugin-container	0.00	557488	28891
+1785944907	proc	plugin-container	0.00	511776	53104
+1785944907	proc	plugin-container	0.00	474160	26135
+1785944907	proc	plugin-container	0.00	447152	29605
+1785944907	proc	plugin-container	0.00	430096	26655
+1785944907	orphan	node --test	0.00	28304	375054
+1785944917	sys	-	1.78	18444768	876880	601	14
+1785944917	session	/Users/testuser/Dev/wizards	0.07	1421632	-	●spellfall: done
+1785944917	session	/Users/testuser/Dev	0.08	1450864	-	claude-watch-resource-monitor
+1785944917	proc	iTerm2	0.19	292752	22008
+1785944917	proc	NordVPN	0.09	308864	1010
+1785944917	proc	Telegram	0.05	402096	49068
+1785944917	proc	plugin-container	0.01	1018464	45867
+1785944917	proc	firefox	0.01	826240	45856
+1785944917	proc	plugin-container	0.00	557568	28891
+1785944917	proc	plugin-container	0.00	511792	53104
+1785944917	proc	plugin-container	0.00	474176	26135
+1785944917	proc	plugin-container	0.00	447168	29605
+1785944917	proc	plugin-container	0.00	430112	26655
+1785944917	orphan	node --test	0.00	28304	375064
+1785944927	sys	-	1.65	18417248	906192	601	14
+1785944927	session	/Users/testuser/Dev/wizards	0.04	1412688	codex@0.0	●spellfall: done
+1785944927	session	/Users/testuser/Dev	0.13	1446288	-	claude-watch-resource-monitor
+1785944927	proc	airportd	0.37	38752	479
+1785944927	proc	WiFiAgent	0.18	38704	738
+1785944927	proc	iTerm2	0.16	292736	22008
+1785944927	proc	plugin-container	0.00	1014272	45867
+1785944927	proc	firefox	0.01	826240	45856
+1785944927	proc	plugin-container	0.00	557648	28891
+1785944927	proc	plugin-container	0.00	511808	53104
+1785944927	proc	plugin-container	0.00	474176	26135
+1785944927	proc	plugin-container	0.00	447168	29605
+1785944927	proc	plugin-container	0.01	430112	26655
+1785944927	orphan	node --test	0.00	28320	375074
+1785944937	sys	-	1.79	18414720	899600	601	14
+1785944937	session	/Users/testuser/Dev/wizards	0.14	1410960	-	●spellfall: done
+1785944937	session	/Users/testuser/Dev	0.10	1446320	-	claude-watch-resource-monitor
+1785944937	proc	iTerm2	0.22	292752	22008
+1785944937	proc	Telegram	0.11	402240	49068
+1785944937	proc	NordVPN	0.09	308896	1010
+1785944937	proc	WiFiAgent	0.07	38704	738
+1785944937	proc	airportd	0.06	38832	479
+1785944937	proc	plugin-container	0.00	1014288	45867
+1785944937	proc	firefox	0.01	826240	45856
+1785944937	proc	plugin-container	0.00	557744	28891
+1785944937	proc	plugin-container	0.00	511808	53104
+1785944937	proc	plugin-container	0.00	474176	26135
+1785944937	proc	plugin-container	0.00	447168	29605
+1785944937	proc	plugin-container	0.00	430112	26655
+1785944937	orphan	node --test	0.00	28320	375084
+1785944947	sys	-	1.90	18430048	844224	601	14
+1785944947	session	/Users/testuser/Dev/wizards	0.15	1410896	-	●spellfall: done
+1785944947	session	/Users/testuser/Dev	0.10	1446320	-	claude-watch-resource-monitor
+1785944947	proc	iTerm2	0.20	292752	22008
+1785944947	proc	firefox	0.10	826192	45856
+1785944947	proc	NordVPN	0.09	308864	1010
+1785944947	proc	plugin-container	0.00	1014272	45867
+1785944947	proc	plugin-container	0.00	557840	28891
+1785944947	proc	plugin-container	0.00	511792	53104
+1785944947	proc	plugin-container	0.00	474160	26135
+1785944947	proc	plugin-container	0.00	447152	29605
+1785944947	proc	plugin-container	0.00	430096	26655
+1785944947	orphan	node --test	0.00	28320	375095
+1785944958	sys	-	2.22	18462192	847360	601	14
+1785944958	session	/Users/testuser/Dev/wizards	0.14	1411456	-	●spellfall: done
+1785944958	session	/Users/testuser/Dev	0.01	1449936	sleep@0.0	claude-watch-resource-monitor
+1785944958	proc	iTerm2	0.19	293296	22008
+1785944958	proc	NordVPN	0.08	308880	1010
+1785944958	proc	runningboardd	0.06	22400	410
+1785944958	proc	plugin-container	0.00	1014272	45867
+1785944958	proc	firefox	0.01	826240	45856
+1785944958	proc	plugin-container	0.00	557936	28891
+1785944958	proc	plugin-container	0.00	511792	53104
+1785944958	proc	plugin-container	0.00	474160	26135
+1785944958	proc	plugin-container	0.00	447152	29605
+1785944958	proc	plugin-container	0.00	430112	26655
+1785944958	orphan	node --test	0.00	28320	375105
+1785944968	sys	-	1.96	18458768	852896	601	14
+1785944968	session	/Users/testuser/Dev/wizards	0.14	1411888	codex@0.0	●spellfall: done
+1785944968	session	/Users/testuser/Dev	0.00	1449888	-	claude-watch-resource-monitor
+1785944968	proc	airportd	0.52	38832	479
+1785944968	proc	plugin-container	0.26	1017552	45867
+1785944968	proc	WiFiAgent	0.23	38896	738
+1785944968	proc	iTerm2	0.20	292768	22008
+1785944968	proc	firefox	0.12	826240	45856
+1785944968	proc	Telegram	0.05	401936	49068
+1785944968	proc	plugin-container	0.00	558016	28891
+1785944968	proc	plugin-container	0.00	511808	53104
+1785944968	proc	plugin-container	0.01	474160	26135
+1785944968	proc	plugin-container	0.00	447152	29605
+1785944968	proc	plugin-container	0.00	430096	26655
+1785944968	orphan	node --test	0.00	28320	375115
+1785944978	sys	-	1.82	18462144	841344	601	14
+1785944978	session	/Users/testuser/Dev/wizards	0.07	1413936	-	●spellfall: done
+1785944978	session	/Users/testuser/Dev	0.03	1449936	-	claude-watch-resource-monitor
+1785944978	proc	iTerm2	0.22	292768	22008
+1785944978	proc	NordVPN	0.14	308880	1010
+1785944978	proc	airportd	0.10	38816	479
+1785944978	proc	plugin-container	0.01	1018144	45867
+1785944978	proc	firefox	0.01	826288	45856
+1785944978	proc	plugin-container	0.00	558080	28891
+1785944978	proc	plugin-container	0.00	511808	53104
+1785944978	proc	plugin-container	0.00	474176	26135
+1785944978	proc	plugin-container	0.00	447168	29605
+1785944978	proc	plugin-container	0.00	430112	26655
+1785944978	orphan	node --test	0.00	28320	375125
+1785944988	sys	-	1.69	18444144	855488	601	14
+1785944988	session	/Users/testuser/Dev/wizards	0.05	1413856	-	●spellfall: done
+1785944988	session	/Users/testuser/Dev	0.01	1446784	sleep@0.0	claude-watch-resource-monitor
+1785944988	proc	iTerm2	0.19	292768	22008
+1785944988	proc	NordVPN	0.11	308880	1010
+1785944988	proc	plugin-container	0.00	1014480	45867
+1785944988	proc	firefox	0.01	826288	45856
+1785944988	proc	plugin-container	0.00	558176	28891
+1785944988	proc	plugin-container	0.00	511808	53104
+1785944988	proc	plugin-container	0.00	474176	26135
+1785944988	proc	plugin-container	0.00	447168	29605
+1785944988	proc	plugin-container	0.00	430112	26655
+1785944988	orphan	node --test	0.00	28320	375135
+1785944998	sys	-	1.81	18455184	848192	601	14
+1785944998	session	/Users/testuser/Dev/wizards	0.07	1424912	codex@0.0	●spellfall: done
+1785944998	session	/Users/testuser/Dev	0.00	1446784	-	claude-watch-resource-monitor
+1785944998	proc	airportd	0.23	38704	479
+1785944998	proc	iTerm2	0.22	292752	22008
+1785944998	proc	plugin-container	0.00	1014480	45867
+1785944998	proc	firefox	0.01	826256	45856
+1785944998	proc	plugin-container	0.00	558272	28891
+1785944998	proc	plugin-container	0.00	511808	53104
+1785944998	proc	plugin-container	0.00	474176	26135
+1785944998	proc	plugin-container	0.00	447168	29605
+1785944998	proc	plugin-container	0.00	430112	26655
+1785944998	orphan	node --test	0.00	28320	375145
+1785945008	sys	-	1.92	18469184	783424	601	14
+1785945008	session	/Users/testuser/Dev/wizards	0.19	1433184	codex@0.0	●spellfall: done
+1785945008	session	/Users/testuser/Dev	0.01	1446784	-	claude-watch-resource-monitor
+1785945008	proc	airportd	0.63	38816	479
+1785945008	proc	iTerm2	0.25	292752	22008
+1785945008	proc	WiFiAgent	0.24	38720	738
+1785945008	proc	NordVPN	0.07	308864	1010
+1785945008	proc	ControlCenter	0.07	100096	656
+1785945008	proc	locationd	0.06	28640	379
+1785945008	proc	WeatherWidget	0.05	58880	65472
+1785945008	proc	plugin-container	0.00	1017536	45867
+1785945008	proc	firefox	0.01	826288	45856
+1785945008	proc	plugin-container	0.00	555584	28891
+1785945008	proc	plugin-container	0.00	511792	53104
+1785945008	proc	plugin-container	0.00	474160	26135
+1785945008	proc	plugin-container	0.00	447152	29605
+1785945008	proc	plugin-container	0.00	430096	26655
+1785945008	orphan	node --test	0.00	28320	375155
+1785945018	sys	-	1.94	18471856	820704	601	14
+1785945018	session	/Users/testuser/Dev/wizards	0.19	1433264	codex@0.0	●spellfall: done
+1785945018	session	/Users/testuser/Dev	0.00	1446784	-	claude-watch-resource-monitor
+1785945018	proc	iTerm2	0.21	293248	22008
+1785945018	proc	NordVPN	0.09	308864	1010
+1785945018	proc	firefox	0.07	828464	45856
+1785945018	proc	plugin-container	0.02	1014432	45867
+1785945018	proc	plugin-container	0.00	555584	28891
+1785945018	proc	plugin-container	0.00	511824	53104
+1785945018	proc	plugin-container	0.00	474160	26135
+1785945018	proc	plugin-container	0.00	447152	29605
+1785945018	proc	plugin-container	0.00	430096	26655
+1785945018	orphan	node --test	0.00	28320	375166
+1785945029	sys	-	1.71	18498304	804864	601	14
+1785945029	session	/Users/testuser/Dev/wizards	0.11	1432944	-	●spellfall: done
+1785945029	session	/Users/testuser/Dev	0.00	1446832	-	claude-watch-resource-monitor
+1785945029	proc	iTerm2	0.21	292752	22008
+1785945029	proc	NordVPN	0.07	308912	1010
+1785945029	proc	plugin-container	0.00	1014432	45867
+1785945029	proc	firefox	0.01	841296	45856
+1785945029	proc	plugin-container	0.00	555584	28891
+1785945029	proc	plugin-container	0.00	511824	53104
+1785945029	proc	plugin-container	0.01	474176	26135
+1785945029	proc	plugin-container	0.00	447152	29605
+1785945029	proc	plugin-container	0.00	430096	26655
+1785945029	orphan	node --test	0.00	28320	375176
+1785945039	sys	-	1.45	18497952	801520	601	14
+1785945039	session	/Users/testuser/Dev/wizards	0.14	1432976	codex@0.0	●spellfall: done
+1785945039	session	/Users/testuser/Dev	0.00	1446784	-	claude-watch-resource-monitor
+1785945039	proc	iTerm2	0.20	292752	22008
+1785945039	proc	airportd	0.17	38736	479
+1785945039	proc	WiFiAgent	0.12	38672	738
+1785945039	proc	plugin-container	0.00	1014464	45867
+1785945039	proc	firefox	0.01	841328	45856
+1785945039	proc	plugin-container	0.00	555568	28891
+1785945039	proc	plugin-container	0.00	511824	53104
+1785945039	proc	plugin-container	0.00	474176	26135
+1785945039	proc	plugin-container	0.00	447168	29605
+1785945039	proc	plugin-container	0.01	430112	26655
+1785945039	orphan	node --test	0.00	28320	375186
+1785945049	sys	-	1.30	18304480	982416	601	14
+1785945049	session	/Users/testuser/Dev/wizards	0.12	1134752	-	●spellfall: done
+1785945049	session	/Users/testuser/Dev	0.03	1446784	-	claude-watch-resource-monitor
+1785945049	proc	airportd	0.65	38800	479
+1785945049	proc	WiFiAgent	0.29	38704	738
+1785945049	proc	iTerm2	0.20	292768	22008
+1785945049	proc	Telegram	0.06	401968	49068
+1785945049	proc	com.nordvpn.macos.helper	0.05	29392	581
+1785945049	proc	plugin-container	0.00	1014464	45867
+1785945049	proc	firefox	0.01	841328	45856
+1785945049	proc	plugin-container	0.00	555568	28891
+1785945049	proc	plugin-container	0.00	511840	53104
+1785945049	proc	plugin-container	0.00	474176	26135
+1785945049	proc	plugin-container	0.00	447168	29605
+1785945049	proc	plugin-container	0.00	430112	26655
+1785945049	orphan	node --test	0.00	28320	375196
+1785945059	sys	-	1.25	18304512	988496	601	14
+1785945059	session	/Users/testuser/Dev/wizards	0.07	1134752	mcp figma-console-mcp@0.0	●spellfall: done
+1785945059	session	/Users/testuser/Dev	0.00	1446784	-	claude-watch-resource-monitor
+1785945059	proc	iTerm2	0.22	292768	22008
+1785945059	proc	NordVPN	0.08	308928	1010
+1785945059	proc	Telegram	0.06	402032	49068
+1785945059	proc	bash	0.05	1840	70610
+1785945059	proc	plugin-container	0.00	1014464	45867
+1785945059	proc	firefox	0.01	841312	45856
+1785945059	proc	plugin-container	0.00	555568	28891
+1785945059	proc	plugin-container	0.00	511840	53104
+1785945059	proc	plugin-container	0.00	474160	26135
+1785945059	proc	plugin-container	0.00	447168	29605
+1785945059	proc	plugin-container	0.01	430112	26655
+1785945059	orphan	node --test	0.00	28336	375206
+1785945069	sys	-	1.36	18293664	974784	601	14
+1785945069	session	/Users/testuser/Dev/wizards	0.04	1134752	-	●spellfall: done
+1785945069	session	/Users/testuser/Dev	0.00	1446592	sleep@0.0	claude-watch-resource-monitor
+1785945069	proc	iTerm2	0.09	292736	22008
+1785945069	proc	NordVPN	0.08	308928	1010
+1785945069	proc	bash	0.05	1840	70707
+1785945069	proc	plugin-container	0.00	1017408	45867
+1785945069	proc	firefox	0.01	841232	45856
+1785945069	proc	plugin-container	0.03	555600	28891
+1785945069	proc	plugin-container	0.00	511824	53104
+1785945069	proc	plugin-container	0.00	474160	26135
+1785945069	proc	plugin-container	0.00	447152	29605
+1785945069	proc	plugin-container	0.01	430096	26655
+1785945069	orphan	node --test	0.00	28336	375216
+1785945079	sys	-	1.30	18285696	1004944	601	14
+1785945079	session	/Users/testuser/Dev/wizards	0.09	1134752	-	●spellfall: done
+1785945079	session	/Users/testuser/Dev	0.01	1446592	-	claude-watch-resource-monitor
+1785945079	proc	iTerm2	0.14	292736	22008
+1785945079	proc	NordVPN	0.10	308928	1010
+1785945079	proc	WiFiAgent	0.07	38784	738
+1785945079	proc	plugin-container	0.00	1014512	45867
+1785945079	proc	firefox	0.01	841280	45856
+1785945079	proc	plugin-container	0.01	555600	28891
+1785945079	proc	plugin-container	0.00	511840	53104
+1785945079	proc	plugin-container	0.00	474160	26135
+1785945079	proc	plugin-container	0.00	447152	29605
+1785945079	proc	plugin-container	0.02	430096	26655
+1785945079	orphan	node --test	0.00	28336	375226
+1785945089	sys	-	1.26	18287712	1004192	601	14
+1785945089	session	/Users/testuser/Dev/wizards	0.07	1134752	-	●spellfall: done
+1785945089	session	/Users/testuser/Dev	0.01	1447456	-	claude-watch-resource-monitor
+1785945089	proc	airportd	0.29	38768	479
+1785945089	proc	WiFiAgent	0.25	38768	738
+1785945089	proc	iTerm2	0.18	292752	22008
+1785945089	proc	wifianalyticsd	0.11	18208	765
+1785945089	proc	NordVPN	0.07	308928	1010
+1785945089	proc	plugin-container	0.00	1014528	45867
+1785945089	proc	firefox	0.03	841312	45856
+1785945089	proc	plugin-container	0.00	555600	28891
+1785945089	proc	plugin-container	0.00	511840	53104
+1785945089	proc	plugin-container	0.01	474176	26135
+1785945089	proc	plugin-container	0.00	447504	29605
+1785945089	proc	plugin-container	0.02	430096	26655
+1785945089	orphan	node --test	0.00	28336	375237
+1785945100	sys	-	1.66	18294688	988384	601	14
+1785945100	session	/Users/testuser/Dev/wizards	0.07	1134768	-	●spellfall: done
+1785945100	session	/Users/testuser/Dev	0.01	1447456	sleep@0.0	claude-watch-resource-monitor
+1785945100	proc	firefox	0.22	825680	45856
+1785945100	proc	iTerm2	0.10	292736	22008
+1785945100	proc	NordVPN	0.08	308928	1010
+1785945100	proc	Telegram	0.05	402016	49068
+1785945100	proc	plugin-container	0.00	1014528	45867
+1785945100	proc	plugin-container	0.00	555584	28891
+1785945100	proc	plugin-container	0.00	511840	53104
+1785945100	proc	plugin-container	0.00	474176	26135
+1785945100	proc	plugin-container	0.00	447520	29605
+1785945100	proc	plugin-container	0.00	430112	26655
+1785945100	orphan	node --test	0.00	28336	375247
+1785945110	sys	-	1.56	18289600	1003616	601	14
+1785945110	session	/Users/testuser/Dev/wizards	0.15	1134752	-	●spellfall: done
+1785945110	session	/Users/testuser/Dev	0.00	1447456	-	claude-watch-resource-monitor
+1785945110	proc	iTerm2	0.17	292752	22008
+1785945110	proc	NordVPN	0.07	308928	1010
+1785945110	proc	plugin-container	0.00	1014544	45867
+1785945110	proc	firefox	0.01	825680	45856
+1785945110	proc	plugin-container	0.00	555584	28891
+1785945110	proc	plugin-container	0.00	511840	53104
+1785945110	proc	plugin-container	0.00	474176	26135
+1785945110	proc	plugin-container	0.00	447536	29605
+1785945110	proc	plugin-container	0.01	430112	26655
+1785945110	orphan	node --test	0.00	28336	375257
+1785945120	sys	-	1.61	18441024	748176	601	14
+1785945120	session	/Users/testuser/Dev/wizards	0.10	1134816	-	●spellfall: done
+1785945120	session	/Users/testuser/Dev	0.00	1447456	-	claude-watch-resource-monitor
+1785945120	proc	iTerm2	0.23	292720	22008
+1785945120	proc	airportd	0.22	38768	479
+1785945120	proc	loginwindow console	0.16	138576	407
+1785945120	proc	locationd	0.08	28640	379
+1785945120	proc	NordVPN	0.07	308928	1010
+1785945120	proc	plugin-container	0.00	1014544	45867
+1785945120	proc	firefox	0.01	825696	45856
+1785945120	proc	plugin-container	0.00	555584	28891
+1785945120	proc	plugin-container	0.00	511840	53104
+1785945120	proc	plugin-container	0.00	474160	26135
+1785945120	proc	plugin-container	0.00	447536	29605
+1785945120	proc	plugin-container	0.00	430112	26655
+1785945120	orphan	node --test	0.00	28336	375267
+1785945130	sys	-	1.66	18255232	834368	601	14
+1785945130	session	/Users/testuser/Dev/wizards	0.17	1134832	-	●spellfall: done
+1785945130	session	/Users/testuser/Dev	0.03	1447520	-	claude-watch-resource-monitor
+1785945130	proc	IntelligencePlatformComputeService	0.12	22848	90854
+1785945130	proc	iTerm2	0.11	293232	22008
+1785945130	proc	NordVPN	0.08	308928	1010
+1785945130	proc	Telegram	0.07	402192	49068
+1785945130	proc	BiomeAgent	0.06	15488	11154
+1785945130	proc	airportd	0.05	38768	479
+1785945130	proc	plugin-container	0.00	1017696	45867
+1785945130	proc	firefox	0.01	825696	45856
+1785945130	proc	plugin-container	0.00	555824	28891
+1785945130	proc	plugin-container	0.00	511824	53104
+1785945130	proc	plugin-container	0.00	474160	26135
+1785945130	proc	plugin-container	0.00	447520	29605
+1785945130	proc	plugin-container	0.01	430096	26655
+1785945130	orphan	node --test	0.00	28336	375277
+1785945140	sys	-	2.12	18266976	734192	601	14
+1785945140	session	/Users/testuser/Dev/wizards	0.11	1172000	-	●spellfall: done
+1785945140	session	/Users/testuser/Dev	0.02	1447536	-	claude-watch-resource-monitor
+1785945140	proc	iTerm2	0.13	293344	22008
+1785945140	proc	NordVPN	0.06	308928	1010
+1785945140	proc	plugin-container	0.00	1014736	45867
+1785945140	proc	firefox	0.01	825696	45856
+1785945140	proc	plugin-container	0.00	555824	28891
+1785945140	proc	plugin-container	0.00	511840	53104
+1785945140	proc	plugin-container	0.00	474160	26135
+1785945140	proc	plugin-container	0.00	447520	29605
+1785945140	proc	plugin-container	0.00	430192	26655
+1785945140	orphan	node --test	0.00	28336	375287
+1785945150	sys	-	2.18	18229904	770384	601	14
+1785945150	session	/Users/testuser/Dev/wizards	0.11	1134832	-	●spellfall: done
+1785945150	session	/Users/testuser/Dev	0.04	1447488	sleep@0.0	claude-watch-resource-monitor
+1785945150	proc	NordVPN	0.11	308928	1010
+1785945150	proc	iTerm2	0.11	293360	22008
+1785945150	proc	plugin-container	0.00	1014736	45867
+1785945150	proc	firefox	0.01	825664	45856
+1785945150	proc	plugin-container	0.00	555824	28891
+1785945150	proc	plugin-container	0.00	511840	53104
+1785945150	proc	plugin-container	0.00	474176	26135
+1785945150	proc	plugin-container	0.00	447520	29605
+1785945150	proc	plugin-container	0.01	430336	26655
+1785945150	orphan	node --test	0.00	28336	375297
+1785945160	sys	-	2.22	18240928	760848	601	14
+1785945160	session	/Users/testuser/Dev/wizards	0.04	1134832	-	●spellfall: done
+1785945160	session	/Users/testuser/Dev	0.01	1447488	-	claude-watch-resource-monitor
+1785945160	proc	iTerm2	0.09	293344	22008
+1785945160	proc	airportd	0.08	38848	479
+1785945160	proc	NordVPN	0.06	308928	1010
+1785945160	proc	Telegram	0.06	402032	49068
+1785945160	proc	firefox	0.05	825712	45856
+1785945160	proc	plugin-container	0.00	1017760	45867
+1785945160	proc	plugin-container	0.00	555808	28891
+1785945160	proc	plugin-container	0.00	511840	53104
+1785945160	proc	plugin-container	0.00	474176	26135
+1785945160	proc	plugin-container	0.00	447536	29605
+1785945160	proc	plugin-container	0.01	430496	26655
+1785945160	orphan	node --test	0.00	28336	375308
+1785945171	sys	-	1.95	18205680	731904	601	14
+1785945171	session	/Users/testuser/Dev/wizards	0.02	1134848	-	●spellfall: done
+1785945171	session	/Users/testuser/Dev	0.01	1447488	mcp figma-console-mcp@0.0	claude-watch-resource-monitor
+1785945171	proc	airportd	0.43	38800	479
+1785945171	proc	WiFiAgent	0.38	38736	738
+1785945171	proc	wifianalyticsd	0.10	18384	765
+1785945171	proc	Telegram	0.09	402112	49068
+1785945171	proc	iTerm2	0.08	293360	22008
+1785945171	proc	NordVPN	0.07	308928	1010
+1785945171	proc	plugin-container	0.00	1014544	45867
+1785945171	proc	firefox	0.01	838976	45856
+1785945171	proc	plugin-container	0.00	555808	28891
+1785945171	proc	plugin-container	0.00	511856	53104
+1785945171	proc	plugin-container	0.00	474176	26135
+1785945171	proc	plugin-container	0.00	447696	29605
+1785945171	proc	plugin-container	0.00	430624	26655
+1785945171	orphan	node --test	0.00	28336	375318
+1785945181	sys	-	2.11	18354576	592272	601	14
+1785945181	session	/Users/testuser/Dev/wizards	0.02	1134864	-	●spellfall: done
+1785945181	session	/Users/testuser/Dev	0.01	1447488	sleep@0.0	claude-watch-resource-monitor
+1785945181	proc	loginwindow console	0.09	138592	407
+1785945181	proc	NordVPN	0.08	308928	1010
+1785945181	proc	coreaudiod	0.07	40368	422
+1785945181	proc	iTerm2	0.07	293344	22008
+1785945181	proc	plugin-container	0.00	1014544	45867
+1785945181	proc	firefox	0.01	839056	45856
+1785945181	proc	plugin-container	0.00	555808	28891
+1785945181	proc	plugin-container	0.00	511872	53104
+1785945181	proc	plugin-container	0.00	474160	26135
+1785945181	proc	plugin-container	0.00	447696	29605
+1785945181	proc	plugin-container	0.01	430704	26655
+1785945181	orphan	node --test	0.01	28336	375328
+1785945191	sys	-	1.87	18261808	707408	601	14
+1785945191	session	/Users/testuser/Dev/wizards	0.18	1134880	-	●spellfall: done
+1785945191	session	/Users/testuser/Dev	0.00	1447360	-	claude-watch-resource-monitor
+1785945191	proc	NordVPN	0.07	308928	1010
+1785945191	proc	iTerm2	0.07	292800	22008
+1785945191	proc	plugin-container	0.00	1014528	45867
+1785945191	proc	firefox	0.01	839056	45856
+1785945191	proc	plugin-container	0.00	555824	28891
+1785945191	proc	plugin-container	0.00	511856	53104
+1785945191	proc	plugin-container	0.00	474160	26135
+1785945191	proc	plugin-container	0.00	447680	29605
+1785945191	proc	plugin-container	0.00	430688	26655
+1785945191	orphan	node --test	0.00	28336	375338
+1785945201	sys	-	1.81	18208416	717568	601	14
+1785945201	session	/Users/testuser/Dev/wizards	0.06	1134912	-	●spellfall: done
+1785945201	session	/Users/testuser/Dev	0.00	1447472	-	claude-watch-resource-monitor
+1785945201	proc	airportd	0.34	38752	479
+1785945201	proc	WiFiAgent	0.08	38736	738
+1785945201	proc	iTerm2	0.07	293312	22008
+1785945201	proc	plugin-container	0.00	1014528	45867
+1785945201	proc	firefox	0.01	839040	45856
+1785945201	proc	plugin-container	0.00	555824	28891
+1785945201	proc	plugin-container	0.00	511872	53104
+1785945201	proc	plugin-container	0.00	474160	26135
+1785945201	proc	plugin-container	0.00	447680	29605
+1785945201	proc	plugin-container	0.02	430688	26655
+1785945201	orphan	node --test	0.00	28352	375348
+1785945211	sys	-	1.99	18238240	743552	601	14
+1785945211	session	/Users/testuser/Dev/wizards	0.07	1134864	-	●spellfall: done
+1785945211	session	/Users/testuser/Dev	0.00	1447472	sleep@0.0	claude-watch-resource-monitor
+1785945211	proc	airportd	0.10	38720	479
+1785945211	proc	WiFiAgent	0.08	38736	738
+1785945211	proc	iTerm2	0.08	293296	22008
+1785945211	proc	plugin-container	0.00	1014528	45867
+1785945211	proc	firefox	0.01	839024	45856
+1785945211	proc	plugin-container	0.00	555824	28891
+1785945211	proc	plugin-container	0.00	511872	53104
+1785945211	proc	plugin-container	0.00	474176	26135
+1785945211	proc	plugin-container	0.00	447680	29605
+1785945211	proc	plugin-container	0.01	430704	26655
+1785945211	orphan	node --test	0.00	28352	375358
+1785945221	sys	-	1.68	18229712	755616	601	14
+1785945221	session	/Users/testuser/Dev/wizards	0.00	1134912	-	●spellfall: done
+1785945221	session	/Users/testuser/Dev	0.02	1447456	-	claude-watch-resource-monitor
+1785945221	proc	NordVPN	0.09	308928	1010
+1785945221	proc	iTerm2	0.07	293312	22008
+1785945221	proc	plugin-container	0.00	1018688	45867
+1785945221	proc	firefox	0.02	826416	45856
+1785945221	proc	plugin-container	0.00	555808	28891
+1785945221	proc	plugin-container	0.01	511872	53104
+1785945221	proc	plugin-container	0.00	467984	26135
+1785945221	proc	plugin-container	0.00	447680	29605
+1785945221	proc	plugin-container	0.01	430704	26655
+1785945221	orphan	node --test	0.00	28352	375368
+1785945231	sys	-	1.81	18246432	734240	601	14
+1785945231	session	/Users/testuser/Dev/wizards	0.05	1134912	-	●spellfall: done
+1785945231	session	/Users/testuser/Dev	0.01	1447472	-	claude-watch-resource-monitor
+1785945231	proc	iTerm2	0.13	292816	22008
+1785945231	proc	NordVPN	0.09	308944	1010
+1785945231	proc	plugin-container	0.00	1014608	45867
+1785945231	proc	firefox	0.01	839008	45856
+1785945231	proc	plugin-container	0.00	555808	28891
+1785945231	proc	plugin-container	0.00	511872	53104
+1785945231	proc	plugin-container	0.00	467984	26135
+1785945231	proc	plugin-container	0.00	447696	29605
+1785945231	proc	plugin-container	0.02	430704	26655
+1785945231	orphan	node --test	0.00	28352	375379
+1785945242	sys	-	1.69	18384288	602144	601	14
+1785945242	session	/Users/testuser/Dev/wizards	0.04	1134912	-	●spellfall: done
+1785945242	session	/Users/testuser/Dev	0.01	1447472	-	claude-watch-resource-monitor
+1785945242	proc	airportd	0.40	38832	479
+1785945242	proc	WiFiAgent	0.11	38944	738
+1785945242	proc	iTerm2	0.10	292816	22008
+1785945242	proc	loginwindow console	0.08	138624	407
+1785945242	proc	NordVPN	0.06	308944	1010
+1785945242	proc	plugin-container	0.00	1014624	45867
+1785945242	proc	firefox	0.01	839008	45856
+1785945242	proc	plugin-container	0.00	555808	28891
+1785945242	proc	plugin-container	0.00	511872	53104
+1785945242	proc	plugin-container	0.00	468000	26135
+1785945242	proc	plugin-container	0.00	447696	29605
+1785945242	proc	plugin-container	0.00	430704	26655
+1785945242	orphan	node --test	0.00	28352	375389
+1785945252	sys	-	1.65	18250944	711856	601	14
+1785945252	session	/Users/testuser/Dev/wizards	0.02	1134960	-	●spellfall: done
+1785945252	session	/Users/testuser/Dev	0.00	1447472	-	claude-watch-resource-monitor
+1785945252	proc	NordVPN	0.09	308944	1010
+1785945252	proc	iTerm2	0.08	292832	22008
+1785945252	proc	airportd	0.07	38768	479
+1785945252	proc	Telegram	0.05	402000	49068
+1785945252	proc	plugin-container	0.00	1017824	45867
+1785945252	proc	firefox	0.01	839008	45856
+1785945252	proc	plugin-container	0.00	555824	28891
+1785945252	proc	plugin-container	0.00	511856	53104
+1785945252	proc	plugin-container	0.00	468000	26135
+1785945252	proc	plugin-container	0.00	447680	29605
+1785945252	proc	plugin-container	0.01	430848	26655
+1785945252	orphan	node --test	0.00	28352	375399
+1785945262	sys	-	1.63	18717296	549520	601	14
+1785945262	session	/Users/testuser/Dev/wizards	0.19	1673568	node@0.1	●spellfall: done
+1785945262	session	/Users/testuser/Dev	0.01	1447360	sleep@0.0	claude-watch-resource-monitor
+1785945262	proc	XprotectService	0.19	37104	84939
+1785945262	proc	NordVPN	0.12	308944	1010
+1785945262	proc	plugin-container	0.10	431056	26655
+1785945262	proc	Telegram	0.06	402032	49068
+1785945262	proc	iTerm2	0.05	292832	22008
+1785945262	proc	plugin-container	0.00	1014608	45867
+1785945262	proc	firefox	0.01	839008	45856
+1785945262	proc	plugin-container	0.00	555824	28891
+1785945262	proc	plugin-container	0.00	511872	53104
+1785945262	proc	plugin-container	0.00	468000	26135
+1785945262	proc	plugin-container	0.00	447680	29605
+1785945262	orphan	node --test	0.00	28352	375409
+1785945272	sys	-	1.61	18178528	1031392	601	14
+1785945272	session	/Users/testuser/Dev/wizards	0.10	1135312	-	●spellfall: done
+1785945272	session	/Users/testuser/Dev	0.00	1447360	-	claude-watch-resource-monitor
+1785945272	proc	airportd	0.12	38688	479
+1785945272	proc	WiFiAgent	0.10	38688	738
+1785945272	proc	iTerm2	0.06	292816	22008
+1785945272	proc	Telegram	0.05	401984	49068
+1785945272	proc	plugin-container	0.02	1014640	45867
+1785945272	proc	firefox	0.01	839008	45856
+1785945272	proc	plugin-container	0.00	555824	28891
+1785945272	proc	plugin-container	0.00	511872	53104
+1785945272	proc	plugin-container	0.00	468016	26135
+1785945272	proc	plugin-container	0.00	447680	29605
+1785945272	proc	plugin-container	0.00	431088	26655
+1785945272	orphan	node --test	0.00	28352	375419
+1785945282	sys	-	1.67	18324192	1187024	601	14
+1785945282	session	/Users/testuser/Dev/wizards	0.28	1696656	node@0.2	●spellfall: done
+1785945282	session	/Users/testuser/Dev	0.00	1434016	-	claude-watch-resource-monitor
+1785945282	proc	airportd	0.35	38128	479
+1785945282	proc	WiFiAgent	0.18	38496	738
+1785945282	proc	iTerm2	0.06	273152	22008
+1785945282	proc	NordVPN	0.06	308944	1010
+1785945282	proc	plugin-container	0.00	1006016	45867
+1785945282	proc	firefox	0.01	832784	45856
+1785945282	proc	plugin-container	0.00	545600	28891
+1785945282	proc	plugin-container	0.00	511872	53104
+1785945282	proc	plugin-container	0.00	466576	26135
+1785945282	proc	plugin-container	0.00	447696	29605
+1785945282	proc	plugin-container	0.01	430912	26655
+1785945282	orphan	node --test	0.00	28352	375429
+1785945292	sys	-	1.64	18395808	1050592	601	14
+1785945292	session	/Users/testuser/Dev/wizards	0.19	1553456	node@0.0	●spellfall: done
+1785945292	session	/Users/testuser/Dev	0.01	1434016	sleep@0.0	claude-watch-resource-monitor
+1785945292	proc	NordVPN	0.15	308944	1010
+1785945292	proc	Telegram	0.10	410352	49068
+1785945292	proc	iTerm2	0.08	273120	22008
+1785945292	proc	plugin-container	0.00	1006016	45867
+1785945292	proc	firefox	0.03	820192	45856
+1785945292	proc	plugin-container	0.00	545600	28891
+1785945292	proc	plugin-container	0.00	511872	53104
+1785945292	proc	plugin-container	0.00	466528	26135
+1785945292	proc	plugin-container	0.00	447696	29605
+1785945292	proc	plugin-container	0.00	430912	26655
+1785945292	orphan	node --test	0.00	28352	375439
+1785945302	sys	-	1.62	18372752	936480	601	14
+1785945302	session	/Users/testuser/Dev/wizards	0.07	1554832	node@0.0	●spellfall: done
+1785945302	session	/Users/testuser/Dev	0.00	1434016	-	claude-watch-resource-monitor
+1785945302	proc	NordVPN	0.07	308944	1010
+1785945302	proc	iTerm2	0.07	273136	22008
+1785945302	proc	plugin-container	0.00	1006000	45867
+1785945302	proc	firefox	0.01	832832	45856
+1785945302	proc	plugin-container	0.00	545616	28891
+1785945302	proc	plugin-container	0.00	511872	53104
+1785945302	proc	plugin-container	0.00	466512	26135
+1785945302	proc	plugin-container	0.00	447696	29605
+1785945302	proc	plugin-container	0.00	430896	26655
+1785945302	proc	Telegram	0.04	412368	49068
+1785945302	orphan	node --test	0.00	28352	375449
+1785945313	sys	-	1.37	18404544	1076720	601	14
+1785945313	session	/Users/testuser/Dev/wizards	0.05	1553184	node@0.0	●spellfall: done
+1785945313	session	/Users/testuser/Dev	0.00	1434016	-	claude-watch-resource-monitor
+1785945313	proc	airportd	0.10	38208	479
+1785945313	proc	iTerm2	0.06	273136	22008
+1785945313	proc	plugin-container	0.00	1009056	45867
+1785945313	proc	firefox	0.01	832832	45856
+1785945313	proc	plugin-container	0.00	545616	28891
+1785945313	proc	plugin-container	0.00	511856	53104
+1785945313	proc	plugin-container	0.00	466512	26135
+1785945313	proc	plugin-container	0.00	447680	29605
+1785945313	proc	plugin-container	0.00	430992	26655
+1785945313	proc	Telegram	0.04	412192	49068
+1785945313	orphan	node --test	0.00	28352	375460
+1785945323	sys	-	1.53	18115408	1377936	601	14
+1785945323	session	/Users/testuser/Dev/wizards	0.01	1105312	-	●spellfall: done
+1785945323	session	/Users/testuser/Dev	0.00	1434000	sleep@0.0	claude-watch-resource-monitor
+1785945323	proc	airportd	0.60	38352	479
+1785945323	proc	WiFiAgent	0.24	38496	738
+1785945323	proc	iTerm2	0.12	273136	22008
+1785945323	proc	ControlCenter	0.07	100096	656
+1785945323	proc	NordVPN	0.05	308944	1010
+1785945323	proc	plugin-container	0.00	1006096	45867
+1785945323	proc	firefox	0.01	832832	45856
+1785945323	proc	plugin-container	0.00	545616	28891
+1785945323	proc	plugin-container	0.00	511872	53104
+1785945323	proc	plugin-container	0.00	466512	26135
+1785945323	proc	plugin-container	0.00	447680	29605
+1785945323	proc	plugin-container	0.01	431104	26655
+1785945323	proc	Telegram	0.04	412208	49068
+1785945323	orphan	node --test	0.00	28352	375470
+1785945333	sys	-	1.61	18115344	1378096	601	14
+1785945333	session	/Users/testuser/Dev/wizards	0.04	1105312	-	●spellfall: done
+1785945333	session	/Users/testuser/Dev	0.02	1434000	-	claude-watch-resource-monitor
+1785945333	proc	NordVPN	0.11	308944	1010
+1785945333	proc	iTerm2	0.10	273152	22008
+1785945333	proc	airportd	0.06	38368	479
+1785945333	proc	plugin-container	0.00	1006112	45867
+1785945333	proc	firefox	0.01	832832	45856
+1785945333	proc	plugin-container	0.00	545600	28891
+1785945333	proc	plugin-container	0.00	511872	53104
+1785945333	proc	plugin-container	0.00	466528	26135
+1785945333	proc	plugin-container	0.00	447680	29605
+1785945333	proc	plugin-container	0.00	431120	26655
+1785945333	proc	Telegram	0.03	412192	49068
+1785945333	orphan	node --test	0.00	28368	375480
+1785945343	sys	-	1.68	18108448	1390320	601	14
+1785945343	session	/Users/testuser/Dev/wizards	0.06	1105312	-	●spellfall: done
+1785945343	session	/Users/testuser/Dev	0.01	1434000	-	claude-watch-resource-monitor
+1785945343	proc	iTerm2	0.10	273152	22008
+1785945343	proc	plugin-container	0.00	1010240	45867
+1785945343	proc	firefox	0.01	832832	45856
+1785945343	proc	plugin-container	0.00	545600	28891
+1785945343	proc	plugin-container	0.01	512112	53104
+1785945343	proc	plugin-container	0.00	466528	26135
+1785945343	proc	plugin-container	0.00	447696	29605
+1785945343	proc	plugin-container	0.00	431120	26655
+1785945343	proc	Telegram	0.04	412192	49068
+1785945343	orphan	node --test	0.00	28368	375490
+1785945353	sys	-	1.42	18091248	1406208	601	14
+1785945353	session	/Users/testuser/Dev/wizards	0.05	1105312	-	●spellfall: done
+1785945353	session	/Users/testuser/Dev	0.00	1434000	-	claude-watch-resource-monitor
+1785945353	proc	firefox	0.24	820208	45856
+1785945353	proc	iTerm2	0.07	273136	22008
+1785945353	proc	plugin-container	0.00	1006016	45867
+1785945353	proc	plugin-container	0.00	545600	28891
+1785945353	proc	plugin-container	0.00	512112	53104
+1785945353	proc	plugin-container	0.00	466528	26135
+1785945353	proc	plugin-container	0.00	447696	29605
+1785945353	proc	plugin-container	0.00	431120	26655
+1785945353	proc	Telegram	0.03	412128	49068
+1785945353	orphan	node --test	0.00	28368	375500
+1785945363	sys	-	1.20	18158704	1145872	601	14
+1785945363	session	/Users/testuser/Dev/wizards	0.04	1105472	-	●spellfall: done
+1785945363	session	/Users/testuser/Dev	0.01	1433904	-	claude-watch-resource-monitor
+1785945363	proc	contactsd	1.32	74704	91130
+1785945363	proc	airportd	0.51	38384	479
+1785945363	proc	contactsdonationagent	0.48	21936	89669
+1785945363	proc	IMDPersistenceAgent	0.20	49952	59856
+1785945363	proc	AddressBookManager	0.17	34128	74490
+1785945363	proc	WiFiAgent	0.15	38848	738
+1785945363	proc	postersyncd	0.08	16496	16252
+1785945363	proc	iTerm2	0.07	273120	22008
+1785945363	proc	plugin-container	0.00	1006016	45867
+1785945363	proc	firefox	0.01	832800	45856
+1785945363	proc	plugin-container	0.00	545616	28891
+1785945363	proc	plugin-container	0.00	512112	53104
+1785945363	proc	plugin-container	0.00	466512	26135
+1785945363	proc	plugin-container	0.00	447696	29605
+1785945363	proc	plugin-container	0.00	431104	26655
+1785945363	proc	Telegram	0.03	412160	49068
+1785945363	orphan	node --test	0.00	28368	375510
+1785945373	sys	-	1.70	18164464	1245488	601	14
+1785945373	session	/Users/testuser/Dev/wizards	0.00	1105680	-	●spellfall: done
+1785945373	session	/Users/testuser/Dev	0.01	1433904	sleep@0.0	claude-watch-resource-monitor
+1785945373	proc	contactsd	1.02	77360	91130
+1785945373	proc	AddressBookManager	0.54	40080	74490
+1785945373	proc	IMDPersistenceAgent	0.47	50016	59856
+1785945373	proc	runningboardd	0.14	22032	410
+1785945373	proc	airportd	0.11	38368	479
+1785945373	proc	iTerm2	0.09	273136	22008
+1785945373	proc	NordVPN	0.08	308944	1010
+1785945373	proc	WiFiAgent	0.06	38672	738
+1785945373	proc	plugin-container	0.00	1006000	45867
+1785945373	proc	firefox	0.01	832800	45856
+1785945373	proc	plugin-container	0.00	545616	28891
+1785945373	proc	plugin-container	0.00	512096	53104
+1785945373	proc	plugin-container	0.00	466512	26135
+1785945373	proc	plugin-container	0.00	447680	29605
+1785945373	proc	plugin-container	0.00	431120	26655
+1785945373	proc	Telegram	0.05	412112	49068
+1785945373	orphan	node --test	0.00	28368	375521
+1785945384	sys	-	2.04	18170128	1238432	601	14
+1785945384	session	/Users/testuser/Dev/wizards	0.07	1105760	-	●spellfall: done
+1785945384	session	/Users/testuser/Dev	0.00	1434032	-	claude-watch-resource-monitor
+1785945384	proc	airportd	0.20	38384	479
+1785945384	proc	iTerm2	0.07	273120	22008
+1785945384	proc	ControlCenter	0.06	100096	656
+1785945384	proc	plugin-container	0.00	1006000	45867
+1785945384	proc	firefox	0.01	832800	45856
+1785945384	proc	plugin-container	0.00	545616	28891
+1785945384	proc	plugin-container	0.00	512112	53104
+1785945384	proc	plugin-container	0.00	466512	26135
+1785945384	proc	plugin-container	0.00	447680	29605
+1785945384	proc	plugin-container	0.00	431120	26655
+1785945384	proc	Telegram	0.04	412160	49068
+1785945384	orphan	node --test	0.00	28368	375531
+1785945394	sys	-	1.72	18067440	1336224	601	14
+1785945394	session	/Users/testuser/Dev/wizards	0.07	1106176	-	●spellfall: done
+1785945394	session	/Users/testuser/Dev	0.00	1433168	-	claude-watch-resource-monitor
+1785945394	proc	NordVPN	0.10	308944	1010
+1785945394	proc	iTerm2	0.07	273136	22008
+1785945394	proc	Telegram	0.05	412128	49068
+1785945394	proc	bash	0.05	1840	74698
+1785945394	proc	plugin-container	0.00	1006016	45867
+1785945394	proc	firefox	0.01	832784	45856
+1785945394	proc	plugin-container	0.00	545600	28891
+1785945394	proc	plugin-container	0.00	512112	53104
+1785945394	proc	plugin-container	0.00	466528	26135
+1785945394	proc	plugin-container	0.00	447680	29605
+1785945394	proc	plugin-container	0.00	431136	26655
+1785945394	orphan	node --test	0.00	28368	375541
+1785945404	sys	-	1.58	18404864	904816	601	14
+1785945404	session	/Users/testuser/Dev/wizards	1.29	1665328	chrome-headless-shell@1.3	●spellfall: done
+1785945404	session	/Users/testuser/Dev	0.00	1433152	sleep@0.0	claude-watch-resource-monitor
+1785945404	proc	NordVPN	0.07	308944	1010
+1785945404	proc	airportd	0.07	38416	479
+1785945404	proc	plugin-container	0.00	1006016	45867
+1785945404	proc	firefox	0.01	832816	45856
+1785945404	proc	plugin-container	0.00	545600	28891
+1785945404	proc	plugin-container	0.00	512112	53104
+1785945404	proc	plugin-container	0.00	466528	26135
+1785945404	proc	plugin-container	0.00	447696	29605
+1785945404	proc	plugin-container	0.00	431120	26655
+1785945404	proc	Telegram	0.03	412096	49068
+1785945404	orphan	node --test	0.00	28368	375551
+1785945414	sys	-	2.69	18794400	552160	601	14
+1785945414	session	/Users/testuser/Dev/wizards	10.59	2097232	chrome-headless-shell@10.6	●spellfall: done
+1785945414	session	/Users/testuser/Dev	0.00	1433248	-	claude-watch-resource-monitor
+1785945414	proc	airportd	0.09	38448	479
+1785945414	proc	WiFiAgent	0.05	38688	738
+1785945414	proc	plugin-container	0.00	1006016	45867
+1785945414	proc	firefox	0.01	832832	45856
+1785945414	proc	plugin-container	0.00	545600	28891
+1785945414	proc	plugin-container	0.00	508096	53104
+1785945414	proc	plugin-container	0.00	466528	26135
+1785945414	proc	plugin-container	0.00	447696	29605
+1785945414	proc	plugin-container	0.00	431120	26655
+1785945414	proc	Telegram	0.03	412144	49068
+1785945414	orphan	node --test	0.00	28368	375561
+1785945424	sys	-	4.01	18773072	505264	601	14
+1785945424	session	/Users/testuser/Dev/wizards	1.08	2081024	chrome-headless-shell@1.0	●spellfall: done
+1785945424	session	/Users/testuser/Dev	0.00	1433152	-	claude-watch-resource-monitor
+1785945424	proc	plugin-container	0.01	1006000	45867
+1785945424	proc	firefox	0.01	820256	45856
+1785945424	proc	plugin-container	0.00	545616	28891
+1785945424	proc	plugin-container	0.00	508112	53104
+1785945424	proc	plugin-container	0.00	466512	26135
+1785945424	proc	plugin-container	0.00	447696	29605
+1785945424	proc	plugin-container	0.00	431104	26655
+1785945424	proc	Telegram	0.03	412176	49068
+1785945424	orphan	node --test	0.00	28368	375571
+1785945434	sys	-	4.06	18133936	1221760	601	14
+1785945434	session	/Users/testuser/Dev/wizards	0.07	1107792	-	●spellfall: done
+1785945434	session	/Users/testuser/Dev	0.01	1433152	-	claude-watch-resource-monitor
+1785945434	proc	NordVPN	0.14	308976	1010
+1785945434	proc	iTerm2	0.09	273168	22008
+1785945434	proc	plugin-container	0.00	1007024	45867
+1785945434	proc	firefox	0.01	833328	45856
+1785945434	proc	plugin-container	0.00	546016	28891
+1785945434	proc	plugin-container	0.00	508096	53104
+1785945434	proc	plugin-container	0.00	466528	26135
+1785945434	proc	plugin-container	0.00	448688	29605
+1785945434	proc	plugin-container	0.00	431104	26655
+1785945434	proc	Telegram	0.04	412176	49068
+1785945434	orphan	node --test	0.00	28368	375581
+1785945445	sys	-	3.43	18113920	1243328	601	14
+1785945445	session	/Users/testuser/Dev/wizards	0.01	1109360	-	●spellfall: done
+1785945445	session	/Users/testuser/Dev	0.00	1433264	-	claude-watch-resource-monitor
+1785945445	proc	airportd	0.50	38576	479
+1785945445	proc	WiFiAgent	0.31	38656	738
+1785945445	proc	NordVPN	0.08	308976	1010
+1785945445	proc	iTerm2	0.08	273152	22008
+1785945445	proc	plugin-container	0.00	1007024	45867
+1785945445	proc	firefox	0.01	833328	45856
+1785945445	proc	plugin-container	0.00	546016	28891
+1785945445	proc	plugin-container	0.00	508112	53104
+1785945445	proc	plugin-container	0.00	466528	26135
+1785945445	proc	plugin-container	0.00	448688	29605
+1785945445	proc	plugin-container	0.00	431104	26655
+1785945445	proc	Telegram	0.04	412320	49068
+1785945445	orphan	node --test	0.00	28368	375592
+1785945455	sys	-	3.21	18060336	1242384	601	14
+1785945455	session	/Users/testuser/Dev/wizards	0.01	1110048	-	●spellfall: done
+1785945455	session	/Users/testuser/Dev	0.00	1433264	-	claude-watch-resource-monitor
+1785945455	proc	airportd	0.15	38496	479
+1785945455	proc	iTerm2	0.09	273136	22008
+1785945455	proc	plugin-container	0.00	1011360	45867
+1785945455	proc	firefox	0.01	833328	45856
+1785945455	proc	plugin-container	0.00	546000	28891
+1785945455	proc	plugin-container	0.00	508112	53104
+1785945455	proc	plugin-container	0.00	466544	26135
+1785945455	proc	plugin-container	0.00	448688	29605
+1785945455	proc	plugin-container	0.00	431120	26655
+1785945455	proc	Telegram	0.04	412256	49068
+1785945455	orphan	node --test	0.00	28368	375602
+1785945465	sys	-	2.79	18060432	1240560	601	14
+1785945465	session	/Users/testuser/Dev/wizards	0.12	1110208	-	●spellfall: done
+1785945465	session	/Users/testuser/Dev	0.00	1433264	-	claude-watch-resource-monitor
+1785945465	proc	NordVPN	0.09	308928	1010
+1785945465	proc	airportd	0.08	38384	479
+1785945465	proc	iTerm2	0.07	273120	22008
+1785945465	proc	Telegram	0.07	412272	49068
+1785945465	proc	plugin-container	0.00	1010560	45867
+1785945465	proc	firefox	0.01	833280	45856
+1785945465	proc	plugin-container	0.00	546000	28891
+1785945465	proc	plugin-container	0.00	508160	53104
+1785945465	proc	plugin-container	0.00	466544	26135
+1785945465	proc	plugin-container	0.00	448704	29605
+1785945465	proc	plugin-container	0.00	431120	26655
+1785945465	orphan	node --test	0.00	28368	375612
+1785945475	sys	-	2.58	18045600	1253232	601	14
+1785945475	session	/Users/testuser/Dev/wizards	0.05	1110768	-	●spellfall: done
+1785945475	session	/Users/testuser/Dev	0.00	1433280	-	claude-watch-resource-monitor
+1785945475	proc	NordVPN	0.12	308960	1010
+1785945475	proc	Telegram	0.11	412352	49068
+1785945475	proc	iTerm2	0.08	273120	22008
+1785945475	proc	plugin-container	0.00	1006688	45867
+1785945475	proc	firefox	0.01	833280	45856
+1785945475	proc	plugin-container	0.00	546000	28891
+1785945475	proc	plugin-container	0.00	508640	53104
+1785945475	proc	plugin-container	0.00	466544	26135
+1785945475	proc	plugin-container	0.00	448704	29605
+1785945475	proc	plugin-container	0.00	431120	26655
+1785945475	orphan	node --test	0.00	28384	375622
+1785945485	sys	-	2.43	18036032	1199200	601	14
+1785945485	session	/Users/testuser/Dev/wizards	0.08	1110720	-	●spellfall: done
+1785945485	session	/Users/testuser/Dev	0.01	1433152	sleep@0.0	claude-watch-resource-monitor
+1785945485	proc	airportd	0.51	38448	479
+1785945485	proc	WiFiAgent	0.36	38672	738
+1785945485	proc	firefox	0.15	820176	45856
+1785945485	proc	NordVPN	0.07	308928	1010
+1785945485	proc	iTerm2	0.07	273104	22008
+1785945485	proc	bash	0.05	1840	75239
+1785945485	proc	plugin-container	0.02	1006688	45867
+1785945485	proc	plugin-container	0.00	546016	28891
+1785945485	proc	plugin-container	0.00	508640	53104
+1785945485	proc	plugin-container	0.00	466528	26135
+1785945485	proc	plugin-container	0.00	448704	29605
+1785945485	proc	plugin-container	0.00	431104	26655
+1785945485	proc	Telegram	0.04	412272	49068
+1785945485	orphan	node --test	0.00	28384	375632
+1785945495	sys	-	2.69	18113376	1246304	601	14
+1785945495	session	/Users/testuser/Dev/wizards	0.01	1110944	-	●spellfall: done
+1785945495	session	/Users/testuser/Dev	0.00	1433152	-	claude-watch-resource-monitor
+1785945495	proc	iTerm2	0.10	273120	22008
+1785945495	proc	plugin-container	0.00	1010576	45867
+1785945495	proc	firefox	0.01	833584	45856
+1785945495	proc	plugin-container	0.00	546016	28891
+1785945495	proc	plugin-container	0.00	508624	53104
+1785945495	proc	plugin-container	0.00	466528	26135
+1785945495	proc	plugin-container	0.00	448688	29605
+1785945495	proc	plugin-container	0.00	431104	26655
+1785945495	proc	Telegram	0.04	412336	49068
+1785945495	orphan	node --test	0.00	28384	375642
+1785945505	sys	-	2.27	18121776	1239200	601	14
+1785945505	session	/Users/testuser/Dev/wizards	0.15	1111072	-	●spellfall: done
+1785945505	session	/Users/testuser/Dev	0.00	1433248	-	claude-watch-resource-monitor
+1785945505	proc	plugin-container	0.54	1007296	45867
+1785945505	proc	iTerm2	0.12	273136	22008
+1785945505	proc	firefox	0.08	833584	45856
+1785945505	proc	plugin-container	0.08	508768	53104
+1785945505	proc	NordVPN	0.05	308960	1010
+1785945505	proc	plugin-container	0.02	546016	28891
+1785945505	proc	plugin-container	0.03	466528	26135
+1785945505	proc	plugin-container	0.03	448704	29605
+1785945505	proc	plugin-container	0.01	431104	26655
+1785945505	proc	Telegram	0.05	412272	49068
+1785945505	orphan	node --test	0.00	28384	375652
+1785945516	sys	-	2.29	18172720	1187088	601	14
+1785945516	session	/Users/testuser/Dev/wizards	0.02	1111072	-	●spellfall: done
+1785945516	session	/Users/testuser/Dev	0.01	1433152	sleep@0.0	claude-watch-resource-monitor
+1785945516	proc	airportd	0.17	38352	479
+1785945516	proc	iTerm2	0.15	273168	22008
+1785945516	proc	NordVPN	0.12	308928	1010
+1785945516	proc	plugin-container	0.00	1011776	45867
+1785945516	proc	firefox	0.01	878272	45856
+1785945516	proc	plugin-container	0.00	547408	28891
+1785945516	proc	plugin-container	0.00	509520	53104
+1785945516	proc	plugin-container	0.01	466544	26135
+1785945516	proc	plugin-container	0.00	449104	29605
+1785945516	proc	plugin-container	0.01	430432	26655
+1785945516	proc	Telegram	0.04	412272	49068
+1785945516	orphan	node --test	0.00	28384	375663
+1785945526	sys	-	2.25	18173280	1190000	601	14
+1785945526	session	/Users/testuser/Dev/wizards	0.04	1111152	-	●spellfall: done
+1785945526	session	/Users/testuser/Dev	0.00	1433152	-	claude-watch-resource-monitor
+1785945526	proc	NordVPN	0.76	308944	1010
+1785945526	proc	airportd	0.47	38432	479
+1785945526	proc	WiFiAgent	0.25	38896	738
+1785945526	proc	iTerm2	0.11	273152	22008
+1785945526	proc	plugin-container	0.00	1011792	45867
+1785945526	proc	firefox	0.01	878256	45856
+1785945526	proc	plugin-container	0.00	547408	28891
+1785945526	proc	plugin-container	0.00	509584	53104
+1785945526	proc	plugin-container	0.00	466544	26135
+1785945526	proc	plugin-container	0.00	449120	29605
+1785945526	proc	plugin-container	0.00	430432	26655
+1785945526	proc	Telegram	0.04	412272	49068
+1785945526	orphan	node --test	0.00	28384	375673
+1785945536	sys	-	1.98	18174096	1185952	601	14
+1785945536	session	/Users/testuser/Dev/wizards	0.02	1111184	-	●spellfall: done
+1785945536	session	/Users/testuser/Dev	0.00	1433264	-	claude-watch-resource-monitor
+1785945536	proc	airportd	0.18	38432	479
+1785945536	proc	iTerm2	0.10	273168	22008
+1785945536	proc	ControlCenter	0.06	100096	656
+1785945536	proc	Telegram	0.05	412304	49068
+1785945536	proc	plugin-container	0.00	1011792	45867
+1785945536	proc	firefox	0.01	878544	45856
+1785945536	proc	plugin-container	0.00	547408	28891
+1785945536	proc	plugin-container	0.00	509712	53104
+1785945536	proc	plugin-container	0.00	466544	26135
+1785945536	proc	plugin-container	0.00	449120	29605
+1785945536	proc	plugin-container	0.01	430432	26655
+1785945536	orphan	node --test	0.00	28384	375683
+1785945546	sys	-	1.98	18104736	1130288	601	14
+1785945546	session	/Users/testuser/Dev/wizards	0.10	1111184	-	●spellfall: done
+1785945546	session	/Users/testuser/Dev	0.00	1433152	-	claude-watch-resource-monitor
+1785945546	proc	NordVPN	0.12	308960	1010
+1785945546	proc	iTerm2	0.09	273024	22008
+1785945546	proc	plugin-container	0.00	1011776	45867
+1785945546	proc	firefox	0.01	878576	45856
+1785945546	proc	plugin-container	0.00	547424	28891
+1785945546	proc	plugin-container	0.00	509712	53104
+1785945546	proc	plugin-container	0.00	466528	26135
+1785945546	proc	plugin-container	0.00	449120	29605
+1785945546	proc	plugin-container	0.01	430432	26655
+1785945546	proc	Telegram	0.05	412240	49068
+1785945546	orphan	node --test	0.00	28384	375693
+1785945556	sys	-	1.83	18608656	681488	601	14
+1785945556	session	/Users/testuser/Dev/wizards	1.29	1977984	chrome-headless-shell@1.2	●spellfall: done
+1785945556	session	/Users/testuser/Dev	0.00	1433264	-	claude-watch-resource-monitor
+1785945556	proc	airportd	0.14	38288	479
+1785945556	proc	WiFiAgent	0.10	38688	738
+1785945556	proc	NordVPN	0.07	308928	1010
+1785945556	proc	plugin-container	0.00	1012976	45867
+1785945556	proc	firefox	0.01	820864	45856
+1785945556	proc	plugin-container	0.00	547424	28891
+1785945556	proc	plugin-container	0.00	509696	53104
+1785945556	proc	plugin-container	0.00	466528	26135
+1785945556	proc	plugin-container	0.00	449104	29605
+1785945556	proc	plugin-container	0.00	430432	26655
+1785945556	proc	Telegram	0.03	412256	49068
+1785945556	orphan	node --test	0.00	28384	375703
+1785945566	sys	-	4.00	18773616	510400	601	14
+1785945566	session	/Users/testuser/Dev/wizards	10.30	2118704	chrome-headless-shell@10.2	●spellfall: done
+1785945566	session	/Users/testuser/Dev	0.00	1433264	-	claude-watch-resource-monitor
+1785945566	proc	plugin-container	0.48	1005264	45867
+1785945566	proc	airportd	0.42	38352	479
+1785945566	proc	WiFiAgent	0.22	38688	738
+1785945566	proc	firefox	0.01	835600	45856
+1785945566	proc	plugin-container	0.00	547424	28891
+1785945566	proc	plugin-container	0.00	509712	53104
+1785945566	proc	plugin-container	0.00	466528	26135
+1785945566	proc	plugin-container	0.00	449104	29605
+1785945566	proc	plugin-container	0.00	430448	26655
+1785945566	proc	Telegram	0.03	412208	49068
+1785945566	orphan	node --test	0.00	28384	375713
+1785945576	sys	-	3.98	18802304	485968	601	14
+1785945576	session	/Users/testuser/Dev/wizards	10.62	2151248	chrome-headless-shell@10.6	●spellfall: done
+1785945576	session	/Users/testuser/Dev	0.00	1433264	-	claude-watch-resource-monitor
+1785945576	proc	launchd	0.14	22080	1
+1785945576	proc	NordVPN	0.06	308960	1010
+1785945576	proc	plugin-container	0.00	1005280	45867
+1785945576	proc	firefox	0.01	835664	45856
+1785945576	proc	plugin-container	0.00	547408	28891
+1785945576	proc	plugin-container	0.00	509712	53104
+1785945576	proc	plugin-container	0.00	466560	26135
+1785945576	proc	plugin-container	0.00	449104	29605
+1785945576	proc	plugin-container	0.00	430448	26655
+1785945576	proc	Telegram	0.02	412336	49068
+1785945576	orphan	node --test	0.00	28384	375723
+1785945587	sys	-	3.74	18132384	1223632	601	14
+1785945587	session	/Users/testuser/Dev/wizards	0.07	1112464	-	●spellfall: done
+1785945587	session	/Users/testuser/Dev	0.00	1433264	-	claude-watch-resource-monitor
+1785945587	proc	NordVPN	0.09	308960	1010
+1785945587	proc	iTerm2	0.07	273120	22008
+1785945587	proc	plugin-container	0.00	1005280	45867
+1785945587	proc	firefox	0.01	835680	45856
+1785945587	proc	plugin-container	0.00	547408	28891
+1785945587	proc	plugin-container	0.00	509888	53104
+1785945587	proc	plugin-container	0.00	466560	26135
+1785945587	proc	plugin-container	0.00	449120	29605
+1785945587	proc	plugin-container	0.01	430464	26655
+1785945587	proc	Telegram	0.04	412288	49068
+1785945587	orphan	node --test	0.00	28384	375734
+1785945597	sys	-	3.53	18132080	1232976	601	14
+1785945597	session	/Users/testuser/Dev/wizards	0.04	1112464	-	●spellfall: done
+1785945597	session	/Users/testuser/Dev	0.01	1433152	sleep@0.0	claude-watch-resource-monitor
+1785945597	proc	iTerm2	0.13	273152	22008
+1785945597	proc	NordVPN	0.08	308976	1010
+1785945597	proc	plugin-container	0.00	1005280	45867
+1785945597	proc	firefox	0.01	835680	45856
+1785945597	proc	plugin-container	0.00	547408	28891
+1785945597	proc	plugin-container	0.00	509680	53104
+1785945597	proc	plugin-container	0.00	466560	26135
+1785945597	proc	plugin-container	0.00	449120	29605
+1785945597	proc	plugin-container	0.01	430464	26655
+1785945597	proc	Telegram	0.04	412320	49068
+1785945597	orphan	node --test	0.00	28384	375744
