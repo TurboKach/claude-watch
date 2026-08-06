@@ -86,18 +86,34 @@ if [ "$installed" = 1 ]; then
 else
   skp "status --json (no samples collected yet)"
 fi
-# Control bytes are legal in argv and paths but illegal raw in JSON, so the
-# escaper must encode the whole sub-0x20 range, not just tab/newline/return.
+# argv and filenames are arbitrary bytes; JSON has to be valid UTF-8 with no raw
+# control characters. Both failure modes break the agent interface, and valid
+# multibyte text must survive untouched rather than being escaped into mojibake.
 if [ "$have_python" = 1 ]; then
-  ctl=$(printf 'a\001b\033c')
-  if printf '%s' "$ctl" | LC_ALL=C awk "$(sed -n "/^JESC_AWK='$/,/^'$/p" "$REPO/claude-watch" | sed '1d;$d')"'
-        { printf "{\"v\":\"%s\"}\n", jesc($0) }' | python3 -c 'import json,sys; json.load(sys.stdin)' 2>/dev/null; then
-    ok "jesc escapes control characters"
-  else
-    bad "jesc escapes control characters"
-  fi
+  JESC=$(sed -n "/^JESC_AWK='$/,/^'$/p" "$REPO/claude-watch" | sed '1d;$d')
+  # The raw bytes are produced ONCE by bash's printf builtin and kept in a file.
+  # Do not regenerate them via /bin/printf for comparison: BSD printf has no \xHH
+  # escape, so the reference bytes come out different and a correct escaper looks
+  # broken.
+  jesc_case() {  # <desc> <printf-format producing the raw bytes> <expect-exact:0|1>
+    local desc=$1 fmt=$2 want=$3 raw out
+    raw=$(mktemp) || { bad "jesc: $desc (mktemp)"; return; }
+    printf "$fmt" > "$raw"
+    out=$(LC_ALL=C awk "$JESC"'{ printf "{\"v\":\"%s\"}\n", jesc($0) }' < "$raw" 2>/dev/null)
+    if printf '%s' "$out" | python3 -c "
+import json, sys
+v = json.loads(sys.stdin.read())['v']
+raw = open('$raw', 'rb').read()
+sys.exit(0 if (v.encode() == raw) == bool($want) else 1)
+" 2>/dev/null; then ok "jesc: $desc"; else bad "jesc: $desc"; fi
+    rm -f "$raw"
+  }
+  jesc_case "valid UTF-8 survives byte-exact"   '\xe2\x97\x8fspellfall' 1
+  jesc_case "control bytes round-trip"          'a\001b\033c'           1
+  jesc_case "invalid UTF-8 replaced, still JSON" 'bad\xffbyte'          0
+  jesc_case "UTF-16 surrogate rejected"          'sur\xed\xa0\x80ate'   0
 else
-  skp "jesc control characters (no python3)"
+  skp "jesc escaping (no python3)"
 fi
 
 echo "destructive paths refuse without a terminal"

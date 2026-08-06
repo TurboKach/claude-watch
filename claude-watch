@@ -67,25 +67,63 @@ fi
 # and -f files, so string concatenation is the only way to keep this from
 # existing as three copies that drift apart.
 #
-# Paths, session labels and argv are arbitrary bytes. JSON forbids raw control
-# characters, so anything below 0x20 has to be escaped or the whole document is
-# invalid — a single ESC in a command line would otherwise break the agent
-# interface. The regex fast-path keeps the per-character loop off the common
-# case. Callers must run awk under LC_ALL=C so this is byte-oriented.
+# Paths, session labels and argv are arbitrary BYTES, but JSON must be valid
+# UTF-8 with no raw control characters. Two separate ways to produce a document
+# no parser will accept:
+#   - a byte below 0x20 (one ESC in a command line is enough)
+#   - a byte sequence that is not valid UTF-8, which is legal in argv and in
+#     filenames; Python then fails with UnicodeDecodeError before it even parses
+# Control bytes become \uXXXX. Invalid UTF-8 becomes U+FFFD, one per bad byte.
+# Well-formed multibyte sequences are passed through untouched — escaping every
+# high byte would turn a legitimate "●spellfall" label into mojibake.
+#
+# The validation is strict: it rejects overlong forms, UTF-16 surrogates
+# (ED A0..BF) and anything above U+10FFFF, which are exactly the sequences a
+# lenient check would wave through and a strict parser would then reject.
+#
+# TWO HARD REQUIREMENTS, both verified the hard way:
+#   1. Callers MUST run awk under LC_ALL=C. In a UTF-8 locale the high-byte
+#      class dies with "towc: multibyte conversion failure" (handoff §4.2).
+#   2. Constants are decimal. This awk does not understand hex literals.
 JESC_AWK='
-function jesc(s,   i, c, o, n) {
+function jesc(s,   i, n, o, c, b, len, lo, hi, j, cb, ok) {
   gsub(/\\/, "\\\\", s)
   gsub(/"/, "\\\"", s)
-  if (s !~ /[\001-\037]/) return s
+  if (s !~ /[\001-\037\200-\377]/) return s
   if (!_ORD_INIT) { for (i = 1; i < 256; i++) _ORD[sprintf("%c", i)] = i; _ORD_INIT = 1 }
-  o = ""; n = length(s)
-  for (i = 1; i <= n; i++) {
-    c = substr(s, i, 1)
-    if      (c == "\t") o = o "\\t"
-    else if (c == "\n") o = o "\\n"
-    else if (c == "\r") o = o "\\r"
-    else if (c < " ")   o = o sprintf("\\u%04x", _ORD[c])
-    else                o = o c
+  o = ""; n = length(s); i = 1
+  while (i <= n) {
+    c = substr(s, i, 1); b = _ORD[c]
+    if (b < 32) {
+      if      (c == "\t") o = o "\\t"
+      else if (c == "\n") o = o "\\n"
+      else if (c == "\r") o = o "\\r"
+      else                o = o sprintf("\\u%04x", b)
+      i++; continue
+    }
+    if (b < 128) { o = o c; i++; continue }
+    # Lead byte: total length, plus the legal range of the SECOND byte. The
+    # second byte is where overlongs and surrogates are ruled out.
+    if      (b >= 194 && b <= 223) { len = 2; lo = 128; hi = 191 }
+    else if (b == 224)             { len = 3; lo = 160; hi = 191 }
+    else if (b >= 225 && b <= 236) { len = 3; lo = 128; hi = 191 }
+    else if (b == 237)             { len = 3; lo = 128; hi = 159 }
+    else if (b >= 238 && b <= 239) { len = 3; lo = 128; hi = 191 }
+    else if (b == 240)             { len = 4; lo = 144; hi = 191 }
+    else if (b >= 241 && b <= 243) { len = 4; lo = 128; hi = 191 }
+    else if (b == 244)             { len = 4; lo = 128; hi = 143 }
+    else                           { o = o "\\ufffd"; i++; continue }
+    ok = (i + len - 1 <= n)
+    if (ok) {
+      cb = _ORD[substr(s, i + 1, 1)]
+      if (cb < lo || cb > hi) ok = 0
+      for (j = 2; ok && j < len; j++) {
+        cb = _ORD[substr(s, i + j, 1)]
+        if (cb < 128 || cb > 191) ok = 0
+      }
+    }
+    if (ok) { o = o substr(s, i, len); i += len }
+    else    { o = o "\\ufffd"; i++ }
   }
   return o
 }
