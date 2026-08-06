@@ -88,6 +88,102 @@ claude-watch doctor             # check the install end to end
 
 The digest prints automatically on your first shell of a new day.
 
+## Reaping — `orphans` and `worktrees`
+
+Reporting a leak and then leaving you to clean it up by hand is only half a tool. Two commands close the loop, for the two things agent sessions leave behind: **processes** that outlived their session, and **git worktrees** that outlived their task.
+
+Both **list by default** — that is the dry run. Nothing is destroyed without an explicit flag *and* a confirmation.
+
+```
+$ claude-watch orphans
+⚠ 1 orphaned dev tree (no parent, older than 60m — still holding memory and ports)
+
+  [1] node --test              4d16h    59.5M  2 procs  0.0×
+      1304   node --import tsx --test ../core/arena.test.ts ../core/avatar.te
+        └1418   /opt/homebrew/Cellar/node/26.5.1/bin/node --test-concurrency=0
+
+  total held: 59.5M
+
+  run claude-watch orphans --kill to reap these
+```
+
+That indented child is the whole reason the command exists. **Orphans are trees, not processes.** Killing `1304` alone reparents `1418` to launchd, where it comes straight back as a brand-new orphan still holding 54M — so the kill walks the subtree deepest-first, and only then the root. `TERM`, wait up to 3s, `KILL` whatever is left.
+
+The list is always a **live `ps` scan**, never the recorded samples: orphan rows carry no pid, and a pid recorded minutes ago may since have been recycled onto something unrelated. Immediately before signalling, every pid is re-checked — argv must still match and elapsed time must not have gone backwards — and any tree that fails is skipped rather than killed.
+
+```
+$ claude-watch worktrees
+AGENT WORKTREES (.claude/worktrees and conductor workspaces; your own are not listed)
+
+      ● ACTIVE   ~/Dev/wizards/.claude/worktrees/agent-a309e0b6e605cc457
+        worktree-agent-a309e0b6e605cc457 · 325M · committed to in the last 24h
+  [1] · STALE    ~/conductor/workspaces/language-learning/philadelphia
+        TurboKach/add-email-auth · 109M · clean, 140d old
+      ! UNSAFE   ~/dev/language-learning/.claude/worktrees/musing-moore
+        claude/musing-moore · 1.9M · 1 uncommitted, 0 unpushed
+
+  1 removable · 109M reclaimable
+```
+
+Only **numbered** entries are removable, and only those are covered by "yes to all":
+
+- **ACTIVE** — locked by the tool using it, committed to within 24h, or a live session's working directory sits inside it. An agent worktree in active use looks *identical* on disk to an abandoned one; git's lock flag and a fresh commit are what tell them apart.
+- **UNSAFE** — uncommitted or unpushed work. Shown so you know it is there, never in the bulk set; removing it needs a deliberate per-item `y`.
+- **STALE** — clean, unlocked, older than `--days` (default 7).
+
+Only paths an agent tool creates are considered at all — `<repo>/.claude/worktrees/*` and `~/conductor/workspaces/*`. Worktrees you made yourself, sitting beside their repo, are structurally invisible to this command, so it cannot propose deleting your real work. Removal goes through `git worktree remove`, never `rm -rf`, so git's own refusal-on-modification is a second independent guard. Leftover agent branches are **reported, never deleted** — a branch costs nothing and may be the only copy of that work.
+
+```bash
+claude-watch orphans                    # list only
+claude-watch orphans --kill             # list, then confirm  [Y/n/s]
+claude-watch orphans --kill --min 15    # lower the 60-minute age floor
+claude-watch worktrees                  # list only
+claude-watch worktrees --remove         # list, then confirm  [Y/n/s]
+claude-watch worktrees --days 30        # only call them stale after 30 days
+```
+
+At the prompt, **Enter accepts all**, `n` aborts, and `s` steps through one at a time (`y`/`N`/`a`ll/`q`uit). `--yes` skips the prompt for scripting; without a terminal to confirm on, both commands refuse to destroy anything unless `--yes` is explicit.
+
+## Agent interface
+
+Claude Code can run this tool itself. `install.sh` symlinks two [Agent Skills](https://code.claude.com/docs/en/skills) into `~/.claude/skills/`:
+
+| Skill | Who can invoke | What it does |
+|---|---|---|
+| `claude-watch` | you **and** Claude | Read-only diagnosis. Claude reaches for it on "why is my laptop hot", "what's still running", "which worktrees are left over". |
+| `claude-watch-reap` | **you only** | The destructive half. `disable-model-invocation: true`, so Claude cannot start a reap on its own. |
+
+The split follows the documented guidance for side-effecting workflows: *"You don't want Claude deciding to deploy because your code looks ready."* Killing processes is the same shape of decision.
+
+They are symlinked rather than copied, so the skill stays in step with the flags it documents — pulling the repo updates the skill, and Claude Code picks up the change live without a restart.
+
+### `--json`
+
+`report`, `orphans`, `worktrees` and `status` all take `--json`, so an agent reads values instead of pattern-matching a layout that is free to change:
+
+```bash
+claude-watch report today --json
+claude-watch orphans --json
+claude-watch worktrees --json
+claude-watch status --json
+```
+
+`--json` is read-only by construction: it prints and exits before any confirmation or kill path is reachable.
+
+```json
+{"command":"orphans","min_minutes":60,"trees":[
+  {"root_pid":1304,"name":"node --test","age_seconds":405014,"rss_kb":60960,"cores":0.1,"proc_count":2,
+   "procs":[{"pid":1304,"depth":0,"rss_kb":6912,"age_seconds":405014,"argv":"node --import tsx --test …"},
+            {"pid":1418,"depth":1,"rss_kb":54048,"age_seconds":405014,"argv":"…--test-concurrency=0 …"}]}],
+ "tree_count":1,"total_rss_kb":60960}
+```
+
+Worktree records carry an explicit `removable` boolean alongside `status` and `reason`, so an agent never has to infer eligibility from the status string.
+
+### Why a skill and not an MCP server
+
+An MCP server is a resident process. This tool's defining constraint is that it never leaves one running — and MCP servers show up *in its own reports*, at 50–100M each. A skill costs nothing at rest: only the name and description sit in context, and the body loads when it's used.
+
 ## Install
 
 ```bash
@@ -96,7 +192,7 @@ cd claude-watch
 ./install.sh
 ```
 
-Symlinks both commands into `~/.local/bin`, installs and loads the launchd sampler, and prints one line to add to `.zshrc` — it never edits your shell config for you. Verify with `claude-watch doctor`.
+Symlinks both commands into `~/.local/bin`, symlinks the two agent skills into `~/.claude/skills/`, installs and loads the launchd sampler, and prints one line to add to `.zshrc` — it never edits your shell config for you. Verify with `claude-watch doctor`.
 
 ## How the sampler works
 
@@ -133,8 +229,21 @@ The shell hook costs ~1.3ms on a normal shell start: the date comparison is an i
 | `CLAUDE_WATCH_TOPN` | `8` | max machine-wide rows per sample |
 | `CLAUDE_WATCH_ORPHAN_MIN` | `60` | minutes before an unparented dev process is flagged |
 | `CLAUDE_WATCH_KEEP_DAYS` | `30` | raw retention |
+| `CLAUDE_WATCH_REPO_ROOTS` | `~/Dev` | colon-separated roots scanned for agent worktrees |
+
+What counts as a leaked dev process lives in one file, `tools/orphan-policy.sh`, read by both the sampler that records orphans and the command that kills them. For a destructive command, the list you are shown and the thing that actually gets killed coming from a single rule is a safety property, not a style preference.
 
 Change the sampling interval in `~/Library/LaunchAgents/com.turbokach.claudewatch.plist`, then `launchctl unload && launchctl load` it.
+
+## Tests
+
+```bash
+./tests/smoke.sh
+```
+
+Read-only — it destroys nothing, and asserts that the destructive commands *refuse* without a terminal. Covers syntax, exit codes, `--json` validity, argument rejection, skill frontmatter, and one sampler pass. Exits non-zero on failure.
+
+Fixture-based tests for the report aggregation are the remaining gap; the smoke suite checks that commands work, not that the arithmetic is right.
 
 ## Limitations
 

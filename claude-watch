@@ -11,21 +11,45 @@ STATE="$DATA/state"
 KEEP_RAW_DAYS="${CLAUDE_WATCH_KEEP_DAYS:-30}"
 GZIP_AFTER_DAYS=2
 
+# install.sh symlinks this script onto PATH, so walk the link chain to find our
+# own tools/ directory. Sourcing is best-effort: only `orphans` needs the policy,
+# and a missing file must not break reporting.
+SELF="${BASH_SOURCE[0]:-$0}"
+while [ -L "$SELF" ]; do
+  _link=$(readlink "$SELF")
+  case "$_link" in /*) SELF="$_link" ;; *) SELF="$(dirname "$SELF")/$_link" ;; esac
+done
+REPO_DIR="$(cd "$(dirname "$SELF")" && pwd)"
+# shellcheck source=tools/orphan-policy.sh
+. "$REPO_DIR/tools/orphan-policy.sh" 2>/dev/null || true
+
 usage() {
   cat <<'EOF'
 claude-watch — what actually used this machine today
 
-usage: claude-watch [report [DATE]] | status | hook | doctor
+usage: claude-watch [report [DATE]] | orphans | worktrees | status | hook | doctor
 
   report [DATE]   digest for DATE: today (default), yesterday, or YYYY-MM-DD
+  orphans         list leaked dev process trees; --kill to reap them
+  worktrees       list stale agent-created git worktrees; --remove to reap them
   status          is sampling alive, how recent, how much data
   hook            print yesterday's digest once on the first shell of a new day
                   (add to .zshrc; returns in ~2ms on every other shell)
   doctor          check the install end to end
 
+  orphans [--kill] [--yes] [--min MINUTES]
+  worktrees [--remove] [--yes] [--days DAYS]
+      Both list only by default — that IS the dry run. Nothing is destroyed
+      without an explicit flag AND a confirmation.
+
+  --json    machine-readable output for report, orphans, worktrees and status.
+            Read-only: --json prints and exits before any destructive path.
+
 Environment:
-  CLAUDE_WATCH_HOME       data directory (default ~/.claude-watch)
-  CLAUDE_WATCH_KEEP_DAYS  raw retention in days (default 30)
+  CLAUDE_WATCH_HOME        data directory (default ~/.claude-watch)
+  CLAUDE_WATCH_KEEP_DAYS   raw retention in days (default 30)
+  CLAUDE_WATCH_ORPHAN_MIN  orphan age floor in minutes (default 60)
+  CLAUDE_WATCH_REPO_ROOTS  colon-separated roots to scan for worktrees (default ~/Dev)
 EOF
 }
 
@@ -37,6 +61,73 @@ if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
 else
   C_HEAD=""; C_DIM=""; C_KEY=""; C_HOT=""; C_RED=""; C_OK=""; C_SEC=""; C_RST=""
 fi
+
+# One definition of JSON string escaping, textually prepended to every awk
+# program that needs it. awk cannot share functions between an inline program
+# and -f files, so string concatenation is the only way to keep this from
+# existing as three copies that drift apart.
+#
+# Paths, session labels and argv are arbitrary BYTES, but JSON must be valid
+# UTF-8 with no raw control characters. Two separate ways to produce a document
+# no parser will accept:
+#   - a byte below 0x20 (one ESC in a command line is enough)
+#   - a byte sequence that is not valid UTF-8, which is legal in argv and in
+#     filenames; Python then fails with UnicodeDecodeError before it even parses
+# Control bytes become \uXXXX. Invalid UTF-8 becomes U+FFFD, one per bad byte.
+# Well-formed multibyte sequences are passed through untouched — escaping every
+# high byte would turn a legitimate "●spellfall" label into mojibake.
+#
+# The validation is strict: it rejects overlong forms, UTF-16 surrogates
+# (ED A0..BF) and anything above U+10FFFF, which are exactly the sequences a
+# lenient check would wave through and a strict parser would then reject.
+#
+# TWO HARD REQUIREMENTS, both verified the hard way:
+#   1. Callers MUST run awk under LC_ALL=C. In a UTF-8 locale the high-byte
+#      class dies with "towc: multibyte conversion failure" (handoff §4.2).
+#   2. Constants are decimal. This awk does not understand hex literals.
+JESC_AWK='
+function jesc(s,   i, n, o, c, b, len, lo, hi, j, cb, ok) {
+  gsub(/\\/, "\\\\", s)
+  gsub(/"/, "\\\"", s)
+  if (s !~ /[\001-\037\200-\377]/) return s
+  if (!_ORD_INIT) { for (i = 1; i < 256; i++) _ORD[sprintf("%c", i)] = i; _ORD_INIT = 1 }
+  o = ""; n = length(s); i = 1
+  while (i <= n) {
+    c = substr(s, i, 1); b = _ORD[c]
+    if (b < 32) {
+      if      (c == "\t") o = o "\\t"
+      else if (c == "\n") o = o "\\n"
+      else if (c == "\r") o = o "\\r"
+      else                o = o sprintf("\\u%04x", b)
+      i++; continue
+    }
+    if (b < 128) { o = o c; i++; continue }
+    # Lead byte: total length, plus the legal range of the SECOND byte. The
+    # second byte is where overlongs and surrogates are ruled out.
+    if      (b >= 194 && b <= 223) { len = 2; lo = 128; hi = 191 }
+    else if (b == 224)             { len = 3; lo = 160; hi = 191 }
+    else if (b >= 225 && b <= 236) { len = 3; lo = 128; hi = 191 }
+    else if (b == 237)             { len = 3; lo = 128; hi = 159 }
+    else if (b >= 238 && b <= 239) { len = 3; lo = 128; hi = 191 }
+    else if (b == 240)             { len = 4; lo = 144; hi = 191 }
+    else if (b >= 241 && b <= 243) { len = 4; lo = 128; hi = 191 }
+    else if (b == 244)             { len = 4; lo = 128; hi = 143 }
+    else                           { o = o "\\ufffd"; i++; continue }
+    ok = (i + len - 1 <= n)
+    if (ok) {
+      cb = _ORD[substr(s, i + 1, 1)]
+      if (cb < lo || cb > hi) ok = 0
+      for (j = 2; ok && j < len; j++) {
+        cb = _ORD[substr(s, i + j, 1)]
+        if (cb < 128 || cb > 191) ok = 0
+      }
+    }
+    if (ok) { o = o substr(s, i, len); i += len }
+    else    { o = o "\\ufffd"; i++ }
+  }
+  return o
+}
+'
 
 resolve_date() {
   case "${1:-today}" in
@@ -56,14 +147,28 @@ read_day() {
 
 report() {
   local d; d=$(resolve_date "${1:-today}")
+  local json="${2:-0}"
+  # resolve_date passes an explicit argument through untouched, so the date can
+  # be arbitrary text — and it is interpolated straight into --json output.
+  # Validating the shape here keeps that JSON well-formed by construction, and
+  # rejects a date that could never match a raw file anyway.
+  case "$d" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+    *) printf 'claude-watch: bad date "%s" (expected YYYY-MM-DD, today, or yesterday)\n' "$d" >&2
+       return 2 ;;
+  esac
   local data; data=$(read_day "$d")
   if [ -z "$data" ]; then
-    printf '%sno samples recorded for %s%s\n' "$C_DIM" "$d" "$C_RST"
+    if [ "$json" = "1" ]; then
+      printf '{"command":"report","date":"%s","samples":0,"sessions":[],"machine_cpu":[],"machine_mem":[],"orphans":[]}\n' "$d"
+    else
+      printf '%sno samples recorded for %s%s\n' "$C_DIM" "$d" "$C_RST"
+    fi
     return 0
   fi
-  printf '%s' "$data" | LC_ALL=C awk -F'\t' -v D="$d" -v HOME_DIR="$HOME" \
+  printf '%s' "$data" | LC_ALL=C awk -F'\t' -v D="$d" -v HOME_DIR="$HOME" -v JSON="$json" \
     -v C_HEAD="$C_HEAD" -v C_DIM="$C_DIM" -v C_KEY="$C_KEY" -v C_HOT="$C_HOT" \
-    -v C_RED="$C_RED" -v C_OK="$C_OK" -v C_SEC="$C_SEC" -v C_RST="$C_RST" '
+    -v C_RED="$C_RED" -v C_OK="$C_OK" -v C_SEC="$C_SEC" -v C_RST="$C_RST" "$JESC_AWK"'
     function dur(s,   d, h, m) {
       d = int(s / 86400); h = int((s % 86400) / 3600); m = int((s % 3600) / 60)
       if (d) return sprintf("%dd%02dh", d, h)
@@ -105,6 +210,48 @@ report() {
     function cores_col(c) { return (c >= 4) ? C_RED : (c >= 1) ? C_HOT : C_OK }
     function tilde(p) { sub("^" HOME_DIR, "~", p); return p }
 
+    # --json exists so an agent reads values instead of regexing a layout that
+    # is free to change. Session labels, cwds and process names are arbitrary
+    # text, so everything user-derived goes through jesc() (defined in JESC_AWK).
+    function emit_json(   i, key, first) {
+      printf "{\"command\":\"report\",\"date\":\"%s\",\"cores\":%d,\"samples\":%d,\"interval_seconds\":%d,\"observed_seconds\":%d",
+             jesc(D), ncpu, sysn, iv, covered
+      printf ",\"sessions\":["
+      for (i = 1; i <= skn; i++) {
+        key = sk[i]
+        printf "%s{\"cwd\":\"%s\",\"label\":\"%s\",\"peak_cores\":%.2f,\"avg_cores\":%.2f,\"active_seconds\":%d,\"rss_kb\":%d",
+               (i > 1 ? "," : ""), jesc(key), jesc(slabel[key]), speak[key], ssum[key] / sn[key], sn[key] * iv, srss[key]
+        if (shot[key] != "")
+          printf ",\"hottest_child\":\"%s\",\"hottest_child_cores\":%.2f", jesc(shot[key]), shotc[key]
+        printf "}"
+      }
+      printf "],\"machine_cpu\":["
+      first = 1
+      for (i = 1; i <= pkn; i++) {
+        key = bk[i]; if (psum[key] <= 0) break
+        printf "%s{\"name\":\"%s\",\"cpu_seconds\":%.1f,\"peak_cores\":%.2f,\"avg_cores\":%.2f,\"seen_pct\":%.1f}",
+               (first ? "" : ","), jesc(key), psum[key] * iv, ppeak[key], psum[key] / pn[key], pn[key] * 100 / sysn
+        first = 0
+      }
+      printf "],\"machine_mem\":["
+      first = 1
+      for (i = 1; i <= pkn; i++) {
+        key = mk[i]; if (prss[key] <= 0) break
+        printf "%s{\"name\":\"%s\",\"rss_kb\":%d,\"instances\":%d,\"seen_pct\":%.1f}",
+               (first ? "" : ","), jesc(key), prss[key], (pcnt[key] > 0 ? pcnt[key] : 1), pn[key] * 100 / sysn
+        first = 0
+      }
+      printf "],\"system\":{\"peak_load\":%.2f,\"peak_mem_used_kb\":%d,\"min_free_kb\":%d,\"max_swap_mb\":%d}",
+             peakload, maxused, minfree, maxswap
+      printf ",\"orphans\":["
+      for (i = 1; i <= okn; i++) {
+        key = ok[i]
+        printf "%s{\"name\":\"%s\",\"age_seconds\":%d,\"rss_kb\":%d,\"still_alive\":%s}",
+               (i > 1 ? "," : ""), jesc(key), oage[key], orss[key], (olast[key] >= lastep ? "true" : "false")
+      }
+      printf "]}\n"
+    }
+
     {
       ep = $1; kind = $2; key = $3; cores = $4 + 0; rss = $5 + 0
       # Rows are append-only and time-ordered, so a change of epoch closes the
@@ -141,19 +288,31 @@ report() {
         if (rss > orss[key]) orss[key] = rss
         olast[key] = ep
         if (!(key in okeys)) { okeys[key] = 1; ok[++okn] = key }
-        if (ep > lastep) lastep = ep
         next
       }
     }
 
     END {
       flush()   # close the final sample
-      if (sysn == 0) { print "no system samples for " D; exit }
+      if (sysn == 0) {
+        if (JSON == "1") printf "{\"command\":\"report\",\"date\":\"%s\",\"samples\":0,\"sessions\":[],\"machine_cpu\":[],\"machine_mem\":[],\"orphans\":[]}\n", D
+        else print "no system samples for " D
+        exit
+      }
 
       # Derive the sampling interval from the data rather than assuming it, so
       # coverage stays honest if the interval was changed or launchd was paused.
       for (i = 1; i < sysn; i++) for (k = i + 1; k <= sysn; k++)
         if (eps[k] < eps[i]) { t = eps[i]; eps[i] = eps[k]; eps[k] = t }
+
+      # "Still alive" means "present in the final sample of the day", so the
+      # yardstick has to be the last SAMPLE. Measuring it against the last
+      # orphan row instead made the test vacuous: once an orphan is reaped, no
+      # further orphan rows are written, so the newest orphan row is always the
+      # one recording it — and every dead orphan reported itself still alive.
+      # sys rows are emitted every sample even when nothing else is.
+      lastep = eps[sysn]
+
       dn = 0
       for (i = 2; i <= sysn; i++) { gap = eps[i] - eps[i-1]; if (gap > 0 && gap < 600) dl[++dn] = gap }
       for (i = 1; i < dn; i++) for (k = i + 1; k <= dn; k++)
@@ -161,14 +320,25 @@ report() {
       iv = (dn > 0) ? dl[int(dn / 2) + 1] : 10
       covered = sysn * iv
 
+      # Rankings are hoisted out of the print sections so the human and --json
+      # paths report identical order rather than two implementations of it.
+      for (i = 1; i < skn; i++) for (k = i + 1; k <= skn; k++)
+        if (speak[sk[k]] > speak[sk[i]]) { t = sk[i]; sk[i] = sk[k]; sk[k] = t }
+      for (i = 1; i <= pkn; i++) bk[i] = pk[i]
+      for (i = 1; i < pkn; i++) for (k = i + 1; k <= pkn; k++)
+        if (psum[bk[k]] > psum[bk[i]]) { t = bk[i]; bk[i] = bk[k]; bk[k] = t }
+      for (i = 1; i <= pkn; i++) mk[i] = pk[i]
+      for (i = 1; i < pkn; i++) for (k = i + 1; k <= pkn; k++)
+        if (prss[mk[k]] > prss[mk[i]]) { t = mk[i]; mk[i] = mk[k]; mk[k] = t }
+
+      if (JSON == "1") { emit_json(); exit }
+
       printf "%sclaude-watch%s  %s%s%s   %s%d cores · %d samples · %s observed%s\n",
              C_HEAD, C_RST, C_SEC, D, C_RST, C_DIM, ncpu, sysn, dur(covered), C_RST
 
       # --- Claude sessions ---
       printf "\n%sCLAUDE SESSIONS%s\n", C_SEC, C_RST
       if (skn == 0) printf "  %snone recorded%s\n", C_DIM, C_RST
-      for (i = 1; i < skn; i++) for (k = i + 1; k <= skn; k++)
-        if (speak[sk[k]] > speak[sk[i]]) { t = sk[i]; sk[i] = sk[k]; sk[k] = t }
       for (i = 1; i <= skn; i++) {
         key = sk[i]
         printf "  %s%-28.28s%s %speak%s %s%5.1f×%s  %savg%s %4.1f×  %sactive%s %s  %s\n",
@@ -192,9 +362,6 @@ report() {
       else {
         # By total CPU time consumed = sum of per-sample cores × interval. This
         # is the honest "what burned the machine today" measure.
-        for (i = 1; i <= pkn; i++) bk[i] = pk[i]
-        for (i = 1; i < pkn; i++) for (k = i + 1; k <= pkn; k++)
-          if (psum[bk[k]] > psum[bk[i]]) { t = bk[i]; bk[i] = bk[k]; bk[k] = t }
         printf "  %sby CPU time burned%s\n", C_DIM, C_RST
         for (i = 1; i <= pkn && i <= 6; i++) {
           key = bk[i]
@@ -206,9 +373,6 @@ report() {
         }
         # By memory held. Distinct list because a 4G process at 0% CPU never
         # appears in a CPU ranking, and is exactly what you want to know about.
-        for (i = 1; i <= pkn; i++) mk[i] = pk[i]
-        for (i = 1; i < pkn; i++) for (k = i + 1; k <= pkn; k++)
-          if (prss[mk[k]] > prss[mk[i]]) { t = mk[i]; mk[i] = mk[k]; mk[k] = t }
         printf "  %sby memory held%s %s(largest single process; RSS double-counts shared pages)%s\n",
                C_DIM, C_RST, C_DIM, C_RST
         for (i = 1; i <= pkn && i <= 4; i++) {
@@ -241,18 +405,900 @@ report() {
     }'
 }
 
+# --------------------------------------------------------------- reaping ---
+# Shared formatting for the action commands. The report's own dur()/gb() live
+# inside its awk program and are not reachable from shell.
+fmt_dur() {
+  local s=$1 d h m
+  d=$((s / 86400)); h=$(((s % 86400) / 3600)); m=$(((s % 3600) / 60))
+  if   [ "$d" -gt 0 ]; then printf '%dd%02dh' "$d" "$h"
+  elif [ "$h" -gt 0 ]; then printf '%dh%02dm' "$h" "$m"
+  elif [ "$m" -gt 0 ]; then printf '%dm' "$m"
+  else                      printf '%ds' "$s"
+  fi
+}
+# Worktrees can be a few hundred KB, so a plain %dM floor would print "0M" for
+# something that genuinely exists.
+fmt_mem() {
+  local kb=$1
+  if   [ "$kb" -ge 1048576 ]; then LC_ALL=C awk -v k="$kb" 'BEGIN{printf "%.1fG", k/1048576}'
+  elif [ "$kb" -ge 10240 ];   then printf '%dM' "$((kb / 1024))"
+  elif [ "$kb" -ge 1024 ];    then LC_ALL=C awk -v k="$kb" 'BEGIN{printf "%.1fM", k/1024}'
+  else                             printf '%dK' "$kb"
+  fi
+}
+term_width() { local c; c=$(tput cols 2>/dev/null); [ -n "$c" ] && [ "$c" -gt 40 ] 2>/dev/null && printf '%s' "$c" || printf '100'; }
+
+# awk coerces a non-numeric -v to 0, which would silently turn an age floor of
+# "--min typo" into "--min 0" and hand every match to the kill path. Reject it.
+is_uint() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
+
+# Drops whatever temp artefacts the running command created. Bash locals are
+# visible to called functions, so one definition serves both reaping commands.
+tmp_cleanup() {
+  [ -n "${scan:-}" ]     && rm -f "$scan"
+  [ -n "${targets:-}" ]  && rm -f "$targets"
+  [ -n "${CWD_SNAP:-}" ] && { rm -f "$CWD_SNAP"; CWD_SNAP=""; }
+  return 0
+}
+
+# A live ps scan, never the stored samples. Orphan rows carry no pid at all
+# (epoch, orphan, name, cores, rss, secs), and even if they did, a pid recorded
+# minutes ago may since have been recycled onto something completely unrelated.
+#
+# Emits, per orphan tree, one T row followed by its P rows in tree order:
+#   T <root> <name> <age_s> <subtree_rss_kb> <nproc> <subtree_cpu>
+#   P <root> <pid> <depth> <rss_kb> <age_s> <argv>
+scan_orphans() {
+  ps -Ao pid=,ppid=,pcpu=,rss=,etime=,args= 2>/dev/null | LC_ALL=C awk \
+    -v MATCH="$ORPHAN_MATCH_RE" -v EXCL="$ORPHAN_EXCLUDE_RE" -v MIN="$1" '
+    function esec(e,   a, b, d, n, h, m) {
+      d = 0
+      if (e ~ /-/) { split(e, a, "-"); d = a[1]; e = a[2] }
+      n = split(e, b, ":")
+      if (n == 3) { h = b[1]; m = b[2] } else { h = 0; m = b[1]; b[3] = b[2] }
+      return d * 86400 + h * 3600 + m * 60 + b[3]
+    }
+    function shortname(a,   n) {
+      n = a; sub(/ .*/, "", n); sub(/.*\//, "", n)
+      if (n ~ /^\(.*\)$/) { sub(/^\(/, "", n); sub(/\)$/, "", n) }  # ps parenthesises an unreadable argv
+      if (a ~ / --test( |$)/) n = n " --test"
+      return n
+    }
+    function subrss(p,   i, s) { s = R[p]; for (i = 1; i <= nk[p]; i++) s += subrss(kid[p, i]); return s }
+    function subcpu(p,   i, s) { s = C[p]; for (i = 1; i <= nk[p]; i++) s += subcpu(kid[p, i]); return s }
+    function subn(p,     i, s) { s = 1;    for (i = 1; i <= nk[p]; i++) s += subn(kid[p, i]);   return s }
+    function mark(p,     i)    { cl[p] = 1; for (i = 1; i <= nk[p]; i++) mark(kid[p, i]) }
+    # argv may legally contain tabs and newlines. Emitted raw they add fields to
+    # this TSV, shifting the numeric columns and truncating argv at the reader.
+    function clean(s) { gsub(/[\t\n\r]/, " ", s); return s }
+    function walk(p, root, depth,   i) {
+      print "P", root, p, depth, R[p], S[p], clean(A[p])
+      for (i = 1; i <= nk[p]; i++) walk(kid[p, i], root, depth + 1)
+    }
+    BEGIN { OFS = "\t" }
+    {
+      pid = $1; a = $0
+      for (i = 1; i <= 5; i++) sub(/^ *[^ ]+ +/, "", a)
+      PA[pid] = $2; C[pid] = $3; R[pid] = $4; S[pid] = esec($5); A[pid] = a; seen[pid] = 1
+      if (pid != 1) { nk[$2]++; kid[$2, nk[$2]] = pid }
+    }
+    END {
+      # Defensive: a process reparented to launchd cannot be inside a live
+      # session tree, but a claude started by launchd itself would be.
+      for (p in seen) if (shortname(A[p]) == "claude") mark(p)
+      for (p in seen) {
+        if (PA[p] != 1 || cl[p]) continue
+        if (A[p] !~ MATCH || A[p] ~ EXCL) continue
+        if (S[p] < MIN * 60) continue
+        print "T", p, clean(shortname(A[p])), S[p], subrss(p), subn(p), subcpu(p)
+        walk(p, p, 0)
+      }
+    }'
+}
+
+# Elapsed seconds from a ps etime string (D-HH:MM:SS, HH:MM:SS or MM:SS).
+etime_secs() {
+  LC_ALL=C awk -v e="${1:-}" 'BEGIN {
+    d = 0
+    if (e ~ /-/) { split(e, a, "-"); d = a[1]; e = a[2] }
+    n = split(e, b, ":")
+    if (n == 3) { h = b[1]; m = b[2] } else { h = 0; m = b[1]; b[3] = b[2] }
+    print d * 86400 + h * 3600 + m * 60 + b[3]
+  }'
+}
+
+# Record a pid's identity (elapsed + argv) the FIRST time we decide to act on it,
+# so later checks compare against the moment of the decision rather than against
+# a moment after the grace period.
+#
+# record_id takes values the caller has ALREADY read and verified. Re-reading ps
+# here would reopen the very race the verification closed: between the verified
+# read and a second one, the pid can be recycled, and we would then enshrine the
+# replacement process as the expected identity and happily kill it later.
+record_id() {   # <idmap> <pid> <age_secs> <argv>
+  LC_ALL=C awk -F'\t' -v p="$2" '$1 == p { found = 1; exit } END { exit !found }' "$1" && return 0
+  printf '%s\t%s\t%s\n' "$2" "$3" "$4" >> "$1"
+}
+
+# For pids discovered later (children found by live_descendants) there is no
+# earlier verified read to reuse, so first sight is the anchor.
+remember_id() {   # <idmap> <pid>
+  local map=$1 pid=$2 line
+  LC_ALL=C awk -F'\t' -v p="$pid" '$1 == p { found = 1; exit } END { exit !found }' "$map" && return 0
+  line=$(ps -o etime=,args= -p "$pid" 2>/dev/null)
+  [ -n "$line" ] || return 1
+  record_id "$map" "$pid" \
+    "$(etime_secs "$(printf '%s' "$line" | LC_ALL=C awk '{print $1}')")" \
+    "$(printf '%s' "$line" | LC_ALL=C sed 's/^ *[^ ]* *//')"
+}
+
+# Is this pid still the process we recorded? A pid that exits during the grace
+# period can be recycled onto something unrelated, and `kill -0` cannot tell the
+# difference — so identity, not liveness, is what gates the forced signal.
+has_id() {   # <idmap> <pid> — do we hold a recorded identity for this pid?
+  LC_ALL=C awk -F'\t' -v p="$2" '$1 == p { f = 1; exit } END { exit !f }' "$1"
+}
+
+same_process() {   # <idmap> <pid>
+  local map=$1 pid=$2 want want_age want_argv line now_age now_argv
+  want=$(LC_ALL=C awk -F'\t' -v p="$pid" '$1 == p { print; exit }' "$map")
+  [ -n "$want" ] || return 1
+  want_age=$(printf '%s' "$want" | cut -f2)
+  want_argv=$(printf '%s' "$want" | cut -f3-)
+  line=$(ps -o etime=,args= -p "$pid" 2>/dev/null)
+  [ -n "$line" ] || return 1
+  now_argv=$(printf '%s' "$line" | LC_ALL=C sed 's/^ *[^ ]* *//')
+  now_age=$(etime_secs "$(printf '%s' "$line" | LC_ALL=C awk '{print $1}')")
+  [ "$now_argv" = "$want_argv" ] || return 1
+  [ "${now_age:-0}" -ge "${want_age:-0}" ] || return 1
+  return 0
+}
+
+# Walk the ppid chain upward to confirm membership. Used before anchoring the
+# identity of a pid we only just discovered: enumeration and acting on it are
+# separate moments, and in between the pid can exit and be recycled onto an
+# unrelated process. Anchoring that stranger would make it look like ours and
+# get it killed in the force pass.
+is_descendant_of() {   # <pid> <root>
+  local p=$1 root=$2 guard=0
+  [ "$p" = "$root" ] && return 0
+  while [ "$guard" -lt 64 ]; do
+    p=$(ps -o ppid= -p "$p" 2>/dev/null | tr -d ' ')
+    [ -n "$p" ] || return 1
+    [ "$p" = "$root" ] && return 0
+    [ "$p" = "1" ] || [ "$p" = "0" ] && return 1
+    guard=$((guard + 1))
+  done
+  return 1
+}
+
+# Current subtree of a pid, deepest first, read live from ps rather than from
+# any earlier snapshot.
+live_descendants() {
+  ps -Ao pid=,ppid= 2>/dev/null | LC_ALL=C awk -v r="$1" '
+    { kids[$2] = kids[$2] " " $1 }
+    END {
+      n = 1; q[1] = r; d[r] = 0
+      for (i = 1; i <= n; i++) {
+        m = split(kids[q[i]], k, " ")
+        for (j = 1; j <= m; j++) if (k[j] != "") { q[++n] = k[j]; d[k[j]] = d[q[i]] + 1 }
+      }
+      maxd = 0
+      for (i = 1; i <= n; i++) if (d[q[i]] > maxd) maxd = d[q[i]]
+      for (lv = maxd; lv >= 0; lv--) for (i = 1; i <= n; i++) if (d[q[i]] == lv) print q[i]
+    }'
+}
+
+# Kill one tree. Two safety properties, both load-bearing:
+#   1. Deepest-first. Killing the root first reparents its live children to
+#      launchd, where they simply return as brand-new orphans still holding
+#      their memory — the exact bug this command exists to fix.
+#   2. Re-verify every pid immediately before signalling. Between listing and
+#      confirmation a pid can exit and be recycled onto something unrelated, so
+#      argv must still match and elapsed time must not have gone backwards.
+kill_tree() {
+  local root=$1 scan=$2 tab pids="" pid depth rss age argv now_line now_age now_argv still waited freed=0
+  tab=$(printf '\t')
+  local idmap; idmap=$(mktemp) || return 1
+  while IFS="$tab" read -r _ _ pid depth rss age argv; do
+    [ -n "$pid" ] || continue
+    now_line=$(ps -o etime=,args= -p "$pid" 2>/dev/null)
+    if [ -z "$now_line" ]; then continue; fi          # already gone; nothing to do
+    now_argv=$(printf '%s' "$now_line" | LC_ALL=C sed 's/^ *[^ ]* *//')
+    now_age=$(etime_secs "$(printf '%s' "$now_line" | LC_ALL=C awk '{print $1}')")
+    if [ "$now_argv" != "$argv" ] || [ "$now_age" -lt "$age" ]; then
+      printf '  %s✗ pid %s changed since it was listed — skipping this tree%s\n' "$C_RED" "$pid" "$C_RST"
+      rm -f "$idmap"; return 1
+    fi
+    pids="$pids $pid"; freed=$((freed + rss))
+    record_id "$idmap" "$pid" "$now_age" "$now_argv"
+  done < <(grep "^P${tab}${root}${tab}" "$scan" | sort -t"$tab" -k4,4nr)
+
+  [ -n "$pids" ] || { printf '  %salready gone%s\n' "$C_DIM" "$C_RST"; return 0; }
+
+  # The stored list is what we VERIFIED; it is not what we may KILL. A root can
+  # fork after the listing — including while the confirmation prompt is open —
+  # and a child missing from the stored list would be reparented to launchd when
+  # its parent dies, surviving as a brand-new orphan while we reported success.
+  # That is precisely the bug the subtree walk exists to prevent.
+  #
+  # SIGSTOP first so the tree cannot fork out from under the enumeration, then
+  # re-enumerate to catch anything created before the stop landed. SIGTERM is
+  # paired with SIGCONT because a stopped process cannot act on TERM.
+  # Freeze, then re-enumerate, until membership stops changing: a fork can land
+  # between an enumeration and the STOP that was meant to prevent it.
+  # The root gets an identity check, never a membership one. Membership is tested
+  # by walking up to the root, so for the root itself it is circular: a recycled
+  # root pid would pass trivially, and every "descendant" enumerated from it
+  # would belong to the replacement process.
+  if ! same_process "$idmap" "$root"; then
+    printf '  %s✗ root pid %s changed since it was listed — skipping this tree%s\n' \
+      "$C_RED" "$root" "$C_RST"
+    rm -f "$idmap"; return 1
+  fi
+
+  local stopped="" prev="" pass=0
+  while [ "$pass" -lt 4 ]; do
+    for pid in $pids; do
+      # Identity where we have one, membership only for pids not yet anchored.
+      # A pid recycled between enumeration and this moment is someone else's, and
+      # recording it here is what would later authorise SIGKILL against it.
+      if has_id "$idmap" "$pid"; then
+        same_process "$idmap" "$pid" || continue
+      elif ! is_descendant_of "$pid" "$root"; then
+        continue
+      fi
+      kill -STOP "$pid" 2>/dev/null
+      remember_id "$idmap" "$pid"
+      stopped="$stopped $pid"
+    done
+    prev=$(printf '%s\n' $pids | sort -u | tr '\n' ' ')
+    pids=$(live_descendants "$root")
+    [ "$(printf '%s\n' $pids | sort -u | tr '\n' ' ')" = "$prev" ] && break
+    pass=$((pass + 1))
+  done
+  [ -n "$pids" ] || { printf '  %salready gone%s\n' "$C_DIM" "$C_RST"; rm -f "$idmap"; return 0; }
+
+  # Identity-check here too, not only in the force pass. A stopped process can be
+  # killed by something else (or the SIGSTOP may never have landed) and its pid
+  # reused during the freeze, and TERM or CONT to that replacement is already
+  # damage by the time the later KILL pass validates anything.
+  # TERM the whole tree before resuming any of it, so a process that traps TERM
+  # has fewer live relatives to fork from once it runs again.
+  for pid in $pids; do
+    same_process "$idmap" "$pid" || continue
+    kill -TERM "$pid" 2>/dev/null
+  done
+  for pid in $pids; do
+    same_process "$idmap" "$pid" || continue
+    kill -CONT "$pid" 2>/dev/null
+  done
+  waited=0
+  while [ "$waited" -lt 30 ]; do
+    still=0
+    for pid in $pids; do kill -0 "$pid" 2>/dev/null && still=1; done
+    [ "$still" -eq 0 ] && break
+    sleep 0.1; waited=$((waited + 1))
+  done
+
+  # The force pass covers three sets, because each can contain a pid the others
+  # do not:
+  #   - the tree as it stands NOW: a process that traps SIGTERM can fork the
+  #     moment SIGCONT reaches it, and that child is in none of the earlier lists
+  #   - the list we just signalled
+  #   - everything we ever stopped: if its parent died it was reparented to
+  #     launchd and left the tree, so it would never be re-enumerated and would
+  #     stay SUSPENDED for ever while we reported success
+  # CONT before KILL so nothing is left stopped, even on the failure path.
+  # Enumerate afresh ONLY while the root still is what we verified. If it exited
+  # during the grace period and its pid was recycled, live_descendants would
+  # return the replacement's tree, and anchoring those children here is what
+  # would authorise SIGKILL against them. Falling back to the already-anchored
+  # sets loses nothing: they are the processes we actually decided to reap.
+  local final fresh=""
+  same_process "$idmap" "$root" && fresh=$(live_descendants "$root")
+  final=$(printf '%s\n' $fresh $pids $stopped | sort -u)
+  for pid in $final; do
+    has_id "$idmap" "$pid" && continue
+    is_descendant_of "$pid" "$root" || continue
+    remember_id "$idmap" "$pid"
+  done
+  for pid in $final; do
+    kill -0 "$pid" 2>/dev/null || continue
+    # Identity, not liveness. The grace period is long enough for an exited pid
+    # to be recycled onto an unrelated process, which `kill -0` happily confirms
+    # as alive. A pid that no longer matches what we recorded is left alone --
+    # but resumed first, since we may be the reason it is stopped.
+    if ! same_process "$idmap" "$pid"; then
+      kill -CONT "$pid" 2>/dev/null
+      continue
+    fi
+    kill -CONT "$pid" 2>/dev/null
+    kill -KILL "$pid" 2>/dev/null
+  done
+  sleep 0.2
+  still=0
+  for pid in $final; do
+    kill -0 "$pid" 2>/dev/null || continue
+    same_process "$idmap" "$pid" || continue      # recycled; not ours to report
+    still=1; kill -CONT "$pid" 2>/dev/null
+  done
+  rm -f "$idmap"
+  if [ "$still" -eq 1 ]; then
+    printf '  %s✗ some processes survived SIGKILL (left running, not suspended)%s\n' "$C_RED" "$C_RST"
+    return 1
+  fi
+  printf '  %s✓ reaped%s %s reclaimed\n' "$C_OK" "$C_RST" "$(fmt_mem "$freed")"
+  return 0
+}
+
+orphans() {
+  local do_kill=0 assume_yes=0 json=0 min="${CLAUDE_WATCH_ORPHAN_MIN:-${ORPHAN_MIN_DEFAULT:-60}}"
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --kill)     do_kill=1 ;;
+      --yes|-y)   assume_yes=1; do_kill=1 ;;
+      --json)     json=1 ;;
+      --min)      shift; min="${1:-}" ;;
+      --min=*)    min="${1#--min=}" ;;
+      *) printf 'claude-watch orphans: unknown option %s\n' "$1" >&2; return 2 ;;
+    esac
+    shift
+  done
+  if ! is_uint "$min"; then
+    printf 'claude-watch orphans: --min needs a non-negative integer (got "%s")\n' "$min" >&2
+    return 2
+  fi
+  if [ -z "${ORPHAN_MATCH_RE:-}" ]; then
+    printf '%serror:%s cannot read %s/tools/orphan-policy.sh\n' "$C_RED" "$C_RST" "$REPO_DIR" >&2
+    return 1
+  fi
+
+  local scan tab; tab=$(printf '\t')
+  scan=$(mktemp) || return 1
+  scan_orphans "$min" > "$scan"
+
+  # --json is read-only by construction: it prints and exits before any of the
+  # confirmation or kill machinery below is reachable.
+  if [ "$json" = "1" ]; then
+    LC_ALL=C awk -F'\t' -v MIN="$min" "$JESC_AWK"'
+      function closetree() { if (open) { printf "]}"; open = 0 } }
+      BEGIN { printf "{\"command\":\"orphans\",\"min_minutes\":%d,\"trees\":[", MIN }
+      $1 == "T" {
+        closetree(); if (nt++) printf ","
+        printf "{\"root_pid\":%d,\"name\":\"%s\",\"age_seconds\":%d,\"rss_kb\":%d,\"cores\":%.2f,\"proc_count\":%d,\"procs\":[",
+               $2, jesc($3), $4, $5, $7, $6
+        open = 1; np = 0; total += $5; next
+      }
+      $1 == "P" {
+        if (np++) printf ","
+        printf "{\"pid\":%d,\"depth\":%d,\"rss_kb\":%d,\"age_seconds\":%d,\"argv\":\"%s\"}", $3, $4, $5, $6, jesc($7)
+        next
+      }
+      END { closetree(); printf "],\"tree_count\":%d,\"total_rss_kb\":%d}\n", nt + 0, total + 0 }
+    ' "$scan"
+    tmp_cleanup; return 0
+  fi
+
+  local ntrees; ntrees=$(grep -c "^T${tab}" "$scan" 2>/dev/null || true)
+  ntrees=${ntrees:-0}
+  if [ "$ntrees" -eq 0 ]; then
+    printf '%s✓ no orphaned dev processes%s %s(nothing unparented older than %sm)%s\n' \
+      "$C_OK" "$C_RST" "$C_DIM" "$min" "$C_RST"
+    tmp_cleanup; return 0
+  fi
+
+  local w; w=$(term_width)
+  printf '%s⚠ %d orphaned dev tree%s%s %s(no parent, older than %sm — still holding memory and ports)%s\n\n' \
+    "$C_RED" "$ntrees" "$([ "$ntrees" -eq 1 ] || printf 's')" "$C_RST" "$C_DIM" "$min" "$C_RST"
+
+  # Oldest first: awk iterates its arrays in no defined order, and the numbered
+  # list has to still mean the same thing when it is confirmed against.
+  local i=0 roots="" total=0 root name age rss nproc cpu
+  while IFS="$tab" read -r _ root name age rss nproc cpu; do
+    i=$((i + 1)); roots="$roots $root"; total=$((total + rss))
+    name=$(printf '%s' "$name" | LC_ALL=C tr '\001-\037\177' ' ')
+    printf '  %s[%d]%s %s%-24.24s%s %s  %8s  %s%d proc%s%s  %s%.1f×%s\n' \
+      "$C_SEC" "$i" "$C_RST" "$C_KEY" "$name" "$C_RST" "$(fmt_dur "$age")" "$(fmt_mem "$rss")" \
+      "$C_DIM" "$nproc" "$([ "$nproc" -eq 1 ] || printf 's')" "$C_RST" \
+      "$C_DIM" "$cpu" "$C_RST"
+    local pid depth prss page argv pad
+    while IFS="$tab" read -r _ _ pid depth prss page argv; do
+      pad=$(LC_ALL=C awk -v d="$depth" 'BEGIN{s=""; for(j=0;j<d;j++) s = s "  "; print s}')
+      # argv is untrusted text being written to a terminal. Neutralise C0 and
+      # DEL so merely LISTING a process cannot execute an escape sequence that
+      # retitles the window or drives the clipboard. High bytes are left alone
+      # so UTF-8 paths still render. macOS ps happens to caret-encode these
+      # already; that is ps being helpful, not a guarantee worth depending on.
+      printf '      %s%s%s%-6s%s %s\n' "$C_DIM" "$pad" "$([ "$depth" -eq 0 ] || printf '└')" \
+        "$pid" "$C_RST" "$(printf '%s' "$argv" | LC_ALL=C tr '\001-\037\177' ' ' | cut -c1-$((w - 16)))"
+    done < <(grep "^P${tab}${root}${tab}" "$scan")
+    printf '\n'
+  done < <(grep "^T${tab}" "$scan" | sort -t"$tab" -k4,4nr)
+
+  printf '  %stotal held: %s%s\n' "$C_DIM" "$(fmt_mem "$total")" "$C_RST"
+
+  if [ "$do_kill" -eq 0 ]; then
+    printf '\n  %srun%s claude-watch orphans --kill %sto reap these%s\n' "$C_DIM" "$C_RST" "$C_DIM" "$C_RST"
+    tmp_cleanup; return 0
+  fi
+
+  # Killing from a pipe or a cron job with no way to answer would be the worst
+  # possible default, so require an explicit --yes when there is no terminal.
+  local mode="all"
+  if [ "$assume_yes" -eq 0 ]; then
+    if [ ! -t 0 ]; then
+      printf '\n%serror:%s no terminal to confirm on — pass --yes to reap without prompting\n' "$C_RED" "$C_RST" >&2
+      tmp_cleanup; return 1
+    fi
+    local ans
+    printf '\nkill all %d tree%s? [Y/n/s] ' "$ntrees" "$([ "$ntrees" -eq 1 ] || printf 's')"
+    # Enter means "all", so a closed stdin must NOT read as an empty answer —
+    # that would turn a hung-up terminal into a silent reap-everything.
+    if ! read -r ans; then
+      printf '\n%saborted — stdin closed before an answer, nothing was killed%s\n' "$C_DIM" "$C_RST"
+      tmp_cleanup; return 1
+    fi
+    case "$ans" in
+      ""|y|Y|yes|YES) mode="all" ;;
+      s|S)            mode="select" ;;
+      *)              printf '%saborted — nothing was killed%s\n' "$C_DIM" "$C_RST"; tmp_cleanup; return 0 ;;
+    esac
+  fi
+
+  printf '\n'
+  i=0
+  # A tree that was selected but not actually reaped (pid changed under us, or
+  # something survived SIGKILL) must not read as success to a --yes caller.
+  local reapfail=0
+  for root in $roots; do
+    i=$((i + 1))
+    name=$(grep "^T${tab}${root}${tab}" "$scan" | cut -f3)
+    rss=$(grep "^T${tab}${root}${tab}" "$scan" | cut -f5)
+    if [ "$mode" = "select" ]; then
+      local a2
+      printf '  [%d] %s (%s) — kill? [y/N/a/q] ' "$i" "$name" "$(fmt_mem "$rss")"
+      if ! read -r a2; then
+        printf '\n  %sstdin closed — stopping%s\n' "$C_DIM" "$C_RST"; break
+      fi
+      case "$a2" in
+        y|Y|yes|YES) ;;
+        a|A)         mode="all" ;;
+        q|Q)         printf '  %sstopped%s\n' "$C_DIM" "$C_RST"; break ;;
+        *)           printf '  %sskipped%s\n' "$C_DIM" "$C_RST"; continue ;;
+      esac
+    else
+      printf '  [%d] %s (%s)\n' "$i" "$name" "$(fmt_mem "$rss")"
+    fi
+    kill_tree "$root" "$scan" || reapfail=1
+  done
+  tmp_cleanup
+  return "$reapfail"
+}
+
+# Only paths that an agent tool creates on its own. Hand-made worktrees sitting
+# beside their repo (feature branches you made yourself) are structurally
+# invisible to this command, so it can never propose removing your real work.
+is_agent_worktree() {
+  case "$1" in
+    */.claude/worktrees/*)      return 0 ;;
+    "$HOME"/conductor/workspaces/*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# main<TAB>path<TAB>branch<TAB>locked for every worktree the repo knows about.
+list_repo_worktrees() {
+  git -C "$1" worktree list --porcelain 2>/dev/null | LC_ALL=C awk '
+    function emit() { print main, p, b, lk }
+    BEGIN { OFS = "\t"; p = ""; main = ""; b = ""; lk = 0 }
+    /^worktree /  { if (p != "") emit(); p = substr($0, 10); if (main == "") main = p; b = ""; lk = 0; next }
+    /^branch /    { b = substr($0, 8); sub(/^refs\/heads\//, "", b); next }
+    /^detached/   { b = "(detached)"; next }
+    /^locked/     { lk = 1; next }
+    END { if (p != "") emit() }'
+}
+
+# status<TAB>path<TAB>main<TAB>branch<TAB>age_days<TAB>dirty<TAB>unpushed<TAB>size_kb<TAB>why
+# One definition of "which repositories do we look at", shared by the worktree
+# scan and the leftover-branch report. Written separately they drifted: the
+# branch report tested `-d .git` and so skipped linked worktrees, whose .git is
+# a FILE, and never looked at conductor workspaces — a branch left behind by a
+# successfully removed conductor worktree therefore went unreported.
+#
+# Conductor workspaces are normally reached through their owning repo's worktree
+# list, which only works when that repo sits under a scanned root; enumerating
+# them directly keeps one whose repo lives elsewhere discoverable. That happens
+# only as part of the DEFAULT roots, so an explicit CLAUDE_WATCH_REPO_ROOTS
+# stays authoritative and can still scope a run (and a test can isolate one).
+repo_candidates() {
+  local roots d
+  roots="${CLAUDE_WATCH_REPO_ROOTS:-$HOME/Dev}"
+  printf '%s\n' "$roots" | tr ':' '\n' | while IFS= read -r root; do
+    [ -d "$root" ] || continue
+    # A root may be a directory OF repositories, or a repository itself — someone
+    # scoping a reap to one project points the variable straight at it. Only
+    # scanning children silently found nothing in that case.
+    [ -e "$root/.git" ] && printf '%s\n' "$root"
+    for d in "$root"/*; do
+      [ -e "$d/.git" ] && printf '%s\n' "$d"
+    done
+  done
+  if [ -z "${CLAUDE_WATCH_REPO_ROOTS:-}" ]; then
+    for d in "$HOME"/conductor/workspaces/*/*; do
+      [ -e "$d/.git" ] && printf '%s\n' "$d"
+    done
+  fi
+}
+
+scan_worktrees() {
+  local days=$1 now
+  now=$(date +%s)
+  {
+    repo_candidates | while IFS= read -r d; do list_repo_worktrees "$d"; done
+  } | sort -u -t"$(printf '\t')" -k2,2 | while IFS="$(printf '\t')" read -r main path branch locked; do
+    is_agent_worktree "$path" || continue
+    local age dirty unpushed size ct st why hasup
+    if [ ! -d "$path" ]; then
+      printf 'PRUNABLE\t%s\t%s\t%s\t0\t0\t0\t0\tdirectory no longer exists\n' "$path" "$main" "$branch"
+      continue
+    fi
+    ct=$(git -C "$path" log -1 --format=%ct 2>/dev/null || printf '0')
+    [ -n "$ct" ] || ct=0
+    age=$(( (now - ct) / 86400 ))
+    dirty=$(git -C "$path" status --porcelain 2>/dev/null | grep -c . || true)
+    size=$(du -sk "$path" 2>/dev/null | cut -f1); [ -n "$size" ] || size=0
+
+    # A branch with no upstream has NOTHING published, so `git log @{u}..` fails
+    # and a naive count reads 0 — "nothing unpushed" exactly when everything is.
+    # Ask about the upstream first and treat its absence as unpublished.
+    if git -C "$path" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
+      hasup=yes
+      unpushed=$(git -C "$path" log --oneline '@{u}..' 2>/dev/null | grep -c . || true)
+    else
+      hasup=no
+      unpushed=$(git -C "$path" log --oneline 2>/dev/null | grep -c . || true)
+    fi
+
+    # Liveness first. An agent worktree in active use looks exactly like a stale
+    # one on disk — git's own lock flag and a fresh commit are what tell them
+    # apart, and getting this wrong destroys work in progress.
+    if   [ "$locked" = "1" ];                 then st=ACTIVE;   why="locked by the tool using it"
+    elif [ $(( now - ct )) -lt 86400 ];       then st=ACTIVE;   why="committed to in the last 24h"
+    elif cwd_in_use_under "$path";            then st=ACTIVE;   why="a live process is working in it"
+    elif session_cwd_under "$path";           then st=ACTIVE;   why="a live session is sitting in it"
+    elif [ "${dirty:-0}" -gt 0 ]; then
+      st=UNSAFE; why="$(printf '%s uncommitted' "${dirty:-0}")"
+    elif [ "$hasup" = "no" ]; then
+      st=UNSAFE; why="no upstream — nothing published (branch survives removal)"
+    elif [ "${unpushed:-0}" -gt 0 ]; then
+      st=UNSAFE; why="$(printf '%s unpushed' "${unpushed:-0}")"
+    elif ! liveness_verifiable "$path"; then
+      st=UNSAFE; why="path has bytes lsof escapes — liveness cannot be verified"
+    elif [ "$LIVENESS_OK" != "1" ]; then
+      # No usable cwd snapshot means we cannot rule out a live process inside.
+      # Refuse to call anything stale rather than delete under a running agent.
+      st=UNSAFE; why="cannot verify liveness (lsof returned nothing)"
+    elif [ "$age" -ge "$days" ];              then st=STALE;    why="clean, ${age}d old"
+    else                                            st=RECENT;  why="clean but only ${age}d old"
+    fi
+    printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+      "$st" "$path" "$main" "$branch" "$age" "${dirty:-0}" "${unpushed:-0}" "$size" "$why"
+  done
+}
+
+# Re-run the whole safety classification for ONE worktree. Called immediately
+# before removal, because the listing can be minutes old by the time an answer
+# arrives and an agent may have claimed the worktree in between. `git worktree
+# remove` refuses on local modifications but not on a live cwd, so the liveness
+# half is ours to repeat — the same discipline the orphan killer applies to pids.
+still_removable() {
+  local path=$1 days=${2:-7} ct locked age_days now
+  [ -d "$path" ] || return 0                        # already gone; prune handles it
+  [ "$(git -C "$path" status --porcelain 2>/dev/null | grep -c . || true)" -eq 0 ] || return 1
+  if git -C "$path" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
+    [ "$(git -C "$path" log --oneline '@{u}..' 2>/dev/null | grep -c . || true)" -eq 0 ] || return 1
+  else
+    return 1                                        # no upstream: nothing published
+  fi
+  ct=$(git -C "$path" log -1 --format=%ct 2>/dev/null || printf '0')
+  now=$(date +%s)
+  # Two different thresholds, both of which the listing applied:
+  #   24h  — liveness: a fresh commit means something is working here
+  #   days — staleness: the age the user actually asked for. A worktree can be
+  #          reset onto a newer-but-still-old commit while the prompt is open,
+  #          which the same scan would now call RECENT rather than STALE.
+  [ $(( now - ${ct:-0} )) -ge 86400 ] || return 1
+  age_days=$(( (now - ${ct:-0}) / 86400 ))
+  [ "$age_days" -ge "$days" ] || return 1
+  # Liveness is re-sampled here, not read from the stale snapshot: a process can
+  # move into the worktree while the confirmation prompt is open.
+  init_live_cwds
+  [ "$LIVENESS_OK" = "1" ] || return 1
+  liveness_verifiable "$path" || return 1
+  cwd_in_use_under "$path" && return 1
+  session_cwd_under "$path" && return 1
+  locked=$(list_repo_worktrees "$path" 2>/dev/null \
+           | CW_MATCH="$path" LC_ALL=C awk -F'\t' 'BEGIN { p = ENVIRON["CW_MATCH"] } $2 == p { print $4 }' | head -n1)
+  [ "${locked:-0}" = "1" ] && return 1
+  return 0
+}
+
+# The sampler's cwd cache records SESSION ROOTS, never the worktree an agent is
+# working inside: an agent worktree is used by a subagent of an existing session
+# whose recorded cwd is the repo it started in. Measured on a live machine, 7
+# processes had a cwd under .claude/worktrees while the cache contained none of
+# those paths — so the cache alone cannot answer "is anything living in here",
+# and this check had never once fired.
+#
+# One lsof sweep per invocation, reused for every worktree. It costs about a
+# second, which is the right trade for an interactive command that deletes
+# directories. If lsof gives us nothing, liveness is UNKNOWN and the caller
+# refuses to treat anything as stale rather than guessing.
+CWD_SNAP=""
+LIVENESS_OK=0
+init_live_cwds() {
+  [ -n "${CWD_SNAP:-}" ] && rm -f "$CWD_SNAP"     # re-sampling must not leak the old one
+  # Clear BOTH first. On a re-sample, leaving LIVENESS_OK=1 from the previous
+  # call while mktemp fails (full temp filesystem) would make the empty snapshot
+  # read as "no live cwd" and let an active worktree be removed. Fail closed.
+  CWD_SNAP=""; LIVENESS_OK=0
+  CWD_SNAP=$(mktemp) || return 1
+  lsof -w -d cwd -F n 2>/dev/null | sed -n 's/^n//p' | sort -u > "$CWD_SNAP"
+  [ -s "$CWD_SNAP" ] && LIVENESS_OK=1
+  return 0
+}
+cwd_in_use_under() {
+  local p=$1
+  [ -n "${CWD_SNAP:-}" ] && [ -s "$CWD_SNAP" ] || return 1
+  # Two separate ways a backslash in the path defeats this match, both of which
+  # would make a LIVE worktree look unoccupied and therefore removable:
+  #
+  #   1. `awk -v t="$p"` runs backslash-escape processing over the value, so a
+  #      literal \t arrives as a tab. ENVIRON hands the bytes over untouched.
+  #   2. `lsof -F` escapes backslashes in the names it prints: a directory truly
+  #      named my\trepo is reported as my\\trepo. Normalise our side to match
+  #      rather than trying to unescape lsof's.
+  CW_MATCH="$p" LC_ALL=C awk '
+    BEGIN { t = ENVIRON["CW_MATCH"]; gsub(/\\/, "\\\\", t); n = length(t) }
+    index($0, t) == 1 && (length($0) == n || substr($0, n + 1, 1) == "/") { hit = 1; exit }
+    END { exit !hit }' "$CWD_SNAP"
+}
+
+# lsof also renders control bytes with escapes we do not model, so a path
+# containing one cannot be matched reliably. Rather than risk deleting a live
+# worktree, such a path is never treated as verifiable.
+liveness_verifiable() {
+  case "$1" in *[[:cntrl:]]*) return 1 ;; *) return 0 ;; esac
+}
+
+# Kept as a cheap secondary signal: it catches a session whose root IS the
+# worktree, which lsof also sees, but costs nothing when lsof is unavailable.
+session_cwd_under() {
+  local target=$1 f cwd
+  for f in "$STATE"/cwd/*; do
+    [ -e "$f" ] || continue
+    cwd=$(cat "$f" 2>/dev/null)
+    case "$cwd" in "$target"|"$target"/*) return 0 ;; esac
+  done
+  return 1
+}
+
+worktrees() {
+  local do_remove=0 assume_yes=0 json=0 days=7
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --remove)   do_remove=1 ;;
+      --yes|-y)   assume_yes=1; do_remove=1 ;;
+      --json)     json=1 ;;
+      --days)     shift; days="${1:-}" ;;
+      --days=*)   days="${1#--days=}" ;;
+      *) printf 'claude-watch worktrees: unknown option %s\n' "$1" >&2; return 2 ;;
+    esac
+    shift
+  done
+  if ! is_uint "$days"; then
+    printf 'claude-watch worktrees: --days needs a non-negative integer (got "%s")\n' "$days" >&2
+    return 2
+  fi
+
+  local scan tab; tab=$(printf '\t')
+  scan=$(mktemp) || return 1
+  init_live_cwds        # one lsof sweep, reused for every worktree below
+  scan_worktrees "$days" > "$scan"
+
+  if [ "$json" = "1" ]; then
+    LC_ALL=C awk -F'\t' -v D="$days" "$JESC_AWK"'
+      BEGIN { printf "{\"command\":\"worktrees\",\"stale_after_days\":%d,\"worktrees\":[", D }
+      {
+        rm = ($1 == "STALE" || $1 == "PRUNABLE") ? "true" : "false"
+        if (n++) printf ","
+        printf "{\"status\":\"%s\",\"path\":\"%s\",\"main\":\"%s\",\"branch\":\"%s\",\"age_days\":%d,\"dirty\":%d,\"unpushed\":%d,\"size_kb\":%d,\"removable\":%s,\"reason\":\"%s\"}",
+               $1, jesc($2), jesc($3), jesc($4), $5, $6, $7, $8, rm, jesc($9)
+        if (rm == "true") { rc++; rk += $8 }
+      }
+      END { printf "],\"removable_count\":%d,\"reclaimable_kb\":%d}\n", rc + 0, rk + 0 }
+    ' "$scan"
+    tmp_cleanup; return 0
+  fi
+
+  if [ ! -s "$scan" ]; then
+    printf '%s✓ no agent-created worktrees found%s %s(scanned %s)%s\n' \
+      "$C_OK" "$C_RST" "$C_DIM" "${CLAUDE_WATCH_REPO_ROOTS:-$HOME/Dev}" "$C_RST"
+    tmp_cleanup; return 0
+  fi
+
+  printf '%sAGENT WORKTREES%s %s(.claude/worktrees and conductor workspaces; your own are not listed)%s\n\n' \
+    "$C_SEC" "$C_RST" "$C_DIM" "$C_RST"
+
+  local st path main branch age dirty unpushed size why col mark i=0 reclaim=0 targets
+  targets=$(mktemp) || { tmp_cleanup; return 1; }
+  while IFS="$tab" read -r st path main branch age dirty unpushed size why; do
+    case "$st" in
+      ACTIVE)   col=$C_OK;  mark="●" ;;
+      UNSAFE)   col=$C_HOT; mark="!" ;;
+      STALE)    col=$C_RED; mark="·" ;;
+      PRUNABLE) col=$C_RED; mark="·" ;;
+      *)        col=$C_DIM; mark="·" ;;
+    esac
+    if [ "$st" = "STALE" ] || [ "$st" = "PRUNABLE" ]; then
+      i=$((i + 1)); printf '%s\n' "$path" >> "$targets"; reclaim=$((reclaim + size))
+      printf '  %s[%d]%s ' "$C_SEC" "$i" "$C_RST"
+    else
+      printf '      '
+    fi
+    printf '%s%s %-8s%s %s%s%s\n' "$col" "$mark" "$st" "$C_RST" "$C_KEY" "$(printf '%s' "$path" | sed "s|^$HOME|~|")" "$C_RST"
+    printf '        %s%s · %s · %s%s\n' "$C_DIM" "$branch" "$(fmt_mem $((size)))" "$why" "$C_RST"
+  done < <(sort -t"$tab" -k1,1 -k5,5nr "$scan")
+
+  if [ "$i" -eq 0 ]; then
+    printf '\n  %snothing stale to remove%s\n' "$C_DIM" "$C_RST"
+    tmp_cleanup; return 0
+  fi
+  printf '\n  %s%d removable · %s reclaimable%s\n' "$C_DIM" "$i" "$(fmt_mem "$reclaim")" "$C_RST"
+
+  if [ "$do_remove" -eq 0 ]; then
+    printf '\n  %srun%s claude-watch worktrees --remove %sto reap the stale ones%s\n' \
+      "$C_DIM" "$C_RST" "$C_DIM" "$C_RST"
+    tmp_cleanup; return 0
+  fi
+
+  # ACTIVE and UNSAFE are never in the removable set at all, so "all" can never
+  # reach a worktree that is in use or holding work that exists nowhere else.
+  local mode="all" ans
+  if [ "$assume_yes" -eq 0 ]; then
+    if [ ! -t 0 ]; then
+      printf '\n%serror:%s no terminal to confirm on — pass --yes to remove without prompting\n' "$C_RED" "$C_RST" >&2
+      tmp_cleanup; return 1
+    fi
+    printf '\nremove all %d stale worktree%s? [Y/n/s] ' "$i" "$([ "$i" -eq 1 ] || printf 's')"
+    if ! read -r ans; then
+      printf '\n%saborted — stdin closed before an answer, nothing was removed%s\n' "$C_DIM" "$C_RST"
+      tmp_cleanup; return 1
+    fi
+    case "$ans" in
+      ""|y|Y|yes|YES) mode="all" ;;
+      s|S)            mode="select" ;;
+      *)              printf '%saborted — nothing was removed%s\n' "$C_DIM" "$C_RST"; tmp_cleanup; return 0 ;;
+    esac
+  fi
+
+  printf '\n'
+  i=0
+  # A worktree that was selected but not actually removed (it changed under us,
+  # or git refused) must not read as success to a --remove --yes caller.
+  local rmfail=0
+  # Targets are read on fd 3, not stdin: the confirmation prompt below reads
+  # stdin, and a path list piped into the loop would be eaten by it. Reading a
+  # line at a time also keeps paths containing spaces intact, which splitting an
+  # accumulated string on IFS would not.
+  while IFS= read -r path <&3; do
+    [ -n "$path" ] || continue
+    i=$((i + 1))
+    main=$(grep -F "$tab$path$tab" "$scan" | cut -f3 | head -n1)
+    if [ "$mode" = "select" ]; then
+      printf '  [%d] %s — remove? [y/N/a/q] ' "$i" "$(printf '%s' "$path" | sed "s|^$HOME|~|")"
+      if ! read -r ans; then printf '\n  %sstdin closed — stopping%s\n' "$C_DIM" "$C_RST"; break; fi
+      case "$ans" in
+        y|Y|yes|YES) ;;
+        a|A)         mode="all" ;;
+        q|Q)         printf '  %sstopped%s\n' "$C_DIM" "$C_RST"; break ;;
+        *)           printf '  %sskipped%s\n' "$C_DIM" "$C_RST"; continue ;;
+      esac
+    else
+      printf '  [%d] %s\n' "$i" "$(printf '%s' "$path" | sed "s|^$HOME|~|")"
+    fi
+    # Re-check safety immediately before removing. The scan may be minutes old by
+    # the time an answer arrives, and an agent can claim a worktree in that
+    # window. git refuses on local modifications but not on a live cwd, so the
+    # liveness half of the check is ours to repeat — the same discipline the
+    # orphan killer applies to pids.
+    if ! still_removable "$path" "$days"; then
+      printf '    %s✗ changed since it was listed — skipping%s\n' "$C_RED" "$C_RST"
+      rmfail=1
+      continue
+    fi
+    # git worktree remove, never rm -rf: git re-checks for local modifications
+    # and refuses, which is a second independent guard behind our own.
+    if git -C "$main" worktree remove "$path" 2>/dev/null; then
+      printf '    %s✓ removed%s\n' "$C_OK" "$C_RST"
+    else
+      git -C "$main" worktree prune 2>/dev/null
+      if [ -d "$path" ]; then
+        printf '    %s✗ git refused to remove it — left untouched%s\n' "$C_RED" "$C_RST"
+        rmfail=1
+      else
+        printf '    %s✓ pruned%s\n' "$C_OK" "$C_RST"
+      fi
+    fi
+  done 3< "$targets"
+
+  # Capture the repositories the scan actually visited BEFORE cleanup drops it,
+  # so a repo found only by the scan still gets its leftover branches reported.
+  local mains; mains=$(mktemp) && cut -f3 "$scan" | sort -u > "$mains"
+  tmp_cleanup
+
+  # Branches left behind by removed worktrees are reported, never deleted:
+  # a branch is cheap to keep and the only copy of that work if it never merged.
+  local leftover; leftover=$(orphan_branches "$mains")
+  rm -f "$mains"
+  if [ -n "$leftover" ]; then
+    printf '\n%sleftover agent branches (not deleted — review by hand)%s\n' "$C_DIM" "$C_RST"
+    printf '%s\n' "$leftover"
+  fi
+  return "$rmfail"
+}
+
+# $1 (optional) is a file of extra repositories — the main worktrees the scan
+# actually visited — so a repo discovered only via the scan is still checked.
+orphan_branches() {
+  local extra="${1:-}" d
+  # Collapse every candidate onto its repo's MAIN worktree before reporting.
+  # Linked worktrees share one ref store, so asking each of them listed the same
+  # branch once per worktree.
+  { repo_candidates; [ -n "$extra" ] && [ -f "$extra" ] && cat "$extra"; } \
+    | while IFS= read -r d; do
+        [ -n "$d" ] && [ -e "$d/.git" ] || continue
+        git -C "$d" worktree list --porcelain 2>/dev/null \
+          | LC_ALL=C awk '/^worktree /{ print substr($0, 10); exit }'
+      done \
+    | sort -u | while IFS= read -r d; do
+      [ -n "$d" ] || continue
+      git -C "$d" for-each-ref --format='%(refname:short)' \
+        'refs/heads/claude/*' 'refs/heads/worktree-agent-*' 2>/dev/null \
+        | while IFS= read -r b; do
+            [ -n "$b" ] || continue
+            git -C "$d" worktree list --porcelain 2>/dev/null | grep -qF "branch refs/heads/$b" && continue
+            printf '  %s  %s\n' "$(printf '%s' "$d" | sed "s|^$HOME|~|")" "$b"
+          done
+    done
+}
+
 status() {
-  local latest count
+  local latest count json=0
+  [ "${1:-}" = "--json" ] && json=1
   latest=$(ls -t "$RAW"/*.tsv 2>/dev/null | head -n1)
-  printf '%sclaude-watch status%s\n' "$C_HEAD" "$C_RST"
   if [ -z "$latest" ]; then
-    printf '  %sno samples yet%s — is the launchd job loaded? try: claude-watch doctor\n' "$C_RED" "$C_RST"
+    if [ "$json" = "1" ]; then
+      printf '{"command":"status","sampling":false,"reason":"no samples yet"}\n'
+    else
+      printf '%sclaude-watch status%s\n' "$C_HEAD" "$C_RST"
+      printf '  %sno samples yet%s — is the launchd job loaded? try: claude-watch doctor\n' "$C_RED" "$C_RST"
+    fi
     return 1
   fi
   local last_ep now age
   last_ep=$(tail -n1 "$latest" | cut -f1)
   now=$(date +%s); age=$((now - last_ep))
   count=$(wc -l < "$latest" | tr -d ' ')
+  if [ "$json" = "1" ]; then
+    printf '{"command":"status","sampling":%s,"last_sample_age_seconds":%d,"rows_today":%d,"disk":"%s","keep_days":%d}\n' \
+      "$([ "$age" -lt 120 ] && printf 'true' || printf 'false')" "$age" "$count" \
+      "$(du -sh "$DATA" 2>/dev/null | cut -f1)" "$KEEP_RAW_DAYS"
+    return 0
+  fi
+  printf '%sclaude-watch status%s\n' "$C_HEAD" "$C_RST"
   if [ "$age" -lt 120 ]; then
     printf '  %s● sampling%s   last sample %ss ago\n' "$C_OK" "$C_RST" "$age"
   else
@@ -319,10 +1365,20 @@ doctor() {
 }
 
 case "${1:-report}" in
-  report)          shift 2>/dev/null || true; report "${1:-today}" ;;
+  report)
+    shift 2>/dev/null || true
+    _date=today; _json=0
+    while [ $# -gt 0 ]; do
+      case "$1" in --json) _json=1 ;; *) _date="$1" ;; esac
+      shift
+    done
+    report "$_date" "$_json"
+    ;;
+  orphans)         shift; orphans ${1+"$@"} ;;
+  worktrees)       shift; worktrees ${1+"$@"} ;;
   today)           report today ;;
   yesterday)       report yesterday ;;
-  status)          status ;;
+  status)          shift; status ${1+"$@"} ;;
   hook)            hook ;;
   doctor)          doctor ;;
   -h|--help|help)  usage ;;
