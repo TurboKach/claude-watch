@@ -58,6 +58,10 @@ expect_exit 2 "orphans --min rejects non-numeric"   "$CW" orphans --kill --yes -
 expect_exit 2 "orphans --min rejects empty"         "$CW" orphans --min
 expect_exit 2 "worktrees --days rejects non-numeric" "$CW" worktrees --remove --yes --days xyz
 expect_exit 2 "worktrees --days rejects empty"       "$CW" worktrees --days
+# The date is interpolated straight into --json; validating its shape keeps that
+# output well-formed by construction.
+expect_exit 2 "report rejects a malformed date"      "$CW" report garbage
+expect_exit 2 "report rejects a quote in the date"   "$CW" report '2026-01-01"x'
 
 echo "--json is valid JSON"
 expect_json "report --json"     "$CW" report today

@@ -81,6 +81,15 @@ read_day() {
 report() {
   local d; d=$(resolve_date "${1:-today}")
   local json="${2:-0}"
+  # resolve_date passes an explicit argument through untouched, so the date can
+  # be arbitrary text — and it is interpolated straight into --json output.
+  # Validating the shape here keeps that JSON well-formed by construction, and
+  # rejects a date that could never match a raw file anyway.
+  case "$d" in
+    [0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]) ;;
+    *) printf 'claude-watch: bad date "%s" (expected YYYY-MM-DD, today, or yesterday)\n' "$d" >&2
+       return 2 ;;
+  esac
   local data; data=$(read_day "$d")
   if [ -z "$data" ]; then
     if [ "$json" = "1" ]; then
@@ -144,7 +153,7 @@ report() {
     }
     function emit_json(   i, key, first) {
       printf "{\"command\":\"report\",\"date\":\"%s\",\"cores\":%d,\"samples\":%d,\"interval_seconds\":%d,\"observed_seconds\":%d",
-             D, ncpu, sysn, iv, covered
+             jesc(D), ncpu, sysn, iv, covered
       printf ",\"sessions\":["
       for (i = 1; i <= skn; i++) {
         key = sk[i]
@@ -362,6 +371,15 @@ term_width() { local c; c=$(tput cols 2>/dev/null); [ -n "$c" ] && [ "$c" -gt 40
 # "--min typo" into "--min 0" and hand every match to the kill path. Reject it.
 is_uint() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; }
 
+# Drops whatever temp artefacts the running command created. Bash locals are
+# visible to called functions, so one definition serves both reaping commands.
+tmp_cleanup() {
+  [ -n "${scan:-}" ]     && rm -f "$scan"
+  [ -n "${targets:-}" ]  && rm -f "$targets"
+  [ -n "${CWD_SNAP:-}" ] && { rm -f "$CWD_SNAP"; CWD_SNAP=""; }
+  return 0
+}
+
 # A live ps scan, never the stored samples. Orphan rows carry no pid at all
 # (epoch, orphan, name, cores, rss, secs), and even if they did, a pid recorded
 # minutes ago may since have been recycled onto something completely unrelated.
@@ -511,7 +529,7 @@ orphans() {
       }
       END { closetree(); printf "],\"tree_count\":%d,\"total_rss_kb\":%d}\n", nt + 0, total + 0 }
     ' "$scan"
-    rm -f "$scan"; return 0
+    tmp_cleanup; return 0
   fi
 
   local ntrees; ntrees=$(grep -c "^T${tab}" "$scan" 2>/dev/null || true)
@@ -519,7 +537,7 @@ orphans() {
   if [ "$ntrees" -eq 0 ]; then
     printf '%s✓ no orphaned dev processes%s %s(nothing unparented older than %sm)%s\n' \
       "$C_OK" "$C_RST" "$C_DIM" "$min" "$C_RST"
-    rm -f "$scan"; return 0
+    tmp_cleanup; return 0
   fi
 
   local w; w=$(term_width)
@@ -548,7 +566,7 @@ orphans() {
 
   if [ "$do_kill" -eq 0 ]; then
     printf '\n  %srun%s claude-watch orphans --kill %sto reap these%s\n' "$C_DIM" "$C_RST" "$C_DIM" "$C_RST"
-    rm -f "$scan"; return 0
+    tmp_cleanup; return 0
   fi
 
   # Killing from a pipe or a cron job with no way to answer would be the worst
@@ -557,7 +575,7 @@ orphans() {
   if [ "$assume_yes" -eq 0 ]; then
     if [ ! -t 0 ]; then
       printf '\n%serror:%s no terminal to confirm on — pass --yes to reap without prompting\n' "$C_RED" "$C_RST" >&2
-      rm -f "$scan"; return 1
+      tmp_cleanup; return 1
     fi
     local ans
     printf '\nkill all %d tree%s? [Y/n/s] ' "$ntrees" "$([ "$ntrees" -eq 1 ] || printf 's')"
@@ -565,12 +583,12 @@ orphans() {
     # that would turn a hung-up terminal into a silent reap-everything.
     if ! read -r ans; then
       printf '\n%saborted — stdin closed before an answer, nothing was killed%s\n' "$C_DIM" "$C_RST"
-      rm -f "$scan"; return 1
+      tmp_cleanup; return 1
     fi
     case "$ans" in
       ""|y|Y|yes|YES) mode="all" ;;
       s|S)            mode="select" ;;
-      *)              printf '%saborted — nothing was killed%s\n' "$C_DIM" "$C_RST"; rm -f "$scan"; return 0 ;;
+      *)              printf '%saborted — nothing was killed%s\n' "$C_DIM" "$C_RST"; tmp_cleanup; return 0 ;;
     esac
   fi
 
@@ -597,7 +615,7 @@ orphans() {
     fi
     kill_tree "$root" "$scan"
   done
-  rm -f "$scan"
+  tmp_cleanup
   return 0
 }
 
@@ -678,6 +696,7 @@ scan_worktrees() {
     # apart, and getting this wrong destroys work in progress.
     if   [ "$locked" = "1" ];                 then st=ACTIVE;   why="locked by the tool using it"
     elif [ $(( now - ct )) -lt 86400 ];       then st=ACTIVE;   why="committed to in the last 24h"
+    elif cwd_in_use_under "$path";            then st=ACTIVE;   why="a live process is working in it"
     elif session_cwd_under "$path";           then st=ACTIVE;   why="a live session is sitting in it"
     elif [ "${dirty:-0}" -gt 0 ]; then
       st=UNSAFE; why="$(printf '%s uncommitted' "${dirty:-0}")"
@@ -685,6 +704,10 @@ scan_worktrees() {
       st=UNSAFE; why="no upstream — nothing published (branch survives removal)"
     elif [ "${unpushed:-0}" -gt 0 ]; then
       st=UNSAFE; why="$(printf '%s unpushed' "${unpushed:-0}")"
+    elif [ "$LIVENESS_OK" != "1" ]; then
+      # No usable cwd snapshot means we cannot rule out a live process inside.
+      # Refuse to call anything stale rather than delete under a running agent.
+      st=UNSAFE; why="cannot verify liveness (lsof returned nothing)"
     elif [ "$age" -ge "$days" ];              then st=STALE;    why="clean, ${age}d old"
     else                                            st=RECENT;  why="clean but only ${age}d old"
     fi
@@ -709,6 +732,11 @@ still_removable() {
   fi
   ct=$(git -C "$path" log -1 --format=%ct 2>/dev/null || printf '0')
   [ $(( $(date +%s) - ${ct:-0} )) -ge 86400 ] || return 1
+  # Liveness is re-sampled here, not read from the stale snapshot: a process can
+  # move into the worktree while the confirmation prompt is open.
+  init_live_cwds
+  [ "$LIVENESS_OK" = "1" ] || return 1
+  cwd_in_use_under "$path" && return 1
   session_cwd_under "$path" && return 1
   locked=$(list_repo_worktrees "$path" 2>/dev/null \
            | LC_ALL=C awk -F'\t' -v p="$path" '$2 == p { print $4 }' | head -n1)
@@ -716,8 +744,35 @@ still_removable() {
   return 0
 }
 
-# The sampler already caches the cwd of every live claude session, so this costs
-# a few file reads rather than a full lsof sweep.
+# The sampler's cwd cache records SESSION ROOTS, never the worktree an agent is
+# working inside: an agent worktree is used by a subagent of an existing session
+# whose recorded cwd is the repo it started in. Measured on a live machine, 7
+# processes had a cwd under .claude/worktrees while the cache contained none of
+# those paths — so the cache alone cannot answer "is anything living in here",
+# and this check had never once fired.
+#
+# One lsof sweep per invocation, reused for every worktree. It costs about a
+# second, which is the right trade for an interactive command that deletes
+# directories. If lsof gives us nothing, liveness is UNKNOWN and the caller
+# refuses to treat anything as stale rather than guessing.
+CWD_SNAP=""
+LIVENESS_OK=0
+init_live_cwds() {
+  [ -n "${CWD_SNAP:-}" ] && rm -f "$CWD_SNAP"     # re-sampling must not leak the old one
+  CWD_SNAP=$(mktemp) || return 1
+  lsof -w -d cwd -F n 2>/dev/null | sed -n 's/^n//p' | sort -u > "$CWD_SNAP"
+  if [ -s "$CWD_SNAP" ]; then LIVENESS_OK=1; else LIVENESS_OK=0; fi
+}
+cwd_in_use_under() {
+  local p=$1
+  [ -n "${CWD_SNAP:-}" ] && [ -s "$CWD_SNAP" ] || return 1
+  LC_ALL=C awk -v t="$p" '
+    index($0, t) == 1 && (length($0) == length(t) || substr($0, length(t) + 1, 1) == "/") { hit = 1; exit }
+    END { exit !hit }' "$CWD_SNAP"
+}
+
+# Kept as a cheap secondary signal: it catches a session whose root IS the
+# worktree, which lsof also sees, but costs nothing when lsof is unavailable.
 session_cwd_under() {
   local target=$1 f cwd
   for f in "$STATE"/cwd/*; do
@@ -748,6 +803,7 @@ worktrees() {
 
   local scan tab; tab=$(printf '\t')
   scan=$(mktemp) || return 1
+  init_live_cwds        # one lsof sweep, reused for every worktree below
   scan_worktrees "$days" > "$scan"
 
   if [ "$json" = "1" ]; then
@@ -763,20 +819,20 @@ worktrees() {
       }
       END { printf "],\"removable_count\":%d,\"reclaimable_kb\":%d}\n", rc + 0, rk + 0 }
     ' "$scan"
-    rm -f "$scan"; return 0
+    tmp_cleanup; return 0
   fi
 
   if [ ! -s "$scan" ]; then
     printf '%s✓ no agent-created worktrees found%s %s(scanned %s)%s\n' \
       "$C_OK" "$C_RST" "$C_DIM" "${CLAUDE_WATCH_REPO_ROOTS:-$HOME/Dev}" "$C_RST"
-    rm -f "$scan"; return 0
+    tmp_cleanup; return 0
   fi
 
   printf '%sAGENT WORKTREES%s %s(.claude/worktrees and conductor workspaces; your own are not listed)%s\n\n' \
     "$C_SEC" "$C_RST" "$C_DIM" "$C_RST"
 
   local st path main branch age dirty unpushed size why col mark i=0 reclaim=0 targets
-  targets=$(mktemp) || { rm -f "$scan"; return 1; }
+  targets=$(mktemp) || { tmp_cleanup; return 1; }
   while IFS="$tab" read -r st path main branch age dirty unpushed size why; do
     case "$st" in
       ACTIVE)   col=$C_OK;  mark="●" ;;
@@ -797,14 +853,14 @@ worktrees() {
 
   if [ "$i" -eq 0 ]; then
     printf '\n  %snothing stale to remove%s\n' "$C_DIM" "$C_RST"
-    rm -f "$scan" "$targets"; return 0
+    tmp_cleanup; return 0
   fi
   printf '\n  %s%d removable · %s reclaimable%s\n' "$C_DIM" "$i" "$(fmt_mem "$reclaim")" "$C_RST"
 
   if [ "$do_remove" -eq 0 ]; then
     printf '\n  %srun%s claude-watch worktrees --remove %sto reap the stale ones%s\n' \
       "$C_DIM" "$C_RST" "$C_DIM" "$C_RST"
-    rm -f "$scan" "$targets"; return 0
+    tmp_cleanup; return 0
   fi
 
   # ACTIVE and UNSAFE are never in the removable set at all, so "all" can never
@@ -813,17 +869,17 @@ worktrees() {
   if [ "$assume_yes" -eq 0 ]; then
     if [ ! -t 0 ]; then
       printf '\n%serror:%s no terminal to confirm on — pass --yes to remove without prompting\n' "$C_RED" "$C_RST" >&2
-      rm -f "$scan" "$targets"; return 1
+      tmp_cleanup; return 1
     fi
     printf '\nremove all %d stale worktree%s? [Y/n/s] ' "$i" "$([ "$i" -eq 1 ] || printf 's')"
     if ! read -r ans; then
       printf '\n%saborted — stdin closed before an answer, nothing was removed%s\n' "$C_DIM" "$C_RST"
-      rm -f "$scan" "$targets"; return 1
+      tmp_cleanup; return 1
     fi
     case "$ans" in
       ""|y|Y|yes|YES) mode="all" ;;
       s|S)            mode="select" ;;
-      *)              printf '%saborted — nothing was removed%s\n' "$C_DIM" "$C_RST"; rm -f "$scan" "$targets"; return 0 ;;
+      *)              printf '%saborted — nothing was removed%s\n' "$C_DIM" "$C_RST"; tmp_cleanup; return 0 ;;
     esac
   fi
 
@@ -871,7 +927,7 @@ worktrees() {
       fi
     fi
   done 3< "$targets"
-  rm -f "$scan" "$targets"
+  tmp_cleanup
 
   # Branches left behind by removed worktrees are reported, never deleted:
   # a branch is cheap to keep and the only copy of that work if it never merged.
