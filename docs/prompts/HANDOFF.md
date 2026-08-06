@@ -2,7 +2,14 @@
 
 Written at the end of the session that built the project, for whoever (or whichever session) picks it up next.
 
-Repo: https://github.com/TurboKach/claude-watch — public, MIT, one commit, `main`.
+Repo: https://github.com/TurboKach/claude-watch — public, MIT, `main`.
+
+> **Newer than this file:** [SESSION-HANDOFF.md](SESSION-HANDOFF.md) orients a fresh session on how
+> the tool works and how to use it, and lists what is currently open. Start there if you want the
+> shape of things; this file remains the reference for gotchas (§4) and the decisions log (§3).
+>
+> Since this was written, the tool gained the reaping commands (§11), a `--json` agent interface and
+> two Claude Code skills (§12), and a read-only smoke suite (§7a). All merged to `main`.
 
 ---
 

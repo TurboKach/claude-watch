@@ -262,6 +262,11 @@ rm -rf ~/.claude-watch          # collected data
 
 Then remove the hook line from `.zshrc`.
 
+## Design notes
+
+[`docs/prompts/SESSION-HANDOFF.md`](docs/prompts/SESSION-HANDOFF.md) — how it works, how to use it, and what's open.
+[`docs/prompts/HANDOFF.md`](docs/prompts/HANDOFF.md) — decisions log and the gotchas worth not rediscovering.
+
 ## License
 
 [MIT](LICENSE)
