@@ -536,6 +536,10 @@ remember_id() {   # <idmap> <pid>
 # Is this pid still the process we recorded? A pid that exits during the grace
 # period can be recycled onto something unrelated, and `kill -0` cannot tell the
 # difference — so identity, not liveness, is what gates the forced signal.
+has_id() {   # <idmap> <pid> — do we hold a recorded identity for this pid?
+  LC_ALL=C awk -F'\t' -v p="$2" '$1 == p { f = 1; exit } END { exit !f }' "$1"
+}
+
 same_process() {   # <idmap> <pid>
   local map=$1 pid=$2 want want_age want_argv line now_age now_argv
   want=$(LC_ALL=C awk -F'\t' -v p="$pid" '$1 == p { print; exit }' "$map")
@@ -624,13 +628,27 @@ kill_tree() {
   # paired with SIGCONT because a stopped process cannot act on TERM.
   # Freeze, then re-enumerate, until membership stops changing: a fork can land
   # between an enumeration and the STOP that was meant to prevent it.
+  # The root gets an identity check, never a membership one. Membership is tested
+  # by walking up to the root, so for the root itself it is circular: a recycled
+  # root pid would pass trivially, and every "descendant" enumerated from it
+  # would belong to the replacement process.
+  if ! same_process "$idmap" "$root"; then
+    printf '  %s✗ root pid %s changed since it was listed — skipping this tree%s\n' \
+      "$C_RED" "$root" "$C_RST"
+    rm -f "$idmap"; return 1
+  fi
+
   local stopped="" prev="" pass=0
   while [ "$pass" -lt 4 ]; do
     for pid in $pids; do
-      # Only anchor something still provably in this tree. A pid recycled between
-      # the enumeration and this moment is someone else's, and recording it here
-      # is what would later authorise SIGKILL against it.
-      is_descendant_of "$pid" "$root" || continue
+      # Identity where we have one, membership only for pids not yet anchored.
+      # A pid recycled between enumeration and this moment is someone else's, and
+      # recording it here is what would later authorise SIGKILL against it.
+      if has_id "$idmap" "$pid"; then
+        same_process "$idmap" "$pid" || continue
+      elif ! is_descendant_of "$pid" "$root"; then
+        continue
+      fi
       kill -STOP "$pid" 2>/dev/null
       remember_id "$idmap" "$pid"
       stopped="$stopped $pid"
