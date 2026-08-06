@@ -103,7 +103,20 @@ Two invariants worth protecting:
 
 14. **Malformed skill frontmatter fails silently and badly.** Claude Code loads the body with *empty metadata*, so `/skill-name` still works but Claude has no `description` to match on — auto-invocation dies with no error anywhere. This bit us: `when_to_use: "a", "b", "c"` is not valid YAML. Use a `>-` block scalar for anything containing quotes or apostrophes, and validate with a real YAML parser, not by eye.
 
-15. **`pgrep -f codex` is useless on macOS.** The path `/var/run/com.apple.security.cryptexd/codex.system/...` appears in the inherited environment of nearly every process, so the string "codex" in argv matches almost everything. Any future Codex detection needs a different key.
+15. **zsh does not word-split unquoted variables; bash does.** A test sweep written as
+    `for c in "report today"; do claude-watch $c; done` passes ONE argument under zsh and two under
+    bash, so the tool rejects `"report today"` with exit 2 and the sweep reports a regression that
+    does not exist. This produced a false failure report on a working build. Write test loops as a
+    file with a `#!/usr/bin/env bash` shebang (`tests/smoke.sh`) rather than inline in the session
+    shell, or pass arguments explicitly instead of through a string.
+
+16. **`lastep` must come from `sys` rows, not `orphan` rows.** Measuring "still alive" against the
+    newest *orphan* row makes the test vacuous: once an orphan is reaped no further orphan rows are
+    written, so the newest orphan row is always the one recording it, and every dead orphan reports
+    itself still alive. `gone by end of day` could essentially never fire. Fixed by taking the last
+    sample epoch (`eps[sysn]`), since sys rows are written every sample.
+
+17. **`pgrep -f codex` is useless on macOS.** The path `/var/run/com.apple.security.cryptexd/codex.system/...` appears in the inherited environment of nearly every process, so the string "codex" in argv matches almost everything. Any future Codex detection needs a different key.
 
 ---
 
@@ -141,8 +154,17 @@ Renders are event-driven, not periodic. A 117-second blind window means any spik
 
 ## 7. What's NEXT — ranked
 
-### 7a. Automated tests — the biggest gap
-There are none. Everything was verified by hand. The highest-value target is the **report aggregation**: feed a fixture `.tsv` with known values and assert the digest's peak/avg/total/seen figures. That is pure input→output, needs no live processes, and is exactly where three bugs were found by eye. `tools/sample.sh` is harder (needs a real `ps`) but its awk could take a fixture snapshot on stdin.
+### 7a. Automated tests — partly closed
+`tests/smoke.sh` now covers syntax, exit codes, `--json` validity, argument rejection, the
+no-tty refusal on both destructive paths, skill frontmatter, and one sampler pass. It is read-only
+and destroys nothing. Verified to fail correctly, not just pass: reintroducing the broken
+`when_to_use` frontmatter turns it red.
+
+**Still missing, and still the highest-value target: fixture-based report aggregation.** Feed a
+`.tsv` with known values and assert the digest's peak/avg/total/seen figures. That is pure
+input→output, needs no live processes, and is exactly where three bugs were found by eye — plus a
+fourth since (the `lastep` bug in §4.16). The smoke suite would not have caught any of them.
+`tools/sample.sh` is harder (needs a real `ps`) but its awk could take a fixture snapshot on stdin.
 
 ### 7b. Unit inconsistency between the two tools
 `claude-top` shows `253%` (top(1) convention); `claude-watch` shows `2.5×` (cores). Same quantity, two notations, one repo. Pick one — cores is friendlier, percent matches `top`. Requires touching `claude-top`'s columns and README.
@@ -222,9 +244,10 @@ Safety properties, all load-bearing (see gotchas §4.10–§4.13):
 - ACTIVE and UNSAFE worktrees are never in the bulk set at all
 - only agent-created paths are visible: `<repo>/.claude/worktrees/*`, `~/conductor/workspaces/*`
 
-**Still no automated tests** (§7a). Everything above was verified by hand against synthetic orphan
-trees and a sandbox repo of backdated worktrees. Given these paths are irreversible, they are now
-the strongest argument for §7a — the report aggregation is no longer the highest-value test target.
+`tests/smoke.sh` covers the guards (no-tty refusal, argument rejection, `--json` validity) but the
+behaviour that matters most here — the subtree walk, the pid-reuse re-verification, the worktree
+classification — was verified by hand against synthetic orphan trees and a sandbox repo of
+backdated worktrees, and has no automated coverage. See §7a.
 
 ---
 

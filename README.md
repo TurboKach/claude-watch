@@ -235,6 +235,16 @@ What counts as a leaked dev process lives in one file, `tools/orphan-policy.sh`,
 
 Change the sampling interval in `~/Library/LaunchAgents/com.turbokach.claudewatch.plist`, then `launchctl unload && launchctl load` it.
 
+## Tests
+
+```bash
+./tests/smoke.sh
+```
+
+Read-only — it destroys nothing, and asserts that the destructive commands *refuse* without a terminal. Covers syntax, exit codes, `--json` validity, argument rejection, skill frontmatter, and one sampler pass. Exits non-zero on failure.
+
+Fixture-based tests for the report aggregation are the remaining gap; the smoke suite checks that commands work, not that the arithmetic is right.
+
 ## Limitations
 
 - **macOS only** — uses `ps`, `vm_stat`, `lsof` and `launchd`.

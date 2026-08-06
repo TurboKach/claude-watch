@@ -217,7 +217,6 @@ report() {
         if (rss > orss[key]) orss[key] = rss
         olast[key] = ep
         if (!(key in okeys)) { okeys[key] = 1; ok[++okn] = key }
-        if (ep > lastep) lastep = ep
         next
       }
     }
@@ -234,6 +233,15 @@ report() {
       # coverage stays honest if the interval was changed or launchd was paused.
       for (i = 1; i < sysn; i++) for (k = i + 1; k <= sysn; k++)
         if (eps[k] < eps[i]) { t = eps[i]; eps[i] = eps[k]; eps[k] = t }
+
+      # "Still alive" means "present in the final sample of the day", so the
+      # yardstick has to be the last SAMPLE. Measuring it against the last
+      # orphan row instead made the test vacuous: once an orphan is reaped, no
+      # further orphan rows are written, so the newest orphan row is always the
+      # one recording it — and every dead orphan reported itself still alive.
+      # sys rows are emitted every sample even when nothing else is.
+      lastep = eps[sysn]
+
       dn = 0
       for (i = 2; i <= sysn; i++) { gap = eps[i] - eps[i-1]; if (gap > 0 && gap < 600) dl[++dn] = gap }
       for (i = 1; i < dn; i++) for (k = i + 1; k <= dn; k++)
