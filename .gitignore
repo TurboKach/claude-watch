@@ -5,3 +5,7 @@
 # Sampled data lives in ~/.claude-watch, never in the repo — this is a guard
 # in case CLAUDE_WATCH_HOME is ever pointed here during testing.
 data/
+# Agent tools create worktrees at .claude/worktrees/agent-*, so an unguarded
+# `git add -A` during an agent run would commit a whole nested checkout — .git
+# file and all — into this repo. Nothing here is tracked, so this only ignores.
+.claude/
