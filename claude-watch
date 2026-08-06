@@ -679,9 +679,19 @@ kill_tree() {
   #     launchd and left the tree, so it would never be re-enumerated and would
   #     stay SUSPENDED for ever while we reported success
   # CONT before KILL so nothing is left stopped, even on the failure path.
-  local final
-  final=$(printf '%s\n' $(live_descendants "$root") $pids $stopped | sort -u)
-  for pid in $final; do remember_id "$idmap" "$pid"; done
+  # Enumerate afresh ONLY while the root still is what we verified. If it exited
+  # during the grace period and its pid was recycled, live_descendants would
+  # return the replacement's tree, and anchoring those children here is what
+  # would authorise SIGKILL against them. Falling back to the already-anchored
+  # sets loses nothing: they are the processes we actually decided to reap.
+  local final fresh=""
+  same_process "$idmap" "$root" && fresh=$(live_descendants "$root")
+  final=$(printf '%s\n' $fresh $pids $stopped | sort -u)
+  for pid in $final; do
+    has_id "$idmap" "$pid" && continue
+    is_descendant_of "$pid" "$root" || continue
+    remember_id "$idmap" "$pid"
+  done
   for pid in $final; do
     kill -0 "$pid" 2>/dev/null || continue
     # Identity, not liveness. The grace period is long enough for an exited pid
@@ -962,7 +972,7 @@ scan_worktrees() {
 # remove` refuses on local modifications but not on a live cwd, so the liveness
 # half is ours to repeat — the same discipline the orphan killer applies to pids.
 still_removable() {
-  local path=$1 ct locked
+  local path=$1 days=${2:-7} ct locked age_days now
   [ -d "$path" ] || return 0                        # already gone; prune handles it
   [ "$(git -C "$path" status --porcelain 2>/dev/null | grep -c . || true)" -eq 0 ] || return 1
   if git -C "$path" rev-parse --abbrev-ref '@{u}' >/dev/null 2>&1; then
@@ -971,7 +981,15 @@ still_removable() {
     return 1                                        # no upstream: nothing published
   fi
   ct=$(git -C "$path" log -1 --format=%ct 2>/dev/null || printf '0')
-  [ $(( $(date +%s) - ${ct:-0} )) -ge 86400 ] || return 1
+  now=$(date +%s)
+  # Two different thresholds, both of which the listing applied:
+  #   24h  — liveness: a fresh commit means something is working here
+  #   days — staleness: the age the user actually asked for. A worktree can be
+  #          reset onto a newer-but-still-old commit while the prompt is open,
+  #          which the same scan would now call RECENT rather than STALE.
+  [ $(( now - ${ct:-0} )) -ge 86400 ] || return 1
+  age_days=$(( (now - ${ct:-0}) / 86400 ))
+  [ "$age_days" -ge "$days" ] || return 1
   # Liveness is re-sampled here, not read from the stale snapshot: a process can
   # move into the worktree while the confirmation prompt is open.
   init_live_cwds
@@ -1174,7 +1192,7 @@ worktrees() {
     # window. git refuses on local modifications but not on a live cwd, so the
     # liveness half of the check is ours to repeat — the same discipline the
     # orphan killer applies to pids.
-    if ! still_removable "$path"; then
+    if ! still_removable "$path" "$days"; then
       printf '    %s✗ changed since it was listed — skipping%s\n' "$C_RED" "$C_RST"
       rmfail=1
       continue
