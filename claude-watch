@@ -1364,6 +1364,28 @@ doctor() {
   local nsamp; nsamp=$(pgrep -f 'tools/sample.sh' 2>/dev/null | wc -l | tr -d ' ')
   [ "$nsamp" -le 1 ]; chk $? "no sampler pileup (${nsamp} in flight; stateless by design)"
 
+  [ -x "$REPO_DIR/tools/disk-scan.sh" ]; chk $? "disk scanner is executable"
+
+  # The disk cache and the lock that guards it are one check: a lock left behind
+  # by a killed scan makes every later run refuse and serve the stale cache, and
+  # that has no other symptom.
+  local dcache="${CLAUDE_WATCH_DISK_CACHE:-$STATE/disk.tsv}" dlock="$STATE/disk-scan.lock"
+  local dmsg dok=1 dage dpid
+  if [ -f "$dcache" ] && [ -w "$dcache" ]; then
+    dage=$(( ( $(date +%s) - $(stat -f %m "$dcache") ) / 3600 ))
+    dmsg="disk cache present and writable (age ${dage}h)"
+    dok=0
+    if [ -d "$dlock" ]; then
+      dpid=$(cat "$dlock/pid" 2>/dev/null)
+      if [ -z "$dpid" ] || ! kill -0 "$dpid" 2>/dev/null; then
+        dmsg="$dmsg — orphaned scan lock, remove $dlock"; dok=1
+      fi
+    fi
+  else
+    dmsg="disk cache present and writable ($dcache missing — run: claude-watch disk --refresh)"
+  fi
+  [ "$dok" = 0 ]; chk $? "$dmsg"
+
   grep -q 'claude-watch hook' "$HOME/.zshrc" 2>/dev/null
   chk $? "new-day hook installed in .zshrc"
 
