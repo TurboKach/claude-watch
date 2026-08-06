@@ -46,6 +46,8 @@ Only `<repo>/.claude/worktrees/*` and `~/conductor/workspaces/*` are considered;
 - `ACTIVE` — locked, committed to within 24h, or a live session's cwd is inside it. **In use. Never suggest removing these.**
 - `UNSAFE` — has uncommitted or unpushed work. Worth telling the user about, but it is not junk.
 
+`unpushed` counts commits reachable from `HEAD` but from no remote-tracking ref — `unpushed_basis: "local-remote-refs"` says so on the record. It does not require a tracking branch (agent tools rarely configure one), and it does **not** fetch: a commit pushed from another machine still counts as unpushed until this clone learns of it. That direction is deliberate — it errs toward calling a worktree unsafe.
+
 ## Never destroy anything from this skill
 
 Do **not** pass `--kill`, `--remove`, or `--yes`. Report findings and tell the user to run `/claude-watch-reap`.

@@ -116,16 +116,15 @@ contract. It is read-only by construction — `--json` prints and returns before
 
 As of this session: **0 orphan processes, 0 worktrees offered for removal.**
 
-All four Conductor workspaces now classify **UNSAFE** — three of them for "no upstream", meaning
-nothing on that branch has ever been pushed. That is the tool being cautious, and it is worth
-discussing, because:
+All four Conductor workspaces classified **UNSAFE**, three of them for "no upstream" — and that was
+a bug, not caution. "No upstream" was being read as "nothing published", but Conductor (and
+`git worktree add -b`) simply never configure tracking, so a branch merged and pushed weeks earlier
+reported its entire history as unpushed. `unpushed` now counts commits reachable from `HEAD` but
+from no remote-tracking ref (`rev-list --count HEAD --not --remotes`), which needs no upstream. The
+same test guards `still_removable()`, so the listing and the pre-removal re-check cannot disagree.
 
-- `git worktree remove` **keeps the branch**, so removing those worktrees cannot lose commits
-- but the guard says "unpushed work" and no-upstream is the strongest possible form of that
-- so ~111M sits behind a per-item `s` confirmation rather than the bulk set
-
-Whether that is right is a judgement call, not a settled one. Same for the 24h liveness window
-(anything committed to today is untouchable) and for `--yes` taking everything.
+Judgement calls that remain open: the 24h liveness window (anything committed to today is
+untouchable) and `--yes` taking everything.
 
 Two things changed on the machine during the build session, both of which should have been asked
 about first: the 4-day-old `node --test` orphan was killed, and
@@ -144,9 +143,10 @@ This is §7h in HANDOFF.md and is the obvious next feature.
 
 Smaller, all in HANDOFF.md §7:
 
-- **7a** — the reaping paths have **no fixture tests**. `tests/smoke.sh` checks that commands work,
-  not that the arithmetic is right; it would not have caught the `lastep` bug found this session.
-  The subtree walk, pid re-verification and worktree classification are all manual-evidence-only.
+- **7a** — mostly closed. `tests/fixture-report.sh` pins the report arithmetic (it catches the
+  `lastep` bug from §4.16 and five others by mutation) and `tests/fixture-worktree-unpushed.sh`
+  pins worktree classification; `tests/smoke.sh` runs every `tests/fixture-*.sh` by glob. Still
+  manual-evidence-only: `tools/sample.sh` and the orphan subtree walk / pid re-verification.
 - **7b** — `claude-top` says `253%`, `claude-watch` says `2.5×`. Same quantity, two notations.
 - **7c** — GPU / Neural Engine power is the known blind spot, and heat was the original complaint.
 - **7d** — retention only runs from the shell hook, so a day with no new shell never gets pruned.

@@ -180,6 +180,8 @@ claude-watch status --json
 
 Worktree records carry an explicit `removable` boolean alongside `status` and `reason`, so an agent never has to infer eligibility from the status string.
 
+`unpushed` is the number of commits reachable from `HEAD` but from no remote-tracking ref, which the top-level `"unpushed_basis":"local-remote-refs"` states outright. It deliberately does not depend on a configured upstream — agent tools create branches without tracking config, and asking `@{u}` reported their entire history as unpublished — and it does not fetch, so a commit pushed from another machine keeps counting until this clone learns of it. Erring in that direction only ever makes a worktree look *less* removable.
+
 ### Why a skill and not an MCP server
 
 An MCP server is a resident process. This tool's defining constraint is that it never leaves one running — and MCP servers show up *in its own reports*, at 50–100M each. A skill costs nothing at rest: only the name and description sit in context, and the body loads when it's used.

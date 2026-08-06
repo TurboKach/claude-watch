@@ -123,7 +123,18 @@ Two invariants worth protecting:
     itself still alive. `gone by end of day` could essentially never fire. Fixed by taking the last
     sample epoch (`eps[sysn]`), since sys rows are written every sample.
 
-17. **`pgrep -f codex` is useless on macOS.** The path `/var/run/com.apple.security.cryptexd/codex.system/...` appears in the inherited environment of nearly every process, so the string "codex" in argv matches almost everything. Any future Codex detection needs a different key.
+17. **"Has an upstream" is not "has been published".** Conductor and `git worktree add -b` create
+    branches with no tracking configuration at all, so `git rev-parse @{u}` fails for essentially
+    every agent worktree. Treating that as "nothing published" reported the branch's ENTIRE history
+    as unpushed and pinned the worktree UNSAFE for ever — work merged and pushed weeks earlier read
+    as never published. Ask the commits instead: `git rev-list --count HEAD --not --remotes`. It
+    needs no upstream and still counts genuinely unpushed work. It reads local refs only (no fetch),
+    so a commit pushed from another machine keeps counting until this clone learns of it — which
+    errs toward UNSAFE, the safe direction. **`scan_worktrees()` and `still_removable()` must use the
+    byte-identical test**; when they drifted, every freshly-STALE worktree was refused at removal
+    time with "changed since it was listed". Covered by `tests/fixture-worktree-unpushed.sh`.
+
+18. **`pgrep -f codex` is useless on macOS.** The path `/var/run/com.apple.security.cryptexd/codex.system/...` appears in the inherited environment of nearly every process, so the string "codex" in argv matches almost everything. Any future Codex detection needs a different key.
 
 ---
 
@@ -161,17 +172,32 @@ Renders are event-driven, not periodic. A 117-second blind window means any spik
 
 ## 7. What's NEXT — ranked
 
-### 7a. Automated tests — partly closed
-`tests/smoke.sh` now covers syntax, exit codes, `--json` validity, argument rejection, the
-no-tty refusal on both destructive paths, skill frontmatter, and one sampler pass. It is read-only
-and destroys nothing. Verified to fail correctly, not just pass: reintroducing the broken
-`when_to_use` frontmatter turns it red.
+### 7a. Automated tests — report aggregation now covered
+`tests/smoke.sh` covers syntax, exit codes, `--json` validity, argument rejection, the no-tty
+refusal on both destructive paths, skill frontmatter, and one sampler pass. It is read-only and
+destroys nothing outside a fixture's own `mktemp` sandbox. It also runs every `tests/fixture-*.sh`
+by glob, so a new fixture file needs no wiring.
 
-**Still missing, and still the highest-value target: fixture-based report aggregation.** Feed a
-`.tsv` with known values and assert the digest's peak/avg/total/seen figures. That is pure
-input→output, needs no live processes, and is exactly where three bugs were found by eye — plus a
-fourth since (the `lastep` bug in §4.16). The smoke suite would not have caught any of them.
-`tools/sample.sh` is harder (needs a real `ps`) but its awk could take a fixture snapshot on stdin.
+**`tests/fixture-report.sh` closes the aggregation gap.** Hand-written TSV day-files through a temp
+`CLAUDE_WATCH_HOME`, asserting exact `report --json` values (each validated through
+`python3 -m json.tool` first): peak/avg/total/`seen_pct`/`observed_seconds` on 100 known samples;
+the same-name fold, which must happen before aggregating or `seen_pct` reads 300%; RSS reported as
+the largest single process with an instance count, never summed (§4.3, §9); the derived sampling
+interval (median delta, gaps >600s dropped) and a sleep gap excluded from `observed_seconds`; the
+`lastep` / `still_alive` logic from §4.16; and three degenerate inputs (empty file, no `sys` row,
+a single sample) that must not divide by zero, emit `nan`, or produce invalid JSON. Because these
+are also the regression harness for any future rewrite of the aggregation, they pin values rather
+than exit codes.
+
+Verified to fail, not merely pass — six bugs reintroduced one at a time, each caught by exactly the
+assertion written for it: unfolded same-name counting (`seen_pct` 300), summed RSS (6G not 3G),
+`lastep` from orphan rows (a dead orphan reports itself alive), an assumed 10s interval,
+wall-clock `observed_seconds`, and dropping the `sysn == 0` guard (division by zero).
+
+`tests/fixture-worktree-unpushed.sh` covers worktree classification the same way; see §4.17.
+
+Still uncovered: `tools/sample.sh` (needs a real `ps`, though its awk could take a fixture snapshot
+on stdin) and the orphan subtree kill / pid re-verification, which remain manual-evidence-only.
 
 ### 7b. Unit inconsistency between the two tools
 `claude-top` shows `253%` (top(1) convention); `claude-watch` shows `2.5×` (cores). Same quantity, two notations, one repo. Pick one — cores is friendlier, percent matches `top`. Requires touching `claude-top`'s columns and README.
