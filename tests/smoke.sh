@@ -183,6 +183,41 @@ else
   skp "skill frontmatter (no python3 yaml)"
 fi
 
+echo "sampler pileup detection"
+# The old check was `pgrep -f 'tools/sample.sh'`, which matched any process
+# merely MENTIONING the path. A code-review subprocess quoting `sample.sh:190`
+# was enough to report a pileup that did not exist, and it healed on its own
+# when that process exited — so the failure was unreproducible by the person
+# who saw it. This decoy is exactly that shape and must not be counted.
+#
+# This asserts doctor's real output rather than re-implementing its count here,
+# because a copy of the matching rule in the test is a copy that drifts — and
+# the rule is the entire thing under test.
+# The trailing `:` matters: with `sleep 5` as the only command, bash execs it
+# and replaces its own argv, so the decoy string vanishes from ps and the test
+# silently skips. A second command forces bash to stay resident.
+bash -c 'sleep 5; :' "reviewing tools/sample.sh:190 in this worktree" &
+decoy=$!
+sleep 0.3
+# Both results are captured before being tested. Under `set -o pipefail`,
+# `ps | grep -q` closes the pipe the moment grep matches, ps dies of SIGPIPE and
+# the PIPELINE reports 141 — so the success case reads as a failure and this
+# assertion silently skips itself.
+decoy_line=$(ps -Ao args= 2>/dev/null | grep 'reviewing tools/sample\.sh:190')
+pileup_line=$("$CW" doctor 2>/dev/null | grep 'sampler pileup')
+if [ -z "$decoy_line" ]; then
+  skp "sampler pileup ignores a decoy (decoy did not start)"
+else
+  case "$pileup_line" in
+    *"no sampler pileup (0 in flight"*|*"no sampler pileup (1 in flight"*)
+      ok "sampler pileup ignores a process that only mentions tools/sample.sh" ;;
+    *)
+      bad "sampler pileup ignores a process that only mentions tools/sample.sh"
+      printf '      %s\n' "$pileup_line" ;;
+  esac
+fi
+kill "$decoy" 2>/dev/null; wait "$decoy" 2>/dev/null
+
 echo "sampler"
 tmp=$(mktemp -d) || exit 1
 if CLAUDE_WATCH_HOME="$tmp" "$REPO/tools/sample.sh" 2>/dev/null; then

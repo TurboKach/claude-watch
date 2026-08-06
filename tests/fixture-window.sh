@@ -235,6 +235,11 @@ advise_disk() {
   printf 'F\tdisk\tdisk.c.big\tcritical\t0.9\t900\tkb\t50\tCLAUDE_WATCH_DISK_GROUP_WARN_PCT\t900\tconfirmed\thead-big\tdetail\t\n'
 }
 STUB
+# The all-clear row, exactly as §3b writes it. The `""` in the spec is notation
+# for an EMPTY FIELD, not two literal quote bytes — the summary beside it is
+# quoted the same way and plainly is not literally quoted. All seven fields are
+# present; reasons_csv and remedy are empty. Every domain must degrade to this
+# shape, so a human must never see `""` and the JSON must never carry "\"\"".
 cat > "$STUBDIR/tools/advise-leaks.sh" <<'STUB'
 advise_leaks() {
   printf 'S\tleaks\tok\tcomplete\t\tno leaked processes, no removable worktrees\t\n'
@@ -262,6 +267,28 @@ expect "primary.severity_rank is published"  "$(jq_ "d['primary']['severity_rank
 expect "primary.headline carries the fact, not a bare domain name" \
        "$(jq_ "d['primary']['headline']")" "CRITICAL disk — head-big"
 expect "an ok domain with no findings stays ok" "$(jq_ "d['domains'][1]['severity']")" ok
+# The all-clear shape: empty fields are empty, not two literal quote bytes.
+expect "all-clear: empty reasons_csv becomes []"  "$(jq_ "d['domains'][1]['measurement_reasons']")" "[]"
+expect "all-clear: empty remedy becomes null"     "$(jq_ "d['domains'][1]['remedy']")" None
+expect "all-clear: partial_reason null when complete" "$(jq_ "d['domains'][1]['partial_reason']")" None
+expect "all-clear: the summary is the text, unquoted" \
+       "$(jq_ "d['domains'][1]['summary']")" "no leaked processes, no removable worktrees"
+if grep -q '\\"\\"' "$J"; then bad "all-clear: no literal \"\" in the JSON"
+else ok "all-clear: no literal \"\" in the JSON"; fi
+ALLCLEAR=$(CLAUDE_WATCH_HOME="$H1" CLAUDE_WATCH_DISK_CACHE="$H1/none.tsv" \
+  "$STUBDIR/claude-watch" advise 2>/dev/null)
+if printf '%s' "$ALLCLEAR" | grep -qF '""'; then
+  bad "all-clear: no literal \"\" in the human output"
+  printf '%s\n' "$ALLCLEAR" | grep -F '""' | sed 's/^/        /'
+else
+  ok "all-clear: no literal \"\" in the human output"
+fi
+if printf '%s' "$ALLCLEAR" | grep -qF 'OK leaks — no leaked processes, no removable worktrees'; then
+  ok "all-clear: an ok domain collapses to one line"
+else
+  bad "all-clear: an ok domain collapses to one line"
+  printf '%s\n' "$ALLCLEAR" | sed 's/^/        /'
+fi
 
 # unknown (1) outranks ok (0): an all-ok-but-one-unknown run reports unknown.
 cat > "$STUBDIR/tools/advise-disk.sh" <<'STUB'

@@ -333,7 +333,7 @@ function pfind(d, k, full,   act) {
   printf "      %s\n", disp(fhead[d, k])
   if (fdet[d, k] != "") printf "      %s%s%s\n", C_DIM, disp(fdet[d, k]), C_RST
   if (ftname[d, k] != "")
-    printf "      %s%s at %s — %s · %s %s of this domain%s\n", C_DIM,
+    printf "      %s%s at %s — %s · is %s, %s of this domain%s\n", C_DIM,
            (fsev[d, k] == "critical" ? "critical" : fsev[d, k]),
            valfmt(fthr[d, k], funit[d, k]), ftname[d, k],
            valfmt(fval[d, k], funit[d, k]), sprintf("%.1f%%", fshare[d, k] * 100), C_RST

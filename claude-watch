@@ -1384,7 +1384,22 @@ doctor() {
   # One sampler may legitimately be in flight when this runs (a sample takes
   # ~0.1s, and RunAtLoad fires one the instant the job loads), so only a pileup
   # is a fault — that would mean samples are outlasting the interval.
-  local nsamp; nsamp=$(pgrep -f 'tools/sample.sh' 2>/dev/null | wc -l | tr -d ' ')
+  #
+  # `pgrep -f 'tools/sample.sh'` was wrong: -f matches the WHOLE command line,
+  # so any process that merely mentions the path counted — an editor, a grep, or
+  # a code-review subprocess whose prompt quotes `sample.sh:190`. That reported a
+  # pileup nobody had, and it went green again when the unrelated process exited,
+  # which made this check (and smoke.sh) nondeterministic during any multi-process
+  # run. Count only processes that are actually EXECUTING the script: the path is
+  # argv[0] (shebang exec) or argv[1] under a shell (the launchd plist's
+  # `/bin/bash <repo>/tools/sample.sh`). A mention anywhere else is not a sampler.
+  local nsamp
+  nsamp=$(ps -Ao args= 2>/dev/null | LC_ALL=C awk '
+    {
+      if ($1 ~ /\/tools\/sample\.sh$/) { n++; next }
+      if ($1 ~ /(^|\/)(ba|da|k|z)?sh$/ && $2 ~ /\/tools\/sample\.sh$/) n++
+    }
+    END { print n + 0 }')
   [ "$nsamp" -le 1 ]; chk $? "no sampler pileup (${nsamp} in flight; stateless by design)"
 
   grep -q 'claude-watch hook' "$HOME/.zshrc" 2>/dev/null
