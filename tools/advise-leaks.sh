@@ -3,14 +3,14 @@
 #
 # Sourced, never executed: it defines two functions and returns.
 #
-#   leaks_findings <orphans_tsv> <worktrees_tsv>   PURE — rows from measured values
-#   advise_leaks                                    impure — gathers, then calls it
+#   leaks_findings <orphan_values> <worktree_values>  PURE — rows from values
+#   advise_leaks                                      impure — gathers, calls it
 #
 # The split is the whole point (§3b). `advise_leaks` calls `scan_orphans` and
 # `scan_worktrees`, which live in the parent `claude-watch` script, so the only
-# way to test the thresholds without the parent is for the classification half
-# to take its input as data. tests/fixture-leaks.sh drives `leaks_findings`
-# against captured scan output and never runs a live scan.
+# way to test the thresholds without the parent is for the severity half to take
+# its input as values. It reads no file and runs no scan: severity is a pure
+# function of (value, threshold), in code and not only in the plan.
 #
 # This analyzer re-implements NO classification (§3d). Which trees are orphans
 # and which worktrees are removable is decided by the parent's scanners; here we
@@ -40,7 +40,10 @@ leaks_knob() {   # <env var name> <default>
     printf 'claude-watch advise: %s needs a non-negative integer (got "%s")\n' "$name" "$v" >&2
     exit 2
   fi
-  printf '%s' "$v"
+  # is_uint accepts "08", and bash arithmetic then reads it as invalid octal and
+  # kills the function with status 1 instead of the specified 2. Normalise to
+  # base 10 here so every threshold multiplication downstream is safe.
+  printf '%s' "$((10#$v))"
 }
 
 # ------------------------------------------------------------------ helpers --
@@ -92,14 +95,26 @@ leaks_rank() {
   case ${1-} in critical) printf 4 ;; warn) printf 3 ;; info) printf 2 ;; unknown) printf 1 ;; *) printf 0 ;; esac
 }
 
-# ------------------------------------------------------------ aggregation --
-# Only T rows are read. P rows carry raw argv, which may contain tabs even
-# though the parent cleans it, and nothing here needs them: nproc and subtree
-# RSS are already on the T row. Reading P fields would be the way a tab in an
-# argv silently becomes a number in a total.
-leaks_agg_orphans() {   # <file> -> ntrees \t total_rss_kb \t max_age_s \t top_rss_kb \t top_age_s \t top_pid \t top_name
+# --------------------------------------------------- aggregation (impure) --
+# These read a captured scan and reduce it to the value line `leaks_findings`
+# consumes. They are the only part of this file that touches the filesystem.
+#
+# **Field position cannot be trusted until the row has been counted.** A tab in
+# a path or an argv splits one row into more fields than the shape has, so `$2`
+# is then a prefix of the real path — and printing a reap command for
+# `/Users/safe` when the actual directory is `/Users/safe<TAB>evil` points the
+# user at a real, different, innocent-looking directory. A newline is worse: it
+# injects a whole synthetic row. So a row whose field count is not exactly the
+# §3d shape is UNREPRESENTABLE: it is excluded from every total, counted, and
+# reported as needing manual handling. Never guessed at.
+
+# T rows only. P rows carry raw argv, which may legally contain tabs, and
+# nothing here needs them: nproc and subtree RSS are already on the T row.
+# Reading a P field would be how a tab in an argv becomes a number in a total.
+leaks_agg_orphans() {   # <file> -> n \t total_rss_kb \t max_age_s \t top_rss_kb \t top_age_s \t top_pid \t unrep \t top_name
   LC_ALL=C awk -F'\t' '
     BEGIN { OFS = "\t" }
+    $1 == "T" && NF != 7 { unrep++; next }
     $1 == "T" {
       n++
       rss = $5 + 0; age = $4 + 0
@@ -107,17 +122,24 @@ leaks_agg_orphans() {   # <file> -> ntrees \t total_rss_kb \t max_age_s \t top_r
       if (age > maxage) maxage = age
       if (rss > toprss || n == 1) { toprss = rss; topage = age; toppid = $2; topname = $3 }
     }
-    END { print n + 0, total + 0, maxage + 0, toprss + 0, topage + 0, toppid "", topname "" }
+    # Every field but the last is numeric and non-empty on purpose: tab is an
+    # IFS *whitespace* character, so the `read` on the other side collapses a
+    # run of tabs into one delimiter, and one empty interior field would shift
+    # every value after it by one. Only the last field may be empty.
+    END { print n + 0, total + 0, maxage + 0, toprss + 0, topage + 0, toppid + 0, unrep + 0, topname "" }
   ' "$1"
 }
 
 # Removable is the parent's own definition (claude-watch:1120) — STALE or
 # PRUNABLE — consumed as-is, never re-derived. ACTIVE and UNSAFE never appear in
-# a reclaim total, so this can never point at a worktree holding unpublished
-# work or a live agent.
-leaks_agg_worktrees() {   # <file> -> count \t reclaim_kb \t max_age_days \t top_kb \t top_path
+# a reclaim total, so no finding here can point at a live agent or at
+# unpublished work.
+leaks_agg_worktrees() {   # <file> -> n \t reclaim_kb \t max_age_days \t top_kb \t unrep \t top_path
   LC_ALL=C awk -F'\t' '
     BEGIN { OFS = "\t" }
+    # A short row is as untrustworthy as a long one: a newline inside a path
+    # arrives as two rows, and the first of them still starts with STALE.
+    NF != 9 { unrep++; next }
     $1 == "STALE" || $1 == "PRUNABLE" {
       n++
       kb = $8 + 0; age = $5 + 0
@@ -125,18 +147,28 @@ leaks_agg_worktrees() {   # <file> -> count \t reclaim_kb \t max_age_days \t top
       if (age > maxage) maxage = age
       if (kb > topkb || n == 1) { topkb = kb; toppath = $2 }
     }
-    END { print n + 0, total + 0, maxage + 0, topkb + 0, toppath "" }
+    # Numeric and non-empty except the last field — see leaks_agg_orphans.
+    END { print n + 0, total + 0, maxage + 0, topkb + 0, unrep + 0, toppath "" }
   ' "$1"
 }
 
 # ------------------------------------------------------------------- pure --
-# leaks_findings <orphans_tsv|""> <worktrees_tsv|"">
+# leaks_findings <orphan_values|""> <worktree_values|"">
 #
-# An empty argument means that scan could not be run — which is NOT the same as
-# an empty file, and the difference is the one this whole tool exists to
+# Takes ALREADY-MEASURED VALUES, never a path: the whole point of §3b's split is
+# that severity is a pure function of (value, threshold), so this function
+# touches no file, runs no scan and its output depends only on its arguments and
+# the threshold/denominator environment. The arguments are the value lines
+# leaks_agg_orphans / leaks_agg_worktrees produce:
+#
+#   orphans   n \t total_rss_kb \t max_age_s \t top_rss_kb \t top_age_s \t top_pid \t unrep \t top_name
+#   worktrees n \t reclaim_kb \t max_age_days \t top_kb \t unrep \t top_path
+#
+# An EMPTY argument means that scan could not be run — which is not the same as
+# an all-zero line, and the difference is the one this whole tool exists to
 # prevent: `ok` may never be emitted for a domain that was not measured.
 leaks_findings() {
-  local of=${1-} wf=${2-}
+  local ov=${1-} wv=${2-}
   # leaks_knob runs in a command substitution, so its `exit 2` only ends that
   # subshell — the exit has to be repeated here to actually stop the run. A knob
   # typo must never be rounded to a working threshold.
@@ -146,8 +178,8 @@ leaks_findings() {
   warn_gib=$(leaks_knob CLAUDE_WATCH_LEAKS_WORKTREE_WARN_GIB "$LEAKS_WORKTREE_WARN_GIB_DEFAULT") || exit 2
 
   local o_ok=0 w_ok=0
-  [ -n "$of" ] && [ -r "$of" ] && o_ok=1
-  [ -n "$wf" ] && [ -r "$wf" ] && w_ok=1
+  [ -n "$ov" ] && o_ok=1
+  [ -n "$wv" ] && w_ok=1
 
   # Neither scan ran: unknown, no findings, and a remedy sentence. The invariant
   # §3b asserts both ways: unavailable <=> unknown.
@@ -162,13 +194,19 @@ leaks_findings() {
   local tab; tab=$(printf '\t')
   local -a rows=()
   local worst=ok
+  # Reason flags, resolved into the §3e enum once at the bottom. Emitting `0`
+  # for a share whose denominator is absent is only half of §3a; recording that
+  # we did so is the other half, and a consumer reading share 0 as "negligible"
+  # rather than "not measured" is exactly the failure the field exists to stop.
+  local r_mem=0 r_vol=0 r_unrep=0 r_scan=0
+  [ "$o_ok" = 0 ] || [ "$w_ok" = 0 ] && r_scan=1
 
   # ------------------------------------------------------------- orphans --
-  local o_n=0 o_total=0 o_maxage=0 o_toprss=0 o_topage=0 o_toppid= o_topname=
+  local o_n=0 o_total=0 o_maxage=0 o_toprss=0 o_topage=0 o_toppid= o_unrep=0 o_topname=
   if [ "$o_ok" = 1 ]; then
-    IFS="$tab" read -r o_n o_total o_maxage o_toprss o_topage o_toppid o_topname \
-      < <(leaks_agg_orphans "$of")
+    IFS="$tab" read -r o_n o_total o_maxage o_toprss o_topage o_toppid o_unrep o_topname <<< "$ov"
   fi
+  [ "${o_unrep:-0}" -gt 0 ] && r_unrep=1
   if [ "${o_n:-0}" -gt 0 ]; then
     local sev=info tname=CLAUDE_WATCH_LEAKS_ORPHAN_WARN_MB
     local value=$o_total unit=kb threshold=$((warn_mb * 1024))
@@ -178,64 +216,87 @@ leaks_findings() {
       sev=warn; tname=CLAUDE_WATCH_LEAKS_ORPHAN_WARN_HOURS
       value=$o_maxage; unit=seconds; threshold=$((warn_hours * 3600))
     fi
+    # leaks_share prints a bare "0" only on the missing-denominator path; a real
+    # but tiny share prints "0.0000", so this string test says "not computed",
+    # not "computed and small".
+    local o_share; o_share=$(leaks_share "$o_total" "${CW_MEMSIZE_KB-}")
+    [ "$o_share" = 0 ] && [ "$o_total" -gt 0 ] && r_mem=1
     local name; name=$(leaks_clean "$o_topname")
-    rows+=("$(printf 'F\tleaks\tleaks.orphans\t%s\t%s\t%s\t%s\t%s\t%s\t0\tlikely\t%s\t%s\t%s' \
-      "$sev" \
-      "$(leaks_share "$o_total" "${CW_MEMSIZE_KB-}")" \
-      "$value" "$unit" "$threshold" "$tname" \
+    local o_extra=
+    [ "${o_unrep:-0}" -gt 0 ] && o_extra="; $o_unrep unparsable row$([ "$o_unrep" = 1 ] || printf 's') skipped"
+    rows+=("$(printf '%s\t%s\tleaks.orphans\tF\tleaks\tleaks.orphans\t%s\t%s\t%s\t%s\t%s\t%s\t0\tlikely\t%s\t%s\t%s' \
+      "$(leaks_rank "$sev")" "$o_share" \
+      "$sev" "$o_share" "$value" "$unit" "$threshold" "$tname" \
       "$(leaks_clean "$o_n leaked process tree$([ "$o_n" = 1 ] || printf 's'), $(leaks_hmem "$o_total") resident, oldest $(leaks_hdur "$o_maxage")")" \
-      "$(leaks_clean "largest: $name (pid ${o_toppid:-?}) $(leaks_hmem "$o_toprss"), $(leaks_hdur "$o_topage") old; warns at ${warn_hours}h or ${warn_mb}M")" \
+      "$(leaks_clean "largest: $name (pid ${o_toppid:-?}) $(leaks_hmem "$o_toprss"), $(leaks_hdur "$o_topage") old; warns at ${warn_hours}h or ${warn_mb}M$o_extra")" \
       'run /claude-watch-reap and choose orphans to review and kill them')")
     worst=$sev
   fi
 
   # ----------------------------------------------------------- worktrees --
-  local w_n=0 w_reclaim=0 w_maxage=0 w_topkb=0 w_toppath=
+  local w_n=0 w_reclaim=0 w_maxage=0 w_topkb=0 w_unrep=0 w_toppath=
   if [ "$w_ok" = 1 ]; then
-    IFS="$tab" read -r w_n w_reclaim w_maxage w_topkb w_toppath \
-      < <(leaks_agg_worktrees "$wf")
+    IFS="$tab" read -r w_n w_reclaim w_maxage w_topkb w_unrep w_toppath <<< "$wv"
   fi
-  if [ "${w_n:-0}" -gt 0 ]; then
+  [ "${w_unrep:-0}" -gt 0 ] && r_unrep=1
+  if [ "${w_n:-0}" -gt 0 ] || [ "${w_unrep:-0}" -gt 0 ]; then
     local wsev=info
     [ "$w_reclaim" -ge $((warn_gib * 1048576)) ] && wsev=warn
-    # The action names a path, so both §3b layers apply: quote always, and when
-    # the path leaves the safe charset print no command at all.
+    # The action names a path, so both §3b layers apply: quote always, and print
+    # no command at all when the path leaves the safe charset. A row that could
+    # not even be split gets no command either — its path is not knowable from
+    # here, and naming the prefix would point at a real, different directory.
     local action
-    if leaks_path_safe "$w_toppath"; then
+    if [ "${w_n:-0}" -eq 0 ]; then
+      action="$w_unrep worktree row$([ "$w_unrep" = 1 ] || printf 's') could not be parsed — path needs manual handling; run claude-watch worktrees to see them"
+    elif leaks_path_safe "$w_toppath"; then
       action="run /claude-watch-reap and choose worktrees to remove them (largest: $(leaks_qq "$w_toppath"))"
     else
       action="$(leaks_clean "$w_toppath") — path needs manual handling"
     fi
-    rows+=("$(printf 'F\tleaks\tleaks.worktrees\t%s\t%s\t%s\tkb\t%s\tCLAUDE_WATCH_LEAKS_WORKTREE_WARN_GIB\t%s\tconfirmed\t%s\t%s\t%s' \
-      "$wsev" \
-      "$(leaks_share "$w_reclaim" "${CW_VOLUME_TOTAL_KB-}")" \
-      "$w_reclaim" "$((warn_gib * 1048576))" "$w_reclaim" \
+    local w_share; w_share=$(leaks_share "$w_reclaim" "${CW_VOLUME_TOTAL_KB-}")
+    [ "$w_share" = 0 ] && [ "$w_reclaim" -gt 0 ] && r_vol=1
+    local w_extra=
+    [ "${w_unrep:-0}" -gt 0 ] && w_extra="; $w_unrep unparsable row$([ "$w_unrep" = 1 ] || printf 's') excluded from the total"
+    rows+=("$(printf '%s\t%s\tleaks.worktrees\tF\tleaks\tleaks.worktrees\t%s\t%s\t%s\tkb\t%s\tCLAUDE_WATCH_LEAKS_WORKTREE_WARN_GIB\t%s\tconfirmed\t%s\t%s\t%s' \
+      "$(leaks_rank "$wsev")" "$w_share" \
+      "$wsev" "$w_share" "$w_reclaim" "$((warn_gib * 1048576))" "$w_reclaim" \
       "$(leaks_clean "$w_n removable agent worktree$([ "$w_n" = 1 ] || printf 's'), $(leaks_hmem "$w_reclaim") reclaimable")" \
-      "$(leaks_clean "largest $(leaks_hmem "$w_topkb"), oldest ${w_maxage}d; warns at ${warn_gib} GiB reclaimable")" \
+      "$(leaks_clean "largest $(leaks_hmem "$w_topkb"), oldest ${w_maxage}d; warns at ${warn_gib} GiB reclaimable$w_extra")" \
       "$(leaks_clean "$action")")")
     [ "$(leaks_rank "$wsev")" -gt "$(leaks_rank "$worst")" ] && worst=$wsev
   fi
 
   # ---------------------------------------------------------- the S row --
   local state=complete reasons= remedy= summary=
-  if [ "$o_ok" = 0 ] || [ "$w_ok" = 0 ]; then
+  if [ "$((r_scan + r_mem + r_vol + r_unrep))" -gt 0 ]; then
     state=partial
-    reasons=scan_permission_denied
+    # Fixed order, §3e's own. A csv whose order depends on which flag was set
+    # first is a fixture that flakes.
+    [ "$r_mem"   = 1 ] && reasons="${reasons:+$reasons,}no_samples"
+    [ "$r_vol"   = 1 ] && reasons="${reasons:+$reasons,}cache_missing"
+    [ "$r_unrep" = 1 ] && reasons="${reasons:+$reasons,}cache_malformed"
+    [ "$r_scan"  = 1 ] && reasons="${reasons:+$reasons,}scan_permission_denied"
+    # One sentence, worst cause first.
     if [ "$o_ok" = 0 ]; then
       remedy='the orphan scan could not run; run claude-watch orphans directly to see the error'
-    else
+    elif [ "$w_ok" = 0 ]; then
       remedy='the worktree scan could not run; run claude-watch worktrees directly to see the error'
+    elif [ "$r_unrep" = 1 ]; then
+      remedy='some scan rows could not be parsed and were skipped; run claude-watch orphans and claude-watch worktrees to see them'
+    else
+      remedy='no volume total or memory size is recorded yet, so shares are reported as 0 rather than computed; severity still comes from the absolute thresholds'
     fi
   fi
 
   if [ "${#rows[@]}" -eq 0 ]; then
     # Measured (at least in part) and clean. Every domain degrades to this shape.
-    if [ "$state" = complete ]; then
-      summary='no leaked processes, no removable worktrees'
-    elif [ "$o_ok" = 0 ]; then
+    if [ "$o_ok" = 0 ]; then
       summary='no removable worktrees; leaked processes were not measured'
-    else
+    elif [ "$w_ok" = 0 ]; then
       summary='no leaked processes; worktrees were not measured'
+    else
+      summary='no leaked processes, no removable worktrees'
     fi
   else
     local parts=
@@ -244,39 +305,46 @@ leaks_findings() {
       [ -n "$parts" ] && parts="$parts; "
       parts="$parts$w_n removable worktree$([ "$w_n" = 1 ] || printf 's') ($(leaks_hmem "$w_reclaim") reclaimable)"
     fi
+    [ -z "$parts" ] && parts="nothing removable could be identified"
     summary=$parts
   fi
 
   printf 'S\tleaks\t%s\t%s\t%s\t%s\t%s\n' \
     "$worst" "$state" "$reasons" "$(leaks_clean "$summary")" "$(leaks_clean "$remedy")"
-  local r
-  for r in ${rows[@]+"${rows[@]}"}; do printf '%s\n' "$r"; done
+
+  # §4, one ordering rule: (severity_rank desc, share_of_domain desc, id asc).
+  # The third key is not optional — two findings at equal severity and equal
+  # share (trivially, two shares of 0) would otherwise order by whichever
+  # happened to be appended first, and every fixture that reads row 2 flakes.
+  # The three keys are carried as a prefix and cut off again.
+  [ "${#rows[@]}" -eq 0 ] && return 0
+  printf '%s\n' "${rows[@]}" \
+    | LC_ALL=C sort -t"$tab" -k1,1nr -k2,2nr -k3,3 \
+    | LC_ALL=C cut -f4-
 }
 
 # ----------------------------------------------------------------- impure --
-# Gathers the two live scans and hands them to the pure half. Both scanners live
-# in the parent script; when this file is sourced without it, the corresponding
-# input is marked unmeasured rather than silently reported clean.
+# Gathers the two live scans, reduces each to a value line and hands those to
+# the pure half. Both scanners live in the parent script; when this file is
+# sourced without it, that input is marked unmeasured rather than reported clean.
 advise_leaks() {
-  local o w om= wm=
+  local o w ov= wv=
   o=$(mktemp) || return 1
   w=$(mktemp) || { rm -f "$o"; return 1; }
 
   if declare -F scan_orphans >/dev/null 2>&1; then
-    scan_orphans "${ORPHAN_MIN_DEFAULT:-60}" > "$o" 2>/dev/null && om=$o
+    scan_orphans "${ORPHAN_MIN_DEFAULT:-60}" > "$o" 2>/dev/null && ov=$(leaks_agg_orphans "$o")
   fi
   if declare -F scan_worktrees >/dev/null 2>&1; then
     # One lsof sweep, exactly as the worktrees command does it: without it every
     # worktree falls to "cannot verify liveness" and reads UNSAFE.
     declare -F init_live_cwds >/dev/null 2>&1 && init_live_cwds
-    scan_worktrees 7 > "$w" 2>/dev/null && wm=$w
+    scan_worktrees 7 > "$w" 2>/dev/null && wv=$(leaks_agg_worktrees "$w")
   fi
 
-  leaks_findings "$om" "$wm"
-  local rc=$?
   rm -f "$o" "$w"
   # init_live_cwds leaves a snapshot behind; advise is read-only and long-lived
   # enough that leaving one temp file per run in /tmp is a real leak.
   [ -n "${CWD_SNAP:-}" ] && { rm -f "$CWD_SNAP"; CWD_SNAP=""; }
-  return $rc
+  leaks_findings "$ov" "$wv"
 }

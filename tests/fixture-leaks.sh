@@ -41,12 +41,19 @@ unset CLAUDE_WATCH_LEAKS_WORKTREE_WARN_GIB
 
 # --------------------------------------------------------------- utilities --
 # run <orphan-rows|-> <worktree-rows|->   ("-" means that scan could not run)
+#
+# Captured scan output goes through the aggregators and then the pure half,
+# which is exactly the path advise_leaks takes — minus the scans.
 run() {
-  local o=$1 w=$2 oa= wa=
-  if [ "$o" != "-" ]; then oa="$TMP/o.tsv"; printf '%s' "$o" > "$oa"; fi
-  if [ "$w" != "-" ]; then wa="$TMP/w.tsv"; printf '%s' "$w" > "$wa"; fi
-  NOW_OUT=$(leaks_findings "$oa" "$wa")
+  local o=$1 w=$2 ov= wv=
+  if [ "$o" != "-" ]; then printf '%s' "$o" > "$TMP/o.tsv"; ov=$(leaks_agg_orphans "$TMP/o.tsv"); fi
+  if [ "$w" != "-" ]; then printf '%s' "$w" > "$TMP/w.tsv"; wv=$(leaks_agg_worktrees "$TMP/w.tsv"); fi
+  NOW_OUT=$(leaks_findings "$ov" "$wv")
 }
+# runv <orphan-values|""> <worktree-values|"">  — the pure half on its own, no
+# file anywhere near it. If leaks_findings ever starts reading the filesystem
+# again these calls are what break.
+runv() { NOW_OUT=$(leaks_findings "$1" "$2"); }
 srow()  { printf '%s\n' "$NOW_OUT" | LC_ALL=C awk -F'\t' '$1 == "S"'; }
 frow()  { printf '%s\n' "$NOW_OUT" | CW_ID="$1" LC_ALL=C awk -F'\t' 'BEGIN { i = ENVIRON["CW_ID"] } $1 == "F" && $3 == i'; }
 field() { printf '%s\n' "$1" | CW_N="$2" LC_ALL=C awk -F'\t' 'BEGIN { n = ENVIRON["CW_N"] } { print $n }'; }
@@ -73,7 +80,9 @@ eq "  ... domain severity follows"   "$(field "$(srow)" 3)" warn
 # 10-minute, 5M tree — under both lines but it exists at all. info.
 run "$(t_row 222 vite 600 5120 1 0.1)" ""
 eq "10m 5M tree -> info"           "$(field "$(frow leaks.orphans)" 4)" info
-eq "  ... state stays complete"    "$(field "$(srow)" 4)" complete
+# partial, not complete: no CW_MEMSIZE_KB is set in this run, so the share was
+# suppressed rather than computed and the S row has to say so (§3a).
+eq "  ... state records the absent denominator" "$(field "$(srow)" 4)" partial
 
 # An old but tiny tree: the age line alone is enough. `or`, not `and` (§5).
 run "$(t_row 333 python3 90000 4096 1 0.0)" ""
@@ -83,20 +92,26 @@ eq "  ... in seconds"                "$(field "$(frow leaks.orphans)" 7)" second
 
 echo "leaks: boundaries, either side"
 
-run "$(t_row 1 node 600 204800)" ""          # exactly 200M
-eq "orphan 200M exactly -> warn"   "$(field "$(frow leaks.orphans)" 4)" warn
 run "$(t_row 1 node 600 204799)" ""          # one KiB under
 eq "orphan 200M minus 1K -> info"  "$(field "$(frow leaks.orphans)" 4)" info
+run "$(t_row 1 node 600 204800)" ""          # exactly 200M
+eq "orphan 200M exactly -> warn"   "$(field "$(frow leaks.orphans)" 4)" warn
+run "$(t_row 1 node 600 204801)" ""          # one KiB over
+eq "orphan 200M plus 1K -> warn"   "$(field "$(frow leaks.orphans)" 4)" warn
 
-run "$(t_row 1 node 86400 1024)" ""          # exactly 24h
-eq "orphan 24h exactly -> warn"    "$(field "$(frow leaks.orphans)" 4)" warn
 run "$(t_row 1 node 86399 1024)" ""          # one second under
 eq "orphan 24h minus 1s -> info"   "$(field "$(frow leaks.orphans)" 4)" info
+run "$(t_row 1 node 86400 1024)" ""          # exactly 24h
+eq "orphan 24h exactly -> warn"    "$(field "$(frow leaks.orphans)" 4)" warn
+run "$(t_row 1 node 86401 1024)" ""          # one second over
+eq "orphan 24h plus 1s -> warn"    "$(field "$(frow leaks.orphans)" 4)" warn
 
-run "" "$(w_row STALE /a/wt1 '' '' 1048576)"     # exactly 1 GiB
-eq "worktree 1GiB exactly -> warn" "$(field "$(frow leaks.worktrees)" 4)" warn
 run "" "$(w_row STALE /a/wt1 '' '' 1048575)"     # one KiB under
 eq "worktree 1GiB minus 1K -> info" "$(field "$(frow leaks.worktrees)" 4)" info
+run "" "$(w_row STALE /a/wt1 '' '' 1048576)"     # exactly 1 GiB
+eq "worktree 1GiB exactly -> warn" "$(field "$(frow leaks.worktrees)" 4)" warn
+run "" "$(w_row STALE /a/wt1 '' '' 1048577)"     # one KiB over
+eq "worktree 1GiB plus 1K -> warn" "$(field "$(frow leaks.worktrees)" 4)" warn
 
 # The knobs actually move the line they name. Assigned on their own line and
 # unset again, never as a `VAR=x run ...` prefix: bash keeps an assignment that
@@ -113,10 +128,59 @@ eq "WORKTREE_WARN_GIB=4 demotes 2GiB"  "$(field "$(frow leaks.worktrees)" 4)" in
 unset CLAUDE_WATCH_LEAKS_WORKTREE_WARN_GIB
 
 # is_uint discipline: a typoed knob is not rounded into a working threshold.
-for badval in 2.5 -1 abc; do
-  ( CLAUDE_WATCH_LEAKS_ORPHAN_WARN_MB="$badval" leaks_findings "$TMP/o.tsv" "$TMP/w.tsv" ) >/dev/null 2>&1
+for badval in 2.5 -1 abc ' ' 1e3; do
+  ( CLAUDE_WATCH_LEAKS_ORPHAN_WARN_MB="$badval" leaks_findings "1	0	0	0	0	1	0	node" "" ) >/dev/null 2>&1
   eq "knob \"$badval\" exits 2" "$?" 2
 done
+
+# A leading zero is a valid integer to is_uint and invalid octal to bash
+# arithmetic, so `08` used to kill the function with status 1 — a crash where
+# the spec asks for either a working threshold or exit 2. It works, in base 10.
+CLAUDE_WATCH_LEAKS_ORPHAN_WARN_HOURS=08
+run "$(t_row 1 node 32400 1024)" ""              # 9h, over an 8h line
+eq "knob 08 is read as 8, not octal"  "$(field "$(frow leaks.orphans)" 4)" warn
+eq "  ... and prints the base-10 threshold" "$(field "$(frow leaks.orphans)" 8)" 28800
+run "$(t_row 1 node 25200 1024)" ""              # 7h, under an 8h line
+eq "  ... 7h under an 08h line -> info" "$(field "$(frow leaks.orphans)" 4)" info
+unset CLAUDE_WATCH_LEAKS_ORPHAN_WARN_HOURS
+
+CLAUDE_WATCH_LEAKS_WORKTREE_WARN_GIB=01
+( leaks_findings "" "1	1048576	0	1048576	0	/a/wt" ) >/dev/null 2>&1
+eq "knob 01 does not crash the run" "$?" 0
+unset CLAUDE_WATCH_LEAKS_WORKTREE_WARN_GIB
+
+echo "leaks: ordering (§4)"
+
+# (severity_rank desc, share_of_domain desc, id asc). Emission order is orphans
+# then worktrees, so an info orphan beside a warn worktree is the case that
+# catches "we just print them in the order we built them".
+run "$(t_row 1 node 600 5120)" "$(w_row STALE /a/wt1 '' '' 2097152)"
+eq "warn worktree sorts above info orphan" \
+   "$(printf '%s\n' "$NOW_OUT" | LC_ALL=C awk -F'\t' '$1 == "F" { print $3 }' | head -n1)" leaks.worktrees
+eq "  ... both findings still emitted" "$(nfrows)" 2
+
+# Equal severity and equal share (both 0, no denominators): the third key
+# decides, and without it this row order is whatever the code happened to do.
+run "$(t_row 1 node 600 5120)" "$(w_row STALE /a/wt1 '' '' 4096)"
+eq "equal severity, equal share -> id ascending" \
+   "$(printf '%s\n' "$NOW_OUT" | LC_ALL=C awk -F'\t' '$1 == "F" { print $3 }' | tr '\n' ' ')" \
+   "leaks.orphans leaks.worktrees "
+
+# Equal severity, different share: the share key decides before the id key.
+CW_MEMSIZE_KB=1048576; CW_VOLUME_TOTAL_KB=104857600
+run "$(t_row 1 node 600 5120)" "$(w_row STALE /a/wt1 '' '' 4096)"
+eq "equal severity -> larger share first" \
+   "$(printf '%s\n' "$NOW_OUT" | LC_ALL=C awk -F'\t' '$1 == "F" { print $3 }' | head -n1)" leaks.orphans
+unset CW_MEMSIZE_KB CW_VOLUME_TOTAL_KB
+
+echo "leaks: the pure half is pure"
+
+# No file exists anywhere in these two calls. Same values in, same rows out.
+runv "2	307200	7200	307200	7200	11	0	node" ""
+eq "values straight into leaks_findings" "$(field "$(frow leaks.orphans)" 4)" warn
+A=$NOW_OUT
+runv "2	307200	7200	307200	7200	11	0	node" ""
+eq "  ... and it is deterministic" "$NOW_OUT" "$A"
 
 echo "leaks: what it consumes, and what it must not"
 
@@ -157,7 +221,7 @@ if [ -n "$(field "$S" 7)" ]; then ok "  ... carries a remedy"; else bad "  ... c
 run - "$(w_row STALE /a/wt1 '' '' 4096)"
 S=$(srow)
 eq "one scan missing -> partial"      "$(field "$S" 4)" partial
-eq "  ... with a reason"              "$(field "$S" 5)" scan_permission_denied
+eq "  ... with both reasons, in §3e order" "$(field "$S" 5)" "cache_missing,scan_permission_denied"
 # The invariant, asserted the other way round too: partial is measured, so it
 # may not claim unknown, and a measured half may still report its findings.
 if [ "$(field "$S" 3)" != unknown ]; then ok "  ... partial is never unknown"; else bad "  ... partial is never unknown"; fi
@@ -168,6 +232,26 @@ echo "leaks: shares and the missing denominator (§3a)"
 run "$(t_row 1 node 600 307200)" "$(w_row STALE /a/wt1 '' '' 1048576)"
 eq "orphan share with no CW_MEMSIZE_KB"      "$(field "$(frow leaks.orphans)" 5)" 0
 eq "worktree share with no CW_VOLUME_TOTAL_KB" "$(field "$(frow leaks.worktrees)" 5)" 0
+# Emitting 0 is half of §3a; saying so is the other half. A consumer that reads
+# share 0 on a `complete` domain reads "negligible", not "never measured".
+S=$(srow)
+eq "  ... and the domain says it is partial" "$(field "$S" 4)" partial
+eq "  ... naming both absent denominators"   "$(field "$S" 5)" "no_samples,cache_missing"
+if [ -n "$(field "$S" 7)" ]; then ok "  ... with a remedy"; else bad "  ... with a remedy"; fi
+eq "  ... severity still from the absolute line" "$(field "$S" 3)" warn
+
+# One denominator present, one absent: only the absent one is named.
+CW_MEMSIZE_KB=16777216
+run "$(t_row 1 node 600 307200)" "$(w_row STALE /a/wt1 '' '' 1048576)"
+eq "only the missing denominator is reported" "$(field "$(srow)" 5)" cache_missing
+unset CW_MEMSIZE_KB
+
+# Both present: nothing was suppressed, so the domain is complete again.
+CW_MEMSIZE_KB=16777216; CW_VOLUME_TOTAL_KB=442287516
+run "$(t_row 1 node 600 307200)" "$(w_row STALE /a/wt1 '' '' 1048576)"
+eq "both denominators -> complete"           "$(field "$(srow)" 4)" complete
+eq "  ... and no reasons"                    "$(field "$(srow)" 5)" ""
+unset CW_MEMSIZE_KB CW_VOLUME_TOTAL_KB
 CW_VOLUME_TOTAL_KB=0; CW_MEMSIZE_KB=0
 run "$(t_row 1 node 600 307200)" "$(w_row STALE /a/wt1 '' '' 1048576)"
 eq "zero denominator is not divided by"      "$(field "$(frow leaks.orphans)" 5)" 0
@@ -224,6 +308,52 @@ eq "tab in an argv: 14 fields out"        "$(nf "$F")" 14
 eq "  ... S row still 7 fields"           "$(nf "$(srow)")" 7
 eq "  ... P rows never enter the total"   "$(field "$F" 6)" 307200
 eq "  ... one tree, not four"             "$(printf '%s' "$F" | grep -c '1 leaked process tree,')" 1
+
+echo "leaks: unsplittable rows are never guessed at (§3d)"
+
+# THE defect this section exists for. `scan_worktrees` emits raw paths, so a tab
+# in a path splits one row into ten fields and $2 becomes a PREFIX of the real
+# path. Trusting field positions here prints a reap command naming
+# /Users/safe — a real, different, innocent-looking directory — for a worktree
+# that actually lives somewhere else. The field count is checked before any
+# field is read.
+run "" "$(w_row STALE "$(printf '/Users/safe\tevil')" '' '' 4096)"
+F=$(frow leaks.worktrees)
+eq "tab in a worktree path: the prefix is never named" \
+   "$(printf '%s' "$F" | grep -c '/Users/safe')" 0
+eq "  ... no command printed"        "$(field "$F" 14 | grep -c 'claude-watch-reap')" 0
+eq "  ... says it needs manual handling" "$(field "$F" 14 | grep -c 'path needs manual handling')" 1
+eq "  ... excluded from the reclaim total" "$(field "$F" 10)" 0
+eq "  ... domain is partial"         "$(field "$(srow)" 4)" partial
+eq "  ... reason recorded"           "$(field "$(srow)" 5)" cache_malformed
+
+# A newline in a path is worse: it arrives as two rows, neither of which has the
+# §3d shape. Both are counted and skipped. (A newline crafted to inject a whole
+# well-formed 9-field row is indistinguishable from a real one at this layer —
+# the scanner is where that is stopped — but the broken first half still makes
+# the domain say cache_malformed, so it can never pass silently.)
+run "" "$(w_row STALE "$(printf '/Users/safe\nevil')" '' '' 4096)"
+eq "newline in a worktree path: no command" \
+   "$(field "$(frow leaks.worktrees)" 14 | grep -c 'claude-watch-reap')" 0
+eq "  ... both halves counted unparsable" \
+   "$(field "$(frow leaks.worktrees)" 13 | grep -c '2 unparsable rows')" 1
+
+# A good row beside a bad one still gets its command, and the total says it is
+# short. Silently dropping the bad row would make the reclaim figure a lie.
+run "" "$(w_row STALE /a/good '' '' 4096
+          w_row STALE "$(printf '/a/b\tc')" '' '' 999999)"
+F=$(frow leaks.worktrees)
+eq "good row beside a bad one: command for the good one" \
+   "$(field "$F" 14 | grep -c "'/a/good'")" 1
+eq "  ... total excludes the bad row" "$(field "$F" 10)" 4096
+eq "  ... and says so"                "$(field "$F" 13 | grep -c '1 unparsable row excluded')" 1
+
+# Same gate on the orphan side: a T row is 7 fields, and a name carrying a tab
+# shifts every number after it.
+run "$(t_row 1 "$(printf 'node\tevil')" 600 307200)" ""
+eq "malformed T row is skipped, not mis-parsed" "$(nfrows)" 0
+eq "  ... and the domain is partial"            "$(field "$(srow)" 4)" partial
+eq "  ... rather than ok"                       "$(field "$(srow)" 3)" ok
 
 # A control byte inside a path, on the other hand, is NOT a separator: it
 # survives the split and reaches the emitted action intact unless it is scrubbed.
