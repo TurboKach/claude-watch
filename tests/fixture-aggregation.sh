@@ -164,7 +164,7 @@ F_T0=1769212800
   sysrow  $((F_T0 + 40))
 } > "$TMP/raw/$F_DATE.tsv"
 
-F_WANT='claude-watch: raw/2026-01-24.tsv has 1 out-of-order sample epochs — interval and coverage may be wrong; the raw file may be truncated or interleaved'
+F_WANT='claude-watch: raw/2026-01-24.tsv has 1 out-of-order sample epochs — the raw file is interleaved or truncated, so the sample count, coverage and every rate derived from them may be inflated. Compare a neighbouring day before trusting this one'
 
 echo "F. out-of-order epochs are reported on stderr, not silently re-ordered"
 if load_report "$F_DATE" F; then
@@ -193,9 +193,65 @@ grep -q 'out-of-order sample epochs' "$ERR" \
   && ok "F human path reports the disorder on stderr" \
   || bad "F human path reports the disorder on stderr"
 
-# ============================================ G. 60k rows in under 5 seconds ==
-# A week of 10s samples is ~60k sys rows. Two selection sorts over that took
-# minutes; the histogram walk is linear. Generated here, never committed.
+# ============ F2. a non-adjacent duplicate epoch is never silently miscounted ==
+# The one behaviour adjacency dedupe does not share with the old global set:
+# epochs 100, 110, 100, 110 are two distinct samples, but the second pair is not
+# adjacent to the first, so sysn reads 4 and observed_seconds is inflated with
+# it. That is acceptable ONLY because it cannot be silent — coming back to an
+# epoch you already left takes a strict decrease, which is precisely what
+# disorder counts. This case pins that the warning fires on exactly the shape
+# that inflates the count; the exhaustive check below pins that there is no
+# other shape.
+F2_DATE=2026-01-26
+F2_T0=1769299200
+{
+  sysrow $((F2_T0 + 100))
+  sysrow $((F2_T0 + 110))
+  sysrow $((F2_T0 + 100))
+  sysrow $((F2_T0 + 110))
+} > "$TMP/raw/$F2_DATE.tsv"
+
+echo "F2. a non-adjacent duplicate epoch inflates the count — and always says so"
+if load_report "$F2_DATE" F2; then
+  num "F2 samples counts the repeat" 'd["samples"]' 4
+  grep -q 'out-of-order sample epochs' "$ERR" \
+    && ok "F2 the inflating input trips the warning" \
+    || bad "F2 the inflating input trips the warning (silent miscount)"
+  grep -q 'may be inflated' "$ERR" \
+    && ok "F2 the warning names the inflation, not just the interval" \
+    || bad "F2 the warning names the inflation, not just the interval"
+fi
+
+# Detection completeness, by exhaustion rather than by argument: over every
+# ordering of up to 7 sys rows drawn from 4 epoch values, there is no input
+# where the adjacency count differs from the old global-dedupe count without
+# disorder also being non-zero. This is the property the whole design rests on,
+# so it is checked, not asserted in a comment.
+echo "F3. no input can inflate the sample count without tripping the warning"
+F3=$(python3 <<'PY'
+from itertools import product
+bad = 0
+for n in range(1, 8):
+    for seq in product(range(1, 5), repeat=n):
+        sysn = 0; prev = None; disorder = 0
+        for ep in seq:                      # the aggregation's adjacency rule
+            if ep != prev:
+                if prev is not None and ep < prev: disorder += 1
+                sysn += 1; prev = ep
+        if sysn != len(set(seq)) and disorder == 0: bad += 1
+print(bad)
+PY
+)
+[ "$F3" = 0 ] && ok "F3 zero silent-miscount orderings out of 21844" \
+              || bad "F3 zero silent-miscount orderings (found $F3)"
+
+# ==================================== G. 60k rows in well under the deadline ==
+# 20,000 samples — 55.6 hours at a 10s interval, so a bit over two days, not a
+# week (a week is 60,480 samples). 60,000 rows in total, which is the size that
+# matters: the two selection sorts were over rows, and took 82s on this input
+# against 0.2s for the histogram walk. A full week is 3x this and still linear;
+# what is pinned here is that the quadratic term is gone, not a week's runtime.
+# Generated here, never committed.
 G_DATE=2026-01-25
 G_T0=1769299200
 LC_ALL=C awk -v t0="$G_T0" 'BEGIN {
@@ -208,10 +264,12 @@ LC_ALL=C awk -v t0="$G_T0" 'BEGIN {
   }
 }' > "$TMP/raw/$G_DATE.tsv"
 
-echo "G. 60k rows (a week of 10s samples) aggregate in under 5 seconds"
-G_START=$(python3 -c 'import time; print(time.time())')
+echo "G. 60k rows (20,000 samples at 10s = 55.6h) aggregate in under 5 seconds"
+G_START=$(python3 -c 'import time; print(repr(time.time()))')
 CLAUDE_WATCH_HOME="$TMP" "$CW" report "$G_DATE" --json > "$JSON" 2>"$ERR"; rc=$?
-G_ELAPSED=$(python3 -c "import sys, time; print('%.2f' % (time.time() - float(sys.argv[1])))" "$G_START")
+# repr() round-trips exactly, so the comparison below is against the elapsed
+# time itself. Rounding to centiseconds first would let 5.004s pass as 5.00.
+G_ELAPSED=$(python3 -c "import sys, time; print(repr(time.time() - float(sys.argv[1])))" "$G_START")
 if [ "$rc" -ne 0 ]; then
   bad "G report --json exits 0 (got $rc)"
 else
@@ -220,10 +278,11 @@ else
   num "G interval_seconds" 'd["interval_seconds"]' 10
   num "G observed_seconds" 'd["observed_seconds"]' 200000
 fi
+G_SHOWN=$(python3 -c "import sys; print('%.2f' % float(sys.argv[1]))" "$G_ELAPSED")
 if python3 -c "import sys; raise SystemExit(0 if float(sys.argv[1]) < 5 else 1)" "$G_ELAPSED"; then
-  ok "G aggregated 60k rows in ${G_ELAPSED}s (< 5s)"
+  ok "G aggregated 60k rows in ${G_SHOWN}s (< 5s)"
 else
-  bad "G aggregated 60k rows in ${G_ELAPSED}s (wanted < 5s)"
+  bad "G aggregated 60k rows in ${G_SHOWN}s (wanted < 5s)"
 fi
 
 printf '\n%d passed, %d failed\n' "$pass" "$fail"

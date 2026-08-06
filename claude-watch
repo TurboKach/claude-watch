@@ -266,6 +266,14 @@ report() {
         # previous one is a new sample: adjacency dedupes without keeping every
         # epoch. The gap histogram and the running max replace the two arrays a
         # month window would otherwise fill with ~259k entries.
+        #
+        # Adjacency dedupes less than the old global set did, and what makes
+        # that safe is that the shortfall cannot be silent: an epoch can only
+        # recur non-adjacently by leaving its value and coming back, which
+        # takes a strict decrease at some transition, which is exactly what
+        # disorder counts. So every input that would inflate sysn also trips
+        # the warning below. (Verified exhaustively in fixture-aggregation.sh
+        # over all sample orderings up to length 7.)
         if (ep != prev_ep) {
           if (prev_ep != "") {
             if (ep < prev_ep) disorder++
@@ -344,10 +352,13 @@ report() {
 
       # Out-of-order epochs are an error, not a silent reinterpretation: the old
       # sort produced a plausible-looking answer from a file that is truncated or
-      # interleaved. Report on stderr and continue with the running-max result;
-      # --json stdout stays clean and the exit code stays 0.
+      # interleaved. The message names the whole consequence, not just the
+      # interval: an interleaved file also re-counts epochs the adjacency dedupe
+      # above cannot fold, so sysn and everything scaled by it read high. Report
+      # on stderr and continue with the running-max result; --json stdout stays
+      # clean and the exit code stays 0.
       if (disorder > 0)
-        printf("claude-watch: %s has %d out-of-order sample epochs — interval and coverage may be wrong; the raw file may be truncated or interleaved\n",
+        printf("claude-watch: %s has %d out-of-order sample epochs — the raw file is interleaved or truncated, so the sample count, coverage and every rate derived from them may be inflated. Compare a neighbouring day before trusting this one\n",
                ENVIRON["CW_SRC"], disorder) > "/dev/stderr"
 
       # Rankings are hoisted out of the print sections so the human and --json
