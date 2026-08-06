@@ -186,7 +186,11 @@ report() {
     fi
     return 0
   fi
-  printf '%s' "$data" | LC_ALL=C awk -F'\t' -v D="$d" -v HOME_DIR="$HOME" -v JSON="$json" \
+  # The aggregation names the file it read when it reports out-of-order epochs;
+  # the path travels via the environment, never -v, so arbitrary bytes in it
+  # cannot be read as an awk escape.
+  local src="raw/$d.tsv"; [ -f "$RAW/$d.tsv" ] || src="raw/$d.tsv.gz"
+  printf '%s' "$data" | CW_SRC="$src" LC_ALL=C awk -F'\t' -v D="$d" -v HOME_DIR="$HOME" -v JSON="$json" \
     -v C_HEAD="$C_HEAD" -v C_DIM="$C_DIM" -v C_KEY="$C_KEY" -v C_HOT="$C_HOT" \
     -v C_RED="$C_RED" -v C_OK="$C_OK" -v C_SEC="$C_SEC" -v C_RST="$C_RST" "$JESC_AWK"'
     function dur(s,   d, h, m) {
@@ -278,7 +282,52 @@ report() {
       # previous sample.
       if (ep != cur_ep) { flush(); cur_ep = ep }
       if (kind == "sys") {
-        if (!(ep in sysseen)) { sysseen[ep] = 1; sysn++; eps[sysn] = ep }
+        # An epoch is a plain integer of at most ten digits, as `date +%s`
+        # writes it. Anything else — empty, zero-padded, non-numeric, or longer
+        # — is a damaged row, and it has to be rejected HERE rather than
+        # tolerated, because awk holds numbers as doubles and compares
+        # numeric-looking fields numerically. "0100" and "100" are one epoch to
+        # `!=` but were two distinct keys to the old textual sysseen[], so
+        # tolerating them would drop a sample with nothing said.
+        #
+        # The ten-digit bound is what makes epoch comparison INJECTIVE, which
+        # everything below depends on: past 2^53 distinct integers stop being
+        # distinct doubles, so 9007199254740992 and ...93 compare equal and
+        # collapse into one sample (and never flush, since cur_ep does not
+        # change either). Ten digits caps an epoch at 9999999999 — 2286-11-20 —
+        # which is comfortably inside exact-integer range and outside any date
+        # this tool will see. Rejected rows are counted and reported below, and
+        # contribute to nothing.
+        #
+        # The bound is a length() test, not /[0-9]{1,10}/: macOS awk 20200816
+        # does not implement brace intervals and matches them as literal text,
+        # which would reject every real ten-digit epoch instead.
+        if ($1 !~ /^(0|[1-9][0-9]*)$/ || length($1) > 10) { badep++; next }
+        # Rows are append-only and time-ordered, so an epoch differing from the
+        # previous one is a new sample: adjacency dedupes without keeping every
+        # epoch. The gap histogram and the running max replace the two arrays a
+        # month window would otherwise fill with ~259k entries.
+        #
+        # Adjacency dedupes less than the old global set did. What makes that
+        # safe is that the shortfall cannot be silent: for canonical integer
+        # epochs, an epoch can only recur non-adjacently by leaving its value
+        # and coming back, which takes a strict decrease at some transition,
+        # which is exactly what disorder counts. So every input that inflates
+        # sysn also trips the disorder warning, and every input that could
+        # deflate it by spelling is rejected above and trips the other one.
+        # Nothing weaker is claimed: fixture-aggregation.sh F3 checks both
+        # halves against the real aggregation, not a model of it.
+        #
+        # have_prev, not prev_ep != "", marks the first row: "" is a field
+        # value a damaged file can contain, so it cannot also be a sentinel.
+        if (!have_prev || ep != prev_ep) {
+          if (have_prev) {
+            if (ep < prev_ep) disorder++
+            gap = ep - prev_ep
+            if (gap > 0 && gap < 600) { hist[gap]++; dn++ }
+          }
+          sysn++; prev_ep = ep; have_prev = 1; if (ep > lastep) lastep = ep
+        }
         if (cores > peakload) peakload = cores          # $4 is load average on sys rows
         if (minfree == 0 || $6 + 0 < minfree) minfree = $6 + 0
         if ($7 + 0 > maxswap) maxswap = $7 + 0
@@ -314,6 +363,15 @@ report() {
 
     END {
       flush()   # close the final sample
+
+      # Ahead of the sysn == 0 exit: a file whose every sys row was rejected
+      # leaves no samples at all, and that is the one case where staying quiet
+      # would read as "the sampler wrote nothing" instead of "the reader threw
+      # everything away".
+      if (badep > 0)
+        printf("claude-watch: %s has %d sys rows whose epoch is not a plain integer of at most ten digits — the sampler writes date +%%s, so an empty, padded, over-long or non-numeric epoch means the file is damaged. Those rows are excluded, so the sample count and coverage below are short by up to that many. Remove or repair the file to stop this\n",
+               ENVIRON["CW_SRC"], badep) > "/dev/stderr"
+
       if (sysn == 0) {
         if (JSON == "1") printf "{\"command\":\"report\",\"date\":\"%s\",\"samples\":0,\"sessions\":[],\"machine_cpu\":[],\"machine_mem\":[],\"orphans\":[]}\n", D
         else print "no system samples for " D
@@ -322,23 +380,41 @@ report() {
 
       # Derive the sampling interval from the data rather than assuming it, so
       # coverage stays honest if the interval was changed or launchd was paused.
-      for (i = 1; i < sysn; i++) for (k = i + 1; k <= sysn; k++)
-        if (eps[k] < eps[i]) { t = eps[i]; eps[i] = eps[k]; eps[k] = t }
+      #
+      # The epochs need no sort: rows are append-only and time-ordered, so the
+      # deltas are already collected in order above, and out-of-order input is
+      # an error to report (below) rather than something to silently re-order.
+      # hist[] counts each delta, so walking buckets 1..599 and stopping at the
+      # cumulative count `need` picks exactly the old dl[int(dn/2)+1] — the
+      # upper median of the ascending sort. Do not restore the sort: it was
+      # O(n^2) and made week and month windows unusable.
+      need = int(dn / 2) + 1
+      iv = 10                                   # fallback: dn == 0
+      c = 0
+      for (g = 1; g < 600; g++) {               # NUMERIC walk. `for (g in hist)` is
+        c += hist[g]                            # undefined-order in awk and gives a
+        if (c >= need) { iv = g; break }        # wrong cumulative every other run.
+      }
+      covered = sysn * iv
 
       # "Still alive" means "present in the final sample of the day", so the
-      # yardstick has to be the last SAMPLE. Measuring it against the last
-      # orphan row instead made the test vacuous: once an orphan is reaped, no
-      # further orphan rows are written, so the newest orphan row is always the
-      # one recording it — and every dead orphan reported itself still alive.
-      # sys rows are emitted every sample even when nothing else is.
-      lastep = eps[sysn]
+      # yardstick has to be the last SAMPLE (lastep, the running max of the sys
+      # epochs). Measuring it against the last orphan row instead made the test
+      # vacuous: once an orphan is reaped, no further orphan rows are written,
+      # so the newest orphan row is always the one recording it — and every
+      # dead orphan reported itself still alive. sys rows are emitted every
+      # sample even when nothing else is.
 
-      dn = 0
-      for (i = 2; i <= sysn; i++) { gap = eps[i] - eps[i-1]; if (gap > 0 && gap < 600) dl[++dn] = gap }
-      for (i = 1; i < dn; i++) for (k = i + 1; k <= dn; k++)
-        if (dl[k] < dl[i]) { t = dl[i]; dl[i] = dl[k]; dl[k] = t }
-      iv = (dn > 0) ? dl[int(dn / 2) + 1] : 10
-      covered = sysn * iv
+      # Out-of-order epochs are an error, not a silent reinterpretation: the old
+      # sort produced a plausible-looking answer from a file that is truncated or
+      # interleaved. The message names the whole consequence, not just the
+      # interval: an interleaved file also re-counts epochs the adjacency dedupe
+      # above cannot fold, so sysn and everything scaled by it read high. Report
+      # on stderr and continue with the running-max result; --json stdout stays
+      # clean and the exit code stays 0.
+      if (disorder > 0)
+        printf("claude-watch: %s has %d out-of-order sample epochs — the raw file is interleaved or truncated, so the sample count, coverage and every rate derived from them may be inflated. Compare a neighbouring day before trusting this one\n",
+               ENVIRON["CW_SRC"], disorder) > "/dev/stderr"
 
       # Rankings are hoisted out of the print sections so the human and --json
       # paths report identical order rather than two implementations of it.
