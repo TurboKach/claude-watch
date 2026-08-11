@@ -131,7 +131,21 @@ take_lock() {
 
 acquire_lock() {
   mkdir -p "$STATE" 2>/dev/null
-  if mkdir "$LOCK" 2>/dev/null; then take_lock; return 0; fi
+  if mkdir "$LOCK" 2>/dev/null; then
+    # take_lock can fail to write or rename $LOCK/pid (a full or read-only
+    # volume, the same fault die_write exists for) even though mkdir just
+    # succeeded. Reporting success here would leave an ownerless lock: nothing
+    # in it says who holds it, so a live scan and a crashed one look identical
+    # to every later run. Same failure class as `[ -d "$LOCK" ] || die_write`
+    # below — treat it the same way, and remove the lock we just took so a
+    # write failure does not also wedge every later run behind it.
+    if take_lock; then
+      return 0
+    fi
+    lock_held=0
+    rm -rf "$LOCK" 2>/dev/null
+    die_write
+  fi
   # Could not create it AND it does not exist: $STATE is not writable, which is
   # a cache-write failure, not a contended lock.
   [ -d "$LOCK" ] || die_write
@@ -162,8 +176,12 @@ acquire_lock() {
   mv "$LOCK" "$stash" 2>/dev/null || return 1
   rm -rf "$stash" 2>/dev/null
   mkdir "$LOCK" 2>/dev/null || return 1
-  take_lock
-  return 0
+  if take_lock; then
+    return 0
+  fi
+  lock_held=0
+  rm -rf "$LOCK" 2>/dev/null
+  die_write
 }
 
 # Release only what we still own. A lock we took, lost to a breaker, and then

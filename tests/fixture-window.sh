@@ -533,5 +533,53 @@ PY
 then ok "disk --json's domain object is advise's minus priority, byte for byte"
 else bad "disk --json's domain object is advise's minus priority, byte for byte"; fi
 
+# ====== 11. dispatcher cache validation must agree with the analyzer (A2) ====
+# The dispatcher's own cw_read_disk_cache used to accept any cache with a
+# positive epoch and a vol row — a weaker rule than advise_disk's full §3c
+# parser. This cache satisfies that old, looser rule (epoch>0, a vol row is
+# present) but fails advise_disk's own validation (used_kb is non-numeric),
+# so the two used to disagree: the disk domain read unknown while
+# CW_VOLUME_TOTAL_KB was still exported from the same untrusted row, and
+# leaks went on to compute a share against a total the disk domain itself
+# called unmeasured. tools/advise-disk.sh, not a stub, is used here — the
+# real fixture-disk.sh:335 case reused as the reader for the dispatcher path.
+H3="$TMP/h3"; mkdir -p "$H3/raw" "$H3/state"
+printf 'epoch\t-\t%s\t-\t-\nscan\t0\t0\t3\t3\nvol\t/x\tlots\t20725496\t0\n' "$NOW" \
+  > "$H3/state/disk.tsv"
+J="$TMP/out11.json"; S="$TMP/scalars11"; E="$TMP/err11"
+CLAUDE_WATCH_HOME="$H3" CLAUDE_WATCH_DISK_CACHE="$H3/state/disk.tsv" \
+  CW_SCALARS_OUT="$S" "$CW" advise --json > "$J" 2>"$E"
+expect "A2: a cache advise_disk rejects reports disk as unknown" \
+  "$(jq_ "[dm['severity'] for dm in d['domains'] if dm['domain']=='disk'][0]")" unknown
+expect "A2: ...and measurement_state unavailable" \
+  "$(jq_ "[dm['measurement_state'] for dm in d['domains'] if dm['domain']=='disk'][0]")" unavailable
+expect "A2: ...and CW_VOLUME_TOTAL_KB is NOT exported from the same untrusted row" \
+  "$(LC_ALL=C awk -F= -v k=CW_VOLUME_TOTAL_KB '$1 == k { print substr($0, length(k) + 2) }' "$S")" ""
+
+# ====== 12. dispatcher backstop when an analyzer returns nothing (A3) =======
+# advise_leaks (or any future analyzer) can fail on an early-exit path before
+# ever printing its S row (tools/advise-leaks.sh:354's mktemp failure was one).
+# The old `{ advise_disk; advise_leaks; } > "$rows"` trusted neither status, so
+# a domain that printed nothing was simply absent from render — not `unknown`,
+# not present at all — with advise still exiting 0. cw_advise now checks each
+# analyzer's own status and synthesizes an unknown domain when its S row never
+# arrived.
+cat > "$STUBDIR/tools/advise-leaks.sh" <<'STUB'
+advise_leaks() {
+  return 1
+}
+STUB
+J="$TMP/out12.json"
+CLAUDE_WATCH_HOME="$H1" CLAUDE_WATCH_DISK_CACHE="$H1/none.tsv" \
+  "$STUBDIR/claude-watch" advise --json > "$J" 2>/dev/null
+RC=$?
+expect "A3: advise still exits 0 when an analyzer returns nothing" "$RC" 0
+expect "A3: the leaks domain is present, not dropped from render" \
+  "$(jq_ "'leaks' in [dm['domain'] for dm in d['domains']]")" True
+expect "A3: ...reported unknown rather than silently absent" \
+  "$(jq_ "[dm['severity'] for dm in d['domains'] if dm['domain']=='leaks'][0]")" unknown
+expect "A3: ...measurement_state unavailable" \
+  "$(jq_ "[dm['measurement_state'] for dm in d['domains'] if dm['domain']=='leaks'][0]")" unavailable
+
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

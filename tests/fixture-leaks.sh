@@ -503,5 +503,24 @@ else
   skp "live scan_worktrees column count (no agent worktrees on this machine)"
 fi
 
+echo "advise_leaks: a gathering failure must not drop the domain (A3)"
+
+# A mktemp failure used to `return 1` here with nothing printed at all — no S
+# row, no findings — so the combined `{ advise_disk; advise_leaks; }` in
+# tools/advise.sh (which ignores both analyzers' exit statuses) rendered
+# leaks as though the domain had never existed, and advise still exited 0.
+# A stub mktemp on PATH forces that path without touching any real scan.
+SBINL="$TMP/sbinL"; mkdir -p "$SBINL"
+printf '#!/bin/sh\nexit 1\n' > "$SBINL/mktemp"
+chmod +x "$SBINL/mktemp"
+NOW_OUT=$(PATH="$SBINL:$PATH" advise_leaks 2>/dev/null); rcAL=$?
+eq "advise_leaks reports failure (non-zero) on a mktemp failure" "$rcAL" "1"
+eq "...but still emits an S row, not nothing at all" "$(field "$(srow)" 1)" "S"
+eq "...for the leaks domain"                         "$(field "$(srow)" 2)" leaks
+eq "...severity unknown"                              "$(field "$(srow)" 3)" unknown
+eq "...measurement_state unavailable"                 "$(field "$(srow)" 4)" unavailable
+eq "...same reason leaks_findings already uses when neither scan can run" \
+   "$(field "$(srow)" 5)" scan_permission_denied
+
 printf '%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ]

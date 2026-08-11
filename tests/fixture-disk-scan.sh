@@ -477,6 +477,54 @@ else
   skp "locale-sensitive identity — no installed locale renders ps lstart differently from C"
 fi
 
+# 4d. doctor's own liveness check must not read an EMPTY pid record as
+# healthy. `kill -0 "${dpid:-0}"` used to fall back to pid 0 when the record
+# was empty, and pid 0 signals the CALLER's own process group — always alive —
+# so a lock record that crashed before writing anything read as a live,
+# healthy scan (A4).
+DE="$TMP/dataE"; mkdir -p "$DE/state"
+mkdir "$DE/state/disk-scan.lock"
+: > "$DE/state/disk-scan.lock/pid"
+printf 'epoch\t-\t1\t-\t-\n' > "$DE/state/disk.tsv"
+CLAUDE_WATCH_HOME="$DE" bash "$REPO/claude-watch" doctor > "$TMP/doctorE.out" 2>/dev/null
+if grep -q 'orphaned scan lock' "$TMP/doctorE.out"; then
+  ok "doctor treats an empty pid record as an orphaned lock, not kill -0 0"
+else
+  bad "doctor treats an empty pid record as an orphaned lock, not kill -0 0"
+  sed 's/^/        /' "$TMP/doctorE.out"
+fi
+rm -rf "$DE"
+
+# 4e. take_lock can fail to write $LOCK/pid even though the mkdir that claims
+# the lock just succeeded (a full or read-only volume). acquire_lock used to
+# return 0 unconditionally in that case, leaving an ownerless lock directory
+# behind and letting the scan proceed with no record of who holds it (A4). A
+# stub `mkdir` simulates the race: it creates the real directory, then strips
+# write permission from it before disk-scan.sh gets to write the pid file.
+SBINM="$TMP/sbinM"; mkdir -p "$SBINM"
+cat > "$SBINM/mkdir" <<'EOF'
+#!/bin/sh
+if [ "$#" = 1 ]; then
+  /bin/mkdir "$1" && chmod 555 "$1"
+  exit $?
+fi
+exec /bin/mkdir "$@"
+EOF
+chmod +x "$SBINM/mkdir"
+DM="$TMP/dataM"
+PATH="$SBINM:$PATH" HOME="$HB" CLAUDE_WATCH_HOME="$DM" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
+  bash "$SCAN" > "$OUT" 2> "$ERR"; rcM=$?
+eq "a lock-record write failure is reported, not silently accepted" "$rcM" "1"
+if grep -qF 'could not write' "$ERR"; then
+  ok "and it prints the E7 write-failure message"
+else
+  bad "and it prints the E7 write-failure message"; sed 's/^/        /' "$ERR"
+fi
+eq "no cache is written on a lock-record write failure" \
+   "$([ -f "$DM/state/disk.tsv" ] && echo wrote || echo none)" "none"
+eq "the ownerless lock is not left behind" \
+   "$([ -e "$DM/state/disk-scan.lock" ] && echo present || echo gone)" "gone"
+
 # 5. A REAL race: two scanners, same state directory, overlapping in time.
 # The first is slowed with a stub du so the second is guaranteed to arrive while
 # it holds the lock.

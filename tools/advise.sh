@@ -49,6 +49,13 @@ cw_load_thresholds() {
           "$name" "$cur" "$name" "$def" >&2
         return 2
       fi
+      # is_uint accepts "010"/"08", and bash arithmetic then reads a leading
+      # zero as octal — "010" silently becomes 8, "08" aborts the whole run
+      # with an invalid-octal-digit error. Normalise to base 10 here, same
+      # convention as leaks_knob (tools/advise-leaks.sh), so every threshold
+      # this value feeds downstream is safe to use in arithmetic.
+      cur=$((10#$cur))
+      eval "$name=\$cur"
       src="$name"
     else
       cur="$def"; src="default"
@@ -215,6 +222,13 @@ CW_WINDOW_AWK='
 
 # ------------------------------------------------------------ disk cache ---
 # Read only. advise NEVER scans (G7); `disk --refresh` is the only scanner.
+#
+# Validation is disk_cache_validate (tools/advise-disk.sh), the SAME rule
+# advise_disk itself applies — not a second, looser one. Reusing it is what
+# stops the dispatcher calling a cache `ok` and exporting a volume total the
+# analyzer then rejects as malformed (A2). It requires cw_load_analyzers to
+# have already sourced tools/advise-disk.sh; the caller is responsible for
+# that ordering.
 cw_read_disk_cache() {
   CW_DISK_CACHE_STATE=missing
   CW_DISK_EPOCH=""; CW_DISK_AGE=""; CW_DISK_PARTIAL=""; CW_DISK_DEADLINE=""
@@ -223,23 +237,18 @@ cw_read_disk_cache() {
   local cache="${CLAUDE_WATCH_DISK_CACHE:-$STATE/disk.tsv}"
   CW_DISK_CACHE="$cache"
   [ -f "$cache" ] || return 0
-  local line
-  line=$(LC_ALL=C awk -F'\t' '
-    $1 == "epoch" { ep = $3 + 0 }
-    $1 == "scan"  { pa = $2 + 0; dl = $3 + 0; rs = $4 + 0; rt = $5 + 0; sawscan = 1 }
-    $1 == "vol"   { used = $3 + 0; avail = $4 + 0; sawvol = 1 }
-    END {
-      if (ep <= 0 || !sawvol) { print "malformed"; exit }
-      printf "ok\t%d\t%d\t%d\t%d\t%d\t%d\n", ep, pa, dl, rs, rt, used + avail
-    }' "$cache" 2>/dev/null)
-  case "$line" in
-    ok*) ;;
-    *) CW_DISK_CACHE_STATE=malformed; return 0 ;;
-  esac
-  IFS=$'\t' read -r _ CW_DISK_EPOCH CW_DISK_PARTIAL CW_DISK_DEADLINE \
-    CW_DISK_ROOTS_SCANNED CW_DISK_ROOTS_TOTAL CW_VOLUME_TOTAL_KB <<EOF
-$line
-EOF
+  # The analyzer failing to load is itself a validation failure: falling back
+  # to a weaker local check here would just reintroduce A2 under a new name.
+  if ! declare -F disk_cache_validate >/dev/null 2>&1 || ! disk_cache_validate "$cache"; then
+    CW_DISK_CACHE_STATE=malformed
+    return 0
+  fi
+  CW_DISK_EPOCH=$DISK_CACHE_EPOCH
+  CW_DISK_PARTIAL=$DISK_CACHE_PARTIAL
+  CW_DISK_DEADLINE=$DISK_CACHE_DEADLINE_HIT
+  CW_DISK_ROOTS_SCANNED=$DISK_CACHE_ROOTS_SCANNED
+  CW_DISK_ROOTS_TOTAL=$DISK_CACHE_ROOTS_TOTAL
+  CW_VOLUME_TOTAL_KB=$(( DISK_CACHE_USED + DISK_CACHE_AVAIL ))
   CW_DISK_CACHE_STATE=ok
   CW_DISK_AGE=$(( CW_NOW - CW_DISK_EPOCH ))
   [ "$CW_DISK_AGE" -lt 0 ] && CW_DISK_AGE=0
@@ -266,6 +275,18 @@ cw_disk_scan_json() {
 # once sourced, wins: this only fills a gap.
 cw_stub_domain() {
   printf 'S\t%s\tunknown\tunavailable\tcache_missing\tnot implemented\tthis domain is not implemented yet, so nothing here has been measured\n' "$1"
+}
+
+# The complement of cw_stub_domain: the analyzer function DID exist and ran,
+# but returned non-zero and — on some early-exit path — printed no S row at
+# all (A3, tools/advise-leaks.sh's mktemp failure was one such path). Piping
+# both analyzers into one file and never checking their status let that drop
+# a domain from render entirely rather than reporting it unknown, which is a
+# silent version of the exact failure this tool exists to surface. Callers
+# use this only as a backstop when the row file has no S row for the domain;
+# an analyzer that already emitted one (however bad) is left alone.
+cw_domain_failed() {
+  printf 'S\t%s\tunknown\tunavailable\tscan_permission_denied\t%s analysis failed to run\tre-run claude-watch advise to try again\n' "$1" "$1"
 }
 
 cw_load_analyzers() {
@@ -571,6 +592,9 @@ cw_parse_window() {
   esac
   n="${w%?}"; u="${w#"$n"}"
   is_uint "$n" || return 1
+  # Same octal hazard as cw_load_thresholds: "010h" would silently mean 8h,
+  # and "08h" would abort the arithmetic below with an invalid-octal error.
+  n=$((10#$n))
   [ "$n" -gt 0 ] 2>/dev/null || return 1
   case "$u" in
     h) CW_WIN_SECONDS=$((n * 3600)) ;;
@@ -645,13 +669,23 @@ cw_advise() {
   fi
 
   cw_window_pass
+  # Loaded before cw_read_disk_cache: its cache validation reuses
+  # disk_cache_validate from tools/advise-disk.sh (A2).
+  cw_load_analyzers
   cw_read_disk_cache
   cw_freshness
   cw_export_scalars
 
-  local rows="$CW_TMP/rows"
-  cw_load_analyzers
-  { advise_disk; advise_leaks; } > "$rows"
+  local rows="$CW_TMP/rows" rc_disk rc_leaks
+  # Each analyzer's own status is checked (A3): the old `{ advise_disk;
+  # advise_leaks; } > "$rows"` discarded both, so an analyzer whose early-exit
+  # path printed nothing dropped its domain from render with advise still
+  # exiting 0. A domain that already printed its own S row (however bad) is
+  # left alone; the backstop only fires when the row is missing outright.
+  advise_disk  >  "$rows"; rc_disk=$?
+  advise_leaks >> "$rows"; rc_leaks=$?
+  [ "$rc_disk"  = 0 ] || grep -qF "$(printf 'S\tdisk\t')"  "$rows" || cw_domain_failed disk  >> "$rows"
+  [ "$rc_leaks" = 0 ] || grep -qF "$(printf 'S\tleaks\t')" "$rows" || cw_domain_failed leaks >> "$rows"
 
   cw_render "$([ "$json" = 1 ] && printf 'advise-json' || printf 'advise-text')" "$rows" "$json"
   cw_append_log
@@ -860,14 +894,19 @@ cw_disk() {
   CW_INTERVAL_SECONDS=10; CW_SAMPLES=0; CW_OBSERVED_SECONDS=0; CW_READ_SECONDS=0
   CW_NCPU=""; CW_MEMSIZE_KB=""; CW_SWAP_CAP_MB=""; CW_SCHEMA2_SINCE=""
   CW_WIN_LAST_EPOCH=""; CW_FAILED_DAYS=""
+  # Loaded before cw_read_disk_cache: its cache validation reuses
+  # disk_cache_validate from tools/advise-disk.sh (A2).
+  cw_load_analyzers
   cw_read_disk_cache
   cw_freshness
   cw_export_scalars
 
   CW_AVAIL_DAYS=0; CW_COVERED_DAYS=0; CW_MISSING_DAYS=""; CW_OLDEST_DAY=""
-  local rows="$CW_TMP/rows"
-  cw_load_analyzers
-  advise_disk > "$rows"
+  local rows="$CW_TMP/rows" rc_disk
+  advise_disk > "$rows"; rc_disk=$?
+  # Same backstop as cw_advise (A3): an analyzer's status is not trusted
+  # implicitly, only its own S row is.
+  [ "$rc_disk" = 0 ] || grep -qF "$(printf 'S\tdisk\t')" "$rows" || cw_domain_failed disk >> "$rows"
 
   cw_render "$([ "$json" = 1 ] && printf 'disk-json' || printf 'disk-text')" "$rows" "$json"
   return 0

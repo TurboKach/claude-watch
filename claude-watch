@@ -1549,7 +1549,11 @@ doctor() {
     # locale-formatted, and a differently-spelled month here would report a
     # perfectly healthy running scan as an orphan.
     dpid=$(sed -n 1p "$dlock/pid" 2>/dev/null); did=$(sed -n 2p "$dlock/pid" 2>/dev/null)
-    if ! kill -0 "${dpid:-0}" 2>/dev/null ||
+    # An empty $dpid is a lock-record write that never completed (disk-scan.sh
+    # crashed, or failed to write it — see take_lock). "${dpid:-0}" would make
+    # that `kill -0 0`, which signals the calling process's own group and
+    # therefore always succeeds, reading a record nobody wrote as a live owner.
+    if [ -z "$dpid" ] || ! kill -0 "$dpid" 2>/dev/null ||
        { [ -n "$did" ] && [ "$(LC_ALL=C ps -o lstart= -p "$dpid" 2>/dev/null | tr -s ' ')" != "$did" ]; }; then
       dmsg=" — orphaned scan lock, remove $dlock"; dok=1
     fi

@@ -697,23 +697,30 @@ EOF
   printf '%s.' "$s"
 }
 
-# ------------------------------------------------------- the impure wrapper --
+# ---------------------------------------------------------- cache validator --
+# The one place the §3c format is validated. advise_disk needs it to decide
+# whether it may compute findings at all; the dispatcher's cw_read_disk_cache
+# (tools/advise.sh) needs it to decide whether CW_VOLUME_TOTAL_KB is safe to
+# export for the leaks analyzer to divide by. Two independent implementations
+# of this rule is exactly how A2 happened: the dispatcher's own looser check
+# called a cache `ok` and exported a volume total from it that this analyzer,
+# moments later, rejected as malformed — leaks then reported a computed share
+# of a total that disk was simultaneously calling `unknown`.
+#
+# Sets DISK_CACHE_EPOCH/PARTIAL/DEADLINE_HIT/ROOTS_SCANNED/ROOTS_TOTAL/USED/
+# AVAIL/DFSIZE/MOUNT and returns 0 on a well-formed cache; on a 1 return none
+# of those are trustworthy and must not be read by the caller.
+disk_cache_validate() {
+  local cache=$1
+  DISK_CACHE_EPOCH=''; DISK_CACHE_PARTIAL=0; DISK_CACHE_DEADLINE_HIT=0
+  DISK_CACHE_ROOTS_SCANNED=''; DISK_CACHE_ROOTS_TOTAL=''
+  DISK_CACHE_USED=''; DISK_CACHE_AVAIL=''; DISK_CACHE_DFSIZE=''; DISK_CACHE_MOUNT=''
+  [ -f "$cache" ] && [ -s "$cache" ] || return 1
 
-advise_disk() {
-  local LC_ALL=C
-  export LC_ALL
-  disk_thresholds
-  local cache=${CLAUDE_WATCH_DISK_CACHE:-}
-  [ -n "$cache" ] || cache="${STATE:-${CLAUDE_WATCH_HOME:-$HOME/.claude-watch}/state}/disk.tsv"
-
-  if [ ! -f "$cache" ] || [ ! -s "$cache" ]; then
-    disk_findings missing - - - - - < /dev/null
-    return 0
-  fi
-
-  # ---- validate. Anything we would compute on must parse, or the domain is
-  # unknown with no findings — never `ok`, and never a garbage finding.
-  local epoch='' used='' avail='' dfsize='' mount='' partial=0
+  # Anything we would compute on must parse, or the domain is unknown with no
+  # findings — never `ok`, and never a garbage finding.
+  local epoch='' used='' avail='' dfsize='' mount='' partial=0 deadline_hit=0
+  local roots_scanned='' roots_total=''
   local vols=0 epochs=0 notes=0 scans=0
   local bad=0 k a b c d e extra
   while IFS=$'\t' read -r k a b c d e extra || [ -n "$k" ]; do
@@ -732,7 +739,7 @@ advise_disk() {
         case $b in 0|1) ;; *) bad=1 ;; esac
         disk_is_uint "$c" || bad=1
         disk_is_uint "$d" || bad=1
-        partial=$a ;;
+        partial=$a; deadline_hit=$b; roots_scanned=$c; roots_total=$d ;;
       note)
         notes=$((notes + 1))
         disk_is_uint "$b" || bad=1
@@ -774,17 +781,39 @@ advise_disk() {
   fi
   if [ "$bad" != 1 ] && [ $(( used + avail )) -le 0 ]; then bad=1; fi
 
-  if [ "$bad" = 1 ]; then
+  [ "$bad" != 1 ] || return 1
+
+  DISK_CACHE_EPOCH=$epoch; DISK_CACHE_PARTIAL=$partial; DISK_CACHE_DEADLINE_HIT=$deadline_hit
+  DISK_CACHE_ROOTS_SCANNED=$roots_scanned; DISK_CACHE_ROOTS_TOTAL=$roots_total
+  DISK_CACHE_USED=$used; DISK_CACHE_AVAIL=$avail; DISK_CACHE_DFSIZE=$dfsize; DISK_CACHE_MOUNT=$mount
+  return 0
+}
+
+# ------------------------------------------------------- the impure wrapper --
+
+advise_disk() {
+  local LC_ALL=C
+  export LC_ALL
+  disk_thresholds
+  local cache=${CLAUDE_WATCH_DISK_CACHE:-}
+  [ -n "$cache" ] || cache="${STATE:-${CLAUDE_WATCH_HOME:-$HOME/.claude-watch}/state}/disk.tsv"
+
+  if [ ! -f "$cache" ] || [ ! -s "$cache" ]; then
+    disk_findings missing - - - - - < /dev/null
+    return 0
+  fi
+
+  if ! disk_cache_validate "$cache"; then
     disk_findings malformed - - - - - < /dev/null
     return 0
   fi
 
   local now age
-  now=$(date +%s 2>/dev/null) || now=$epoch
-  age=$(( now - epoch )); [ "$age" -ge 0 ] || age=0
+  now=$(date +%s 2>/dev/null) || now=$DISK_CACHE_EPOCH
+  age=$(( now - DISK_CACHE_EPOCH )); [ "$age" -ge 0 ] || age=0
 
-  disk_findings ok "$used" "$avail" "$dfsize" "$mount" "$age" \
-    < <(disk_body "$cache" "$now" "$(( used + avail ))")
+  disk_findings ok "$DISK_CACHE_USED" "$DISK_CACHE_AVAIL" "$DISK_CACHE_DFSIZE" "$DISK_CACHE_MOUNT" "$age" \
+    < <(disk_body "$cache" "$now" "$(( DISK_CACHE_USED + DISK_CACHE_AVAIL ))")
   return 0
 }
 

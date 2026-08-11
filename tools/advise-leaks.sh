@@ -351,8 +351,15 @@ leaks_findings() {
 # sourced without it, that input is marked unmeasured rather than reported clean.
 advise_leaks() {
   local o w ov= wv=
-  o=$(mktemp) || return 1
-  w=$(mktemp) || { rm -f "$o"; return 1; }
+  # A mktemp failure used to `return 1` here with nothing printed at all — no
+  # S row, no findings. The combined `{ advise_disk; advise_leaks; }` in
+  # tools/advise.sh ignores both analyzers' exit statuses, so that left the
+  # leaks domain silently absent from render while advise still exited 0
+  # (A3). leaks_findings "" "" is the SAME unknown/unavailable row this
+  # function already emits when neither scan could run below — reused rather
+  # than invented, so there is one fallback shape, not two.
+  o=$(mktemp) || { leaks_findings "" ""; return 1; }
+  w=$(mktemp) || { rm -f "$o"; leaks_findings "" ""; return 1; }
 
   if declare -F scan_orphans >/dev/null 2>&1; then
     scan_orphans "${ORPHAN_MIN_DEFAULT:-60}" > "$o" 2>/dev/null && ov=$(leaks_agg_orphans "$o")
