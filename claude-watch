@@ -1492,6 +1492,34 @@ doctor() {
     END { print n + 0 }')
   [ "$nsamp" -le 1 ]; chk $? "no sampler pileup (${nsamp} in flight; stateless by design)"
 
+  [ -x "$REPO_DIR/tools/disk-scan.sh" ]; chk $? "disk scanner is executable"
+
+  # The disk cache and the lock that guards it are one check, but the lock is
+  # tested INDEPENDENTLY of the cache: a first scan that was killed leaves the
+  # lock behind and no cache at all, and every later run then refuses silently.
+  # A recycled pid answers kill -0, so the owner's start time has to match too.
+  local dcache="${CLAUDE_WATCH_DISK_CACHE:-$STATE/disk.tsv}" dlock="$STATE/disk-scan.lock"
+  local dmsg dok=0 dage dpid did
+  if [ -d "$dlock" ]; then
+    # $dlock/pid is one atomic file: line 1 the pid, line 2 the owner's start
+    # time. LC_ALL=C matches the scanner's own derivation — `ps lstart` is
+    # locale-formatted, and a differently-spelled month here would report a
+    # perfectly healthy running scan as an orphan.
+    dpid=$(sed -n 1p "$dlock/pid" 2>/dev/null); did=$(sed -n 2p "$dlock/pid" 2>/dev/null)
+    if ! kill -0 "${dpid:-0}" 2>/dev/null ||
+       { [ -n "$did" ] && [ "$(LC_ALL=C ps -o lstart= -p "$dpid" 2>/dev/null | tr -s ' ')" != "$did" ]; }; then
+      dmsg=" — orphaned scan lock, remove $dlock"; dok=1
+    fi
+  fi
+  if [ -f "$dcache" ] && [ -w "$dcache" ]; then
+    dage=$(( ( $(date +%s) - $(stat -f %m "$dcache") ) / 3600 ))
+    dmsg="disk cache present and writable (age ${dage}h)${dmsg:-}"
+  else
+    dmsg="disk cache present and writable ($dcache missing — run: claude-watch disk --refresh)${dmsg:-}"
+    dok=1
+  fi
+  [ "$dok" = 0 ]; chk $? "$dmsg"
+
   grep -q 'claude-watch hook' "$HOME/.zshrc" 2>/dev/null
   chk $? "new-day hook installed in .zshrc"
 

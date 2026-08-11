@@ -17,7 +17,7 @@ PLIST="$HOME/Library/LaunchAgents/$LABEL.plist"
 mkdir -p "$BIN_DIR"
 ln -sf "$REPO/claude-watch" "$DEST"
 ln -sf "$REPO/claude-top" "$BIN_DIR/claude-top"
-chmod +x "$REPO/claude-watch" "$REPO/claude-top" "$REPO/tools/sample.sh"
+chmod +x "$REPO/claude-watch" "$REPO/claude-top" "$REPO/tools/sample.sh" "$REPO/tools/disk-scan.sh"
 echo "symlinked $DEST -> $REPO/claude-watch"
 echo "symlinked $BIN_DIR/claude-top -> $REPO/claude-top"
 case ":$PATH:" in
