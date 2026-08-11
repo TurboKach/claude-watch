@@ -1029,15 +1029,57 @@ repo_candidates() {
 }
 
 scan_worktrees() {
-  local days=$1 now
+  local days=$1 now tab recs rec tabs tainted=0
+  tab=$(printf '\t')
   now=$(date +%s)
+
+  # A RECORD IS NOT A LINE. `git worktree list --porcelain` emits paths raw, so
+  # a tab inside a path adds a field and shifts every field after it, and a
+  # newline splits one worktree across two physical lines. Either way `path`
+  # below becomes a PREFIX of the real directory — and `git -C`, `du`, the
+  # removal offer and everything downstream then act on a real, different,
+  # innocent-looking target. The framing is therefore checked before any field
+  # is read, and a record that is not exactly four tab-separated fields is
+  # reported as UNSAFE (never removable) with its bytes scrubbed.
+  #
+  # The buffer exists for the second half of that: a newline also lets a crafted
+  # directory name present its tail as a complete, plausible record. Such a
+  # fabricated path does not exist on disk, so it would land in the PRUNABLE
+  # branch below. An injected record always arrives beside the malformed
+  # fragment it was split from, so one malformed record taints the whole scan
+  # and PRUNABLE is withheld for that run — the same fail-closed rule this
+  # function already applies when liveness cannot be verified.
+  recs=$(mktemp) || return 1
   {
     repo_candidates | while IFS= read -r d; do list_repo_worktrees "$d"; done
-  } | sort -u -t"$(printf '\t')" -k2,2 | while IFS="$(printf '\t')" read -r main path branch locked; do
+  } | sort -u -t"$tab" -k2,2 > "$recs"
+  while IFS= read -r rec; do
+    tabs=${rec//[!$tab]/}
+    [ "${#tabs}" -eq 3 ] || { tainted=1; break; }
+  done < "$recs"
+
+  while IFS= read -r rec; do
+    tabs=${rec//[!$tab]/}
+    if [ "${#tabs}" -ne 3 ]; then
+      # Same two markers is_agent_worktree tests, applied to the raw record
+      # because it cannot be split into fields: someone else's malformed
+      # worktree is not this command's business to print.
+      case $rec in */.claude/worktrees/*|*/conductor/workspaces/*) ;; *) continue ;; esac
+      printf 'UNSAFE\t%s\t-\t-\t0\t0\t0\t0\t%s\n' \
+        "$(printf '%s' "$rec" | LC_ALL=C tr '\001-\037\177' '[ *]')" \
+        'worktree record is unrepresentable (tab or newline in the path)'
+      continue
+    fi
+    IFS="$tab" read -r main path branch locked <<< "$rec"
     is_agent_worktree "$path" || continue
     local age dirty unpushed size ct st why
     if [ ! -d "$path" ]; then
-      printf 'PRUNABLE\t%s\t%s\t%s\t0\t0\t0\t0\tdirectory no longer exists\n' "$path" "$main" "$branch"
+      if [ "$tainted" = "1" ]; then
+        printf 'UNSAFE\t%s\t%s\t%s\t0\t0\t0\t0\t%s\n' "$path" "$main" "$branch" \
+          'another worktree record was unrepresentable, so this path cannot be trusted'
+      else
+        printf 'PRUNABLE\t%s\t%s\t%s\t0\t0\t0\t0\tdirectory no longer exists\n' "$path" "$main" "$branch"
+      fi
       continue
     fi
     ct=$(git -C "$path" log -1 --format=%ct 2>/dev/null || printf '0')
@@ -1085,7 +1127,8 @@ scan_worktrees() {
     fi
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$st" "$path" "$main" "$branch" "$age" "${dirty:-0}" "${unpushed:-0}" "$size" "$why"
-  done
+  done < "$recs"
+  rm -f "$recs"
 }
 
 # Re-run the whole safety classification for ONE worktree. Called immediately
