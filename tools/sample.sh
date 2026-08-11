@@ -108,7 +108,7 @@ for p in $roots; do
 done
 
 LC_ALL=C awk -v NOW="$now" -v FLOOR="$FLOOR" -v TOPN="$TOPN" -v OM="$ORPHAN_MIN" \
-             -v MATCH="$ORPHAN_MATCH_RE" -v EXCL="$ORPHAN_EXCLUDE_RE" \
+             -v MATCH="$ORPHAN_MATCH_RE" -v EXCL="$ORPHAN_EXCLUDE_RE" -v PROV="$ORPHAN_PROVENANCE_RE" \
              -v MEMFLOOR="$MEMFLOOR" -v META="$metafile" -v SNAP="$snapfile" -v SYS="$sys" -v LOAD="$load" -v NCPU="$ncpu" '
   function esec(e,   a, b, d, n, h, m) {
     d = 0
@@ -208,7 +208,9 @@ LC_ALL=C awk -v NOW="$now" -v FLOOR="$FLOOR" -v TOPN="$TOPN" -v OM="$ORPHAN_MIN"
     # but it still holds memory, ports and file handles.
     for (p in seen) {
       if (par[p] != 1 || owner[p] != "" || secs[p] < OM * 60) continue
-      if (args[p] !~ MATCH) continue
+      # A dev-tool name (MATCH) or a Claude session path (PROV, provenance
+      # rather than identity — see tools/orphan-policy.sh) either counts.
+      if (args[p] !~ MATCH && args[p] !~ PROV) continue
       if (args[p] ~ EXCL) continue
       print NOW, "orphan", clean(name(args[p])), sprintf("%.2f", subcpu(p) / 100), subrss(p), secs[p]
     }

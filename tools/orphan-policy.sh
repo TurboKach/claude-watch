@@ -15,3 +15,14 @@
 ORPHAN_MATCH_RE='(node|tsx|npm|npx|yarn|pnpm|bun|deno|vite|esbuild|webpack|jest|vitest|pytest|python[23]?|ts-node|next-server|playwright|chrome-headless)'
 ORPHAN_EXCLUDE_RE='(Applications|/usr/libexec|/System/)'
 ORPHAN_MIN_DEFAULT=60
+
+# A process is also a leak if it CARRIES a session path, whatever it is called.
+# This is provenance, not identity: it catches a postgres or redis a session
+# started without ever putting those names on the allowlist, which would also
+# match the user's own brew-managed database.
+#
+# `/tmp` is a symlink to `/private/tmp` on macOS and argv records whichever form
+# the caller used, so both must match. `(/private)?` — not `/private/?` — is what
+# does that. The backslash in `/\.claude/` is single here and doubled nowhere:
+# see the dynamic-regex note above.
+ORPHAN_PROVENANCE_RE='(/private)?/tmp/claude-[0-9]+/|/\.claude/worktrees/'

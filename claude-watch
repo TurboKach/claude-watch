@@ -547,7 +547,7 @@ tmp_cleanup() {
 #   P <root> <pid> <depth> <rss_kb> <age_s> <argv>
 scan_orphans() {
   ps -Ao pid=,ppid=,pcpu=,rss=,etime=,args= 2>/dev/null | LC_ALL=C awk \
-    -v MATCH="$ORPHAN_MATCH_RE" -v EXCL="$ORPHAN_EXCLUDE_RE" -v MIN="$1" '
+    -v MATCH="$ORPHAN_MATCH_RE" -v EXCL="$ORPHAN_EXCLUDE_RE" -v PROV="$ORPHAN_PROVENANCE_RE" -v MIN="$1" '
     function esec(e,   a, b, d, n, h, m) {
       d = 0
       if (e ~ /-/) { split(e, a, "-"); d = a[1]; e = a[2] }
@@ -585,7 +585,9 @@ scan_orphans() {
       for (p in seen) if (shortname(A[p]) == "claude") mark(p)
       for (p in seen) {
         if (PA[p] != 1 || cl[p]) continue
-        if (A[p] !~ MATCH || A[p] ~ EXCL) continue
+        # A[p] carries a dev-tool name (MATCH) or a Claude session path (PROV,
+        # provenance rather than identity — see tools/orphan-policy.sh).
+        if ((A[p] !~ MATCH && A[p] !~ PROV) || A[p] ~ EXCL) continue
         if (S[p] < MIN * 60) continue
         print "T", p, clean(shortname(A[p])), S[p], subrss(p), subn(p), subcpu(p)
         walk(p, p, 0)
@@ -846,7 +848,11 @@ orphans() {
     printf 'claude-watch orphans: --min needs a non-negative integer (got "%s")\n' "$min" >&2
     return 2
   fi
-  if [ -z "${ORPHAN_MATCH_RE:-}" ]; then
+  # An empty awk dynamic regex matches EVERY string (`A[p] ~ ""` is always
+  # true), so if the policy file failed to source and left either variable
+  # empty, PROV alone would turn every PPID-1 process into a reapable orphan —
+  # a silent failure mode: more output, not an error. Both must be checked.
+  if [ -z "${ORPHAN_MATCH_RE:-}" ] || [ -z "${ORPHAN_PROVENANCE_RE:-}" ]; then
     printf '%serror:%s cannot read %s/tools/orphan-policy.sh\n' "$C_RED" "$C_RST" "$REPO_DIR" >&2
     return 1
   fi

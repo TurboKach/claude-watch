@@ -368,6 +368,7 @@ awk -f "$TMP/extract.awk" "$SAMPLER" > "$TMP/main.awk"
 run_main() {  # <meta file> <SYS value>
   LC_ALL=C awk -f "$TMP/main.awk" -v NOW=1700000000 -v FLOOR=0 -v TOPN=8 \
     -v OM="$ORPHAN_MIN_DEFAULT" -v MATCH="$ORPHAN_MATCH_RE" -v EXCL="$ORPHAN_EXCLUDE_RE" \
+    -v PROV="$ORPHAN_PROVENANCE_RE" \
     -v MEMFLOOR=0 -v META="$1" -v SNAP="$TMP/snap" -v SYS="$2" -v LOAD=1.50 -v NCPU=8 \
     </dev/null
 }
