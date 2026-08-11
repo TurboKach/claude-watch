@@ -525,6 +525,35 @@ eq "no cache is written on a lock-record write failure" \
 eq "the ownerless lock is not left behind" \
    "$([ -e "$DM/state/disk-scan.lock" ] && echo present || echo gone)" "gone"
 
+# 4f. The SAME take_lock failure, but on the STALE-LOCK REPLACEMENT branch:
+# acquire_lock recreates $LOCK after breaking a stale, dead-owner lock (the
+# second `mkdir "$LOCK"`, past the `mv "$LOCK" "$stash"` rename) and got the
+# identical fall-through-to-die_write fix as the fresh-lock path above (A4).
+# Seed a stale dead-owner lock so acquire_lock takes the breaker path instead
+# of the fresh-mkdir path, then reuse the same write-stripping mkdir stub.
+DEAD2=$( bash -c 'echo $$' )    # a pid that has already exited
+if kill -0 "$DEAD2" 2>/dev/null; then
+  skp "stale-replacement lock-write failure (pid $DEAD2 was recycled)"
+else
+  DF="$TMP/dataN"; mkdir -p "$DF/state"
+  LOCKF="$DF/state/disk-scan.lock"
+  mkdir "$LOCKF"
+  own "$DEAD2" 'Thu Jan 1 00:00:00 1970' > "$LOCKF/pid"
+  touch -t "$OLD" "$LOCKF"
+  PATH="$SBINM:$PATH" HOME="$HB" CLAUDE_WATCH_HOME="$DF" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
+    bash "$SCAN" > "$OUT" 2> "$ERR"; rcF=$?
+  eq "a lock-record write failure on the stale-replacement path is reported too" "$rcF" "1"
+  if grep -qF 'could not write' "$ERR"; then
+    ok "and it prints the E7 write-failure message on that path"
+  else
+    bad "and it prints the E7 write-failure message on that path"; sed 's/^/        /' "$ERR"
+  fi
+  eq "no cache is written on that path either" \
+     "$([ -f "$DF/state/disk.tsv" ] && echo wrote || echo none)" "none"
+  eq "the ownerless lock is not left behind on that path either" \
+     "$([ -e "$LOCKF" ] && echo present || echo gone)" "gone"
+fi
+
 # 5. A REAL race: two scanners, same state directory, overlapping in time.
 # The first is slowed with a stub du so the second is guaranteed to arrive while
 # it holds the lock.

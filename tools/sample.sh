@@ -23,6 +23,30 @@ ORPHAN_MIN="${CLAUDE_WATCH_ORPHAN_MIN:-$ORPHAN_MIN_DEFAULT}"  # unparented dev p
 
 mkdir -p "$RAW" "$STATE/cwd" "$STATE/label" || exit 1
 
+# Same hazard the `orphans` command guards against at claude-watch:855: an
+# empty awk dynamic regex matches EVERY string, so a policy file that sources
+# cleanly but leaves either regex "" would silently turn every PPID-1 process
+# into a reported orphan — false leak telemetry with no error anywhere.
+#
+# Unlike `orphans`, this script is not a one-shot command a human is watching
+# run: launchd relaunches it every 10s (StartInterval in
+# com.turbokach.claudewatch.plist), so the two obvious answers both misfire.
+# Aborting the whole sample would also drop the unrelated sys/session/proc
+# rows for a bug confined to orphan matching. Logging on every run would
+# write ~8,640 lines/day into a plain, never-rotated log file
+# (StandardErrorPath). So: skip only the orphan section below, and warn once
+# per day rather than once per sample.
+SKIP_ORPHANS=0
+if [ -z "${ORPHAN_MATCH_RE:-}" ] || [ -z "${ORPHAN_PROVENANCE_RE:-}" ]; then
+  SKIP_ORPHANS=1
+  warnfile="$STATE/orphan-policy-broken"
+  today=$(date +%F)
+  if [ "$(cat "$warnfile" 2>/dev/null)" != "$today" ]; then
+    echo "claude-watch: $POLICY left ORPHAN_MATCH_RE or ORPHAN_PROVENANCE_RE empty — orphan detection is disabled until it is fixed (this warning will not repeat until tomorrow)" >&2
+    printf '%s' "$today" > "$warnfile" 2>/dev/null
+  fi
+fi
+
 now=$(date +%s)
 out="$RAW/$(date +%F).tsv"
 
@@ -109,6 +133,7 @@ done
 
 LC_ALL=C awk -v NOW="$now" -v FLOOR="$FLOOR" -v TOPN="$TOPN" -v OM="$ORPHAN_MIN" \
              -v MATCH="$ORPHAN_MATCH_RE" -v EXCL="$ORPHAN_EXCLUDE_RE" -v PROV="$ORPHAN_PROVENANCE_RE" \
+             -v SKIP_ORPHANS="$SKIP_ORPHANS" \
              -v MEMFLOOR="$MEMFLOOR" -v META="$metafile" -v SNAP="$snapfile" -v SYS="$sys" -v LOAD="$load" -v NCPU="$ncpu" '
   function esec(e,   a, b, d, n, h, m) {
     d = 0
@@ -206,7 +231,11 @@ LC_ALL=C awk -v NOW="$now" -v FLOOR="$FLOOR" -v TOPN="$TOPN" -v OM="$ORPHAN_MIN"
 
     # Orphans: dev tooling reparented to launchd. Whatever started it is gone,
     # but it still holds memory, ports and file handles.
-    for (p in seen) {
+    #
+    # SKIP_ORPHANS is set by the shell when the policy left MATCH or PROV
+    # empty: an empty awk dynamic regex matches every string, so scanning with
+    # either unset would report every PPID-1 process as a leak.
+    if (!SKIP_ORPHANS) for (p in seen) {
       if (par[p] != 1 || owner[p] != "" || secs[p] < OM * 60) continue
       # A dev-tool name (MATCH) or a Claude session path (PROV, provenance
       # rather than identity — see tools/orphan-policy.sh) either counts.

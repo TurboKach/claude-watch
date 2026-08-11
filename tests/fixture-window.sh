@@ -581,5 +581,37 @@ expect "A3: ...reported unknown rather than silently absent" \
 expect "A3: ...measurement_state unavailable" \
   "$(jq_ "[dm['measurement_state'] for dm in d['domains'] if dm['domain']=='leaks'][0]")" unavailable
 
+# ====== 13. octal leading-zero must not corrupt --window or thresholds (A1) =
+# is_uint accepts a leading zero as a valid integer, but bash arithmetic reads
+# one as octal: "010" would silently become 8, and "08" would abort the whole
+# run with an invalid-octal-digit error. cw_parse_window and
+# cw_load_thresholds each normalise with 10# before using the value in
+# arithmetic. fixture-leaks.sh already covers this hazard for
+# advise-leaks.sh's OWN knob reader (leaks_knob) — nothing exercised
+# cw_load_thresholds or --window itself.
+run_advise "$H1" --window 010h
+expect "A1: --window 010h reads as decimal 10h, not octal 8h" \
+  "$(jq_ "d['window']['requested_seconds']")" "$((10 * 3600))"
+run_advise "$H1" --window 08h
+expect "A1: --window 08h does not abort on an invalid-octal digit" "$RC" 0
+expect "A1: ...and reads as decimal 8h" \
+  "$(jq_ "d['window']['requested_seconds']")" "$((8 * 3600))"
+
+TH1="$TMP/out13-crit.thresh"
+CLAUDE_WATCH_HOME="$H1" CLAUDE_WATCH_DISK_CACHE="$H1/none.tsv" \
+  CLAUDE_WATCH_DISK_CRIT_PCT=010 "$CW" advise --show-thresholds > "$TH1" 2>/dev/null
+RCC=$?
+expect "A1: CLAUDE_WATCH_DISK_CRIT_PCT=010 does not abort cw_load_thresholds" "$RCC" 0
+expect "A1: ...and reads as decimal 10, not octal 8" \
+  "$(awk '$1=="CLAUDE_WATCH_DISK_CRIT_PCT"{print $2}' "$TH1")" "10"
+
+TH2="$TMP/out13-warn.thresh"
+CLAUDE_WATCH_HOME="$H1" CLAUDE_WATCH_DISK_CACHE="$H1/none.tsv" \
+  CLAUDE_WATCH_DISK_WARN_GIB=08 "$CW" advise --show-thresholds > "$TH2" 2>/dev/null
+RCW=$?
+expect "A1: CLAUDE_WATCH_DISK_WARN_GIB=08 does not abort cw_load_thresholds" "$RCW" 0
+expect "A1: ...and reads as decimal 8" \
+  "$(awk '$1=="CLAUDE_WATCH_DISK_WARN_GIB"{print $2}' "$TH2")" "8"
+
 printf '%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]
