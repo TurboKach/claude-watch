@@ -39,6 +39,7 @@ sysrow()  { printf '%s\tsys\t-\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "
 sessrow() { printf '%s\tsession\t%s\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5" "$6"; }
 procrow() { printf '%s\tproc\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5"; }
 orphrow() { printf '%s\torphan\t%s\t%s\t%s\t%s\n' "$1" "$2" "$3" "$4" "$5"; }
+oscanrow() { printf '%s\torphan_scan\tdisabled\n' "$1"; }
 
 # --------------------------------------------------------------- assertions --
 load_report() {  # <date> <label> — run report --json, validate, leave it in $JSON
@@ -277,6 +278,36 @@ E_T0=1767657600
 echo "E. an orphan present in the final sample reads alive"
 if load_report "$E_DATE" E; then
   str "E orphan in the last sample" "$BY_NAME"'["live-tool"]["still_alive"]' true
+fi
+
+# ============================== I. a disabled scan must not read as recovery ==
+# 5 samples with an orphan tree present, then the policy breaks: 5 more
+# samples carry a sys row and an orphan_scan-disabled marker but NO orphan
+# row for "leaky-tool". Measuring liveness by absence alone would flip it to
+# still_alive: false — the exact "unmeasured reads as good news" bug already
+# fixed twice elsewhere in this project (disk §A3, the lock guard).
+I_DATE=2026-01-10
+I_T0=1767916800
+{
+  i=0
+  while [ "$i" -lt 5 ]; do
+    ep=$((I_T0 + 10 * i))
+    sysrow "$ep" 1.00 1000000 1000000 0 8
+    orphrow "$ep" leaky-tool 0.00 40000 600
+    i=$((i + 1))
+  done
+  while [ "$i" -lt 10 ]; do
+    ep=$((I_T0 + 10 * i))
+    sysrow "$ep" 1.00 1000000 1000000 0 8
+    oscanrow "$ep"
+    i=$((i + 1))
+  done
+} > "$TMP/raw/$I_DATE.tsv"
+
+echo "I. a disabled orphan scan must not present as the tree disappearing"
+if load_report "$I_DATE" I; then
+  str "I orphan_scan_disabled is true at day end" 'd["orphan_scan_disabled"]' true
+  str "I disabled scan reads unknown, not gone"   "$BY_NAME"'["leaky-tool"]["still_alive"]' None
 fi
 
 # ================================================== F/G/H. degenerate input ==

@@ -267,11 +267,18 @@ report() {
       }
       printf "],\"system\":{\"peak_load\":%.2f,\"peak_mem_used_kb\":%d,\"min_free_kb\":%d,\"max_swap_mb\":%d}",
              peakload, maxused, minfree, maxswap
+      # scan_off_at_end (set below, near lastep) means the sampler recorded
+      # "orphan_scan disabled" at the same epoch as the last sample: the
+      # orphan section did not run on the final pass, so absence there proves
+      # nothing about liveness. still_alive reports null rather than false for
+      # every tree in that case — "unmeasured" must never look like "gone".
+      printf ",\"orphan_scan_disabled\":%s", (scan_off_at_end ? "true" : "false")
       printf ",\"orphans\":["
       for (i = 1; i <= okn; i++) {
         key = ok[i]
         printf "%s{\"name\":\"%s\",\"age_seconds\":%d,\"rss_kb\":%d,\"still_alive\":%s}",
-               (i > 1 ? "," : ""), jesc(key), oage[key], orss[key], (olast[key] >= lastep ? "true" : "false")
+               (i > 1 ? "," : ""), jesc(key), oage[key], orss[key], \
+               (olast[key] >= lastep ? "true" : (scan_off_at_end ? "null" : "false"))
       }
       printf "]}\n"
     }
@@ -359,6 +366,14 @@ report() {
         if (!(key in okeys)) { okeys[key] = 1; ok[++okn] = key }
         next
       }
+      if (kind == "orphan_scan") {
+        # Written by the sampler once per sample instead of any orphan rows,
+        # when its policy file left a match regex empty (tools/sample.sh).
+        # Tracked as a running max, the same shape as lastep below, so it can
+        # be compared against it directly.
+        if (key == "disabled" && ep > oscan_disabled_lastep) oscan_disabled_lastep = ep
+        next
+      }
     }
 
     END {
@@ -404,6 +419,13 @@ report() {
       # so the newest orphan row is always the one recording it — and every
       # dead orphan reported itself still alive. sys rows are emitted every
       # sample even when nothing else is.
+      #
+      # scan_off_at_end: the sampler also marked its OWN final sample
+      # "orphan_scan disabled" (same epoch as lastep, since both come from the
+      # one $now of that run). When true, the orphan section simply did not
+      # run on the last pass, so "not present in the final sample" proves
+      # nothing — still_alive must read unknown, not false, for every tree.
+      scan_off_at_end = (oscan_disabled_lastep == lastep)
 
       # Out-of-order epochs are an error, not a silent reinterpretation: the old
       # sort produced a plausible-looking answer from a file that is truncated or
@@ -487,15 +509,20 @@ report() {
              (maxswap > 1024 ? C_RED : C_DIM), maxswap, C_RST
 
       # --- Orphans ---
+      if (scan_off_at_end) {
+        printf "\n%s⚠ ORPHAN SCAN DISABLED%s %s(broken orphan-policy.sh — leaked-process detection was off for the last sample; see stderr)%s\n",
+               C_RED, C_RST, C_DIM, C_RST
+      }
       if (okn > 0) {
         printf "\n%s⚠ ORPHANED DEV PROCESSES%s %s(no parent — still holding memory and ports)%s\n",
                C_RED, C_RST, C_DIM, C_RST
         for (i = 1; i <= okn; i++) {
           key = ok[i]
-          alive = (olast[key] >= lastep) ? "still alive" : "gone by end of day"
+          if (olast[key] >= lastep)   { alive = "still alive";             col = C_RED }
+          else if (scan_off_at_end)   { alive = "unknown (scan disabled)"; col = C_DIM }
+          else                        { alive = "gone by end of day";      col = C_DIM }
           printf "  %s%-28.28s%s %s  %6s  %s%s%s\n",
-                 C_KEY, key, C_RST, dur(oage[key]), gb(orss[key]),
-                 (olast[key] >= lastep ? C_RED : C_DIM), alive, C_RST
+                 C_KEY, key, C_RST, dur(oage[key]), gb(orss[key]), col, alive, C_RST
         }
       }
     }'

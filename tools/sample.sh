@@ -39,11 +39,25 @@ mkdir -p "$RAW" "$STATE/cwd" "$STATE/label" || exit 1
 SKIP_ORPHANS=0
 if [ -z "${ORPHAN_MATCH_RE:-}" ] || [ -z "${ORPHAN_PROVENANCE_RE:-}" ]; then
   SKIP_ORPHANS=1
-  warnfile="$STATE/orphan-policy-broken"
   today=$(date +%F)
-  if [ "$(cat "$warnfile" 2>/dev/null)" != "$today" ]; then
+  warnfile="$STATE/orphan-policy-broken.$today"
+  # The marker has to be established ATOMICALLY, not read-then-write: two
+  # samples launched together (launchd can overlap a slow run with the next
+  # StartInterval) would otherwise both see "not warned today" and both log.
+  # `set -C` (noclobber) turns the redirect into an O_CREAT|O_EXCL create, so
+  # exactly one concurrent winner gets to log. The date is baked into the
+  # filename rather than compared as file content, so establishing it IS the
+  # once-per-day check — there is no separate read to race against the write.
+  #
+  # A create that fails for any reason (already exists today, or STATE is
+  # unwritable) must suppress the log rather than emit it: logging on every
+  # failed throttle attempt would recreate the exact flood this exists to
+  # prevent, just moved from "unset regex" to "read-only disk".
+  if ( set -C; : > "$warnfile" ) 2>/dev/null; then
     echo "claude-watch: $POLICY left ORPHAN_MATCH_RE or ORPHAN_PROVENANCE_RE empty — orphan detection is disabled until it is fixed (this warning will not repeat until tomorrow)" >&2
-    printf '%s' "$today" > "$warnfile" 2>/dev/null
+    # Prune yesterday's marker(s) so STATE does not grow by one file per day
+    # for as long as the policy stays broken.
+    find "$STATE" -maxdepth 1 -name 'orphan-policy-broken.*' ! -name "$(basename "$warnfile")" -delete 2>/dev/null
   fi
 fi
 
@@ -132,7 +146,7 @@ for p in $roots; do
 done
 
 LC_ALL=C awk -v NOW="$now" -v FLOOR="$FLOOR" -v TOPN="$TOPN" -v OM="$ORPHAN_MIN" \
-             -v MATCH="$ORPHAN_MATCH_RE" -v EXCL="$ORPHAN_EXCLUDE_RE" -v PROV="$ORPHAN_PROVENANCE_RE" \
+             -v MATCH="${ORPHAN_MATCH_RE:-}" -v EXCL="${ORPHAN_EXCLUDE_RE:-}" -v PROV="${ORPHAN_PROVENANCE_RE:-}" \
              -v SKIP_ORPHANS="$SKIP_ORPHANS" \
              -v MEMFLOOR="$MEMFLOOR" -v META="$metafile" -v SNAP="$snapfile" -v SYS="$sys" -v LOAD="$load" -v NCPU="$ncpu" '
   function esec(e,   a, b, d, n, h, m) {
@@ -243,4 +257,13 @@ LC_ALL=C awk -v NOW="$now" -v FLOOR="$FLOOR" -v TOPN="$TOPN" -v OM="$ORPHAN_MIN"
       if (args[p] ~ EXCL) continue
       print NOW, "orphan", clean(name(args[p])), sprintf("%.2f", subcpu(p) / 100), subrss(p), secs[p]
     }
+    # SKIP_ORPHANS means this sample carries no orphan rows at all — but a
+    # sample that scanned and found nothing ALSO carries no orphan rows, and
+    # the two must not read the same. Without this marker, a previously
+    # reported tree that stops appearing while the policy is broken looks
+    # exactly like it exited: "unmeasured" reading as "recovered" is the same
+    # class of bug fixed for disk (§A3) and for the lock guard. The report
+    # reader (claude-watch) keys off this row to report liveness as unknown
+    # rather than false for that span.
+    else print NOW, "orphan_scan", "disabled"
   }' >> "$out"

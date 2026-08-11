@@ -502,9 +502,13 @@ rm -rf "$DE"
 # stub `mkdir` simulates the race: it creates the real directory, then strips
 # write permission from it before disk-scan.sh gets to write the pid file.
 SBINM="$TMP/sbinM"; mkdir -p "$SBINM"
+# Logs every single-argument (i.e. lock-directory) mkdir attempt to
+# $MKDIR_LOG when the caller sets it, so 4f below can prove which mkdir call
+# it actually reached — see 4f for why that matters.
 cat > "$SBINM/mkdir" <<'EOF'
 #!/bin/sh
 if [ "$#" = 1 ]; then
+  [ -n "${MKDIR_LOG:-}" ] && printf '%s\n' "$1" >> "$MKDIR_LOG"
   /bin/mkdir "$1" && chmod 555 "$1"
   exit $?
 fi
@@ -540,7 +544,9 @@ else
   mkdir "$LOCKF"
   own "$DEAD2" 'Thu Jan 1 00:00:00 1970' > "$LOCKF/pid"
   touch -t "$OLD" "$LOCKF"
+  MKLOG="$TMP/mkdir-stale.log"; : > "$MKLOG"
   PATH="$SBINM:$PATH" HOME="$HB" CLAUDE_WATCH_HOME="$DF" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
+    MKDIR_LOG="$MKLOG" \
     bash "$SCAN" > "$OUT" 2> "$ERR"; rcF=$?
   eq "a lock-record write failure on the stale-replacement path is reported too" "$rcF" "1"
   if grep -qF 'could not write' "$ERR"; then
@@ -552,6 +558,18 @@ else
      "$([ -f "$DF/state/disk.tsv" ] && echo wrote || echo none)" "none"
   eq "the ownerless lock is not left behind on that path either" \
      "$([ -e "$LOCKF" ] && echo present || echo gone)" "gone"
+  # The two assertions above also pass if acquire_lock treated the FIRST
+  # mkdir's failure (the lock dir already existing) as a generic write
+  # failure and bailed without ever breaking the stale lock — same message,
+  # same exit code, same absence of a cache, and the pre-existing $LOCKF is
+  # gone-by-die_write's own rm either way. That would prove nothing about the
+  # stale-REPLACEMENT branch (line 178's mkdir) specifically. The mkdir log
+  # is the actual evidence: it must show two attempts against $LOCKF — the
+  # initial one that failed because the stale lock was still there, and the
+  # post-break recreate that this test is really about.
+  n_mkdir=$(grep -cxF "$LOCKF" "$MKLOG" 2>/dev/null); n_mkdir=${n_mkdir:-0}
+  [ "$n_mkdir" -ge 2 ] && ok "the stale lock was actually broken and recreated (mkdir attempted $n_mkdir times)" \
+                       || bad "the stale lock was actually broken and recreated (mkdir attempted $n_mkdir time(s) — the replacement branch was never reached)"
 fi
 
 # 5. A REAL race: two scanners, same state directory, overlapping in time.
