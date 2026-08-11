@@ -23,10 +23,13 @@ ORPHAN_MIN="${CLAUDE_WATCH_ORPHAN_MIN:-$ORPHAN_MIN_DEFAULT}"  # unparented dev p
 
 mkdir -p "$RAW" "$STATE/cwd" "$STATE/label" || exit 1
 
-# Same hazard the `orphans` command guards against at claude-watch:855: an
+# Same hazard the `orphans` command guards against at claude-watch:882: an
 # empty awk dynamic regex matches EVERY string, so a policy file that sources
-# cleanly but leaves either regex "" would silently turn every PPID-1 process
-# into a reported orphan — false leak telemetry with no error anywhere.
+# cleanly but leaves any of the three regexes "" would silently misbehave —
+# MATCH/PROVENANCE empty turns every PPID-1 process into a reported orphan,
+# EXCLUDE empty filters every candidate back out (0 orphans, indistinguishable
+# from nothing to report). See the invariant comment in orphan-policy.sh: all
+# three must be checked together, as one broken-policy condition.
 #
 # Unlike `orphans`, this script is not a one-shot command a human is watching
 # run: launchd relaunches it every 10s (StartInterval in
@@ -37,7 +40,7 @@ mkdir -p "$RAW" "$STATE/cwd" "$STATE/label" || exit 1
 # (StandardErrorPath). So: skip only the orphan section below, and warn once
 # per day rather than once per sample.
 SKIP_ORPHANS=0
-if [ -z "${ORPHAN_MATCH_RE:-}" ] || [ -z "${ORPHAN_PROVENANCE_RE:-}" ]; then
+if [ -z "${ORPHAN_MATCH_RE:-}" ] || [ -z "${ORPHAN_EXCLUDE_RE:-}" ] || [ -z "${ORPHAN_PROVENANCE_RE:-}" ]; then
   SKIP_ORPHANS=1
   today=$(date +%F)
   warnfile="$STATE/orphan-policy-broken.$today"
@@ -54,10 +57,26 @@ if [ -z "${ORPHAN_MATCH_RE:-}" ] || [ -z "${ORPHAN_PROVENANCE_RE:-}" ]; then
   # failed throttle attempt would recreate the exact flood this exists to
   # prevent, just moved from "unset regex" to "read-only disk".
   if ( set -C; : > "$warnfile" ) 2>/dev/null; then
-    echo "claude-watch: $POLICY left ORPHAN_MATCH_RE or ORPHAN_PROVENANCE_RE empty — orphan detection is disabled until it is fixed (this warning will not repeat until tomorrow)" >&2
-    # Prune yesterday's marker(s) so STATE does not grow by one file per day
-    # for as long as the policy stays broken.
-    find "$STATE" -maxdepth 1 -name 'orphan-policy-broken.*' ! -name "$(basename "$warnfile")" -delete 2>/dev/null
+    echo "claude-watch: $POLICY left ORPHAN_MATCH_RE, ORPHAN_EXCLUDE_RE or ORPHAN_PROVENANCE_RE empty — orphan detection is disabled until it is fixed (this warning will not repeat until tomorrow)" >&2
+    # Prune STRICTLY OLDER markers so STATE does not grow by one file per day
+    # for as long as the policy stays broken. This must not be "everything but
+    # today's own marker": two samples racing across midnight can otherwise
+    # delete each other's work even though same-day creation above is atomic.
+    # Process A captures today=D and is still running after midnight when it
+    # gets here; process B, started after midnight, has already created D+1's
+    # marker. "delete everything named except D" would delete B's D+1 marker
+    # too, and a later D+1 sample would then find no marker, warn again, and
+    # recreate it — the exact flood this throttle exists to prevent, just
+    # delayed a day. Deleting only markers whose date sorts LESS than A's own
+    # "today" can never touch D+1 (D+1 does not sort less than D, regardless
+    # of which process's clock produced it), so it is safe regardless of who
+    # runs the prune or when. Leaving a stale marker behind on a race is
+    # cheap; a duplicate warning storm is not.
+    for stale in "$STATE"/orphan-policy-broken.*; do
+      [ -e "$stale" ] || continue
+      staleday=${stale##*/orphan-policy-broken.}
+      LC_ALL=C [ "$staleday" \< "$today" ] && rm -f "$stale"
+    done
   fi
 fi
 

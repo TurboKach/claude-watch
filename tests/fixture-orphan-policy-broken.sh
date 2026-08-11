@@ -113,5 +113,86 @@ else
   ok "an unwritable state dir does not print a warning it could not throttle"
 fi
 
+printf '\n  -- G1: an empty ORPHAN_EXCLUDE_RE is also a broken policy --\n'
+# `x ~ ""` is true for every string, so an unset/empty EXCLUDE_RE does not
+# make every process an orphan (that is MATCH/PROV's failure mode) — it makes
+# NO process an orphan, because `args[p] ~ EXCL` matches everything and the
+# scan excludes every candidate it finds. That reads exactly like "nothing to
+# report", including for a tree that was reported as an orphan a moment ago,
+# with no error anywhere. Only MATCH/PROV were checked before this fix.
+STUBX="$TMP/stubx"; mkdir -p "$STUBX/tools"
+cp "$REPO/tools/sample.sh" "$STUBX/tools/sample.sh"
+cat > "$STUBX/tools/orphan-policy.sh" <<'POLICY'
+# Sources cleanly, but ORPHAN_EXCLUDE_RE is missing this time.
+ORPHAN_MATCH_RE='(node|tsx|npm|npx|yarn|pnpm|bun|deno)'
+ORPHAN_PROVENANCE_RE='(/private)?/tmp/claude-[0-9]+/|/\.claude/worktrees/'
+ORPHAN_MIN_DEFAULT=60
+POLICY
+
+HOME4="$TMP/home4"; mkdir -p "$HOME4"
+CLAUDE_WATCH_FLOOR=0 CLAUDE_WATCH_MEMFLOOR=0 CLAUDE_WATCH_TOPN=8 \
+  CLAUDE_WATCH_HOME="$HOME4" bash "$STUBX/tools/sample.sh" 2>"$HOME4/stderr.log"
+rc4=$?
+[ "$rc4" = 0 ] && ok "sample.sh exits 0 against an EXCL-missing policy" \
+              || bad "sample.sh exits 0 against an EXCL-missing policy (got $rc4)"
+
+DAY4=$(ls "$HOME4/raw" 2>/dev/null | head -n1)
+if [ -z "$DAY4" ]; then
+  bad "sample.sh wrote a day file against an EXCL-missing policy"
+else
+  n_disabled4=$(awk -F'\t' '$2 == "orphan_scan" && $3 == "disabled"' "$HOME4/raw/$DAY4" | wc -l | tr -d ' ')
+  [ "$n_disabled4" -gt 0 ] \
+    && ok "an EXCL-missing policy also records the orphan_scan disabled marker" \
+    || bad "an EXCL-missing policy also records the orphan_scan disabled marker (none found — a previously-reported orphan would silently read as gone)"
+fi
+if grep -q 'ORPHAN_EXCLUDE_RE' "$HOME4/stderr.log"; then
+  ok "the warning names ORPHAN_EXCLUDE_RE too"
+else
+  bad "the warning names ORPHAN_EXCLUDE_RE too"; sed 's/^/        /' "$HOME4/stderr.log"
+fi
+
+printf '\n  -- G2: the prune must not delete a same-run-but-later marker across midnight --\n'
+# Simulate process A (which still thinks "today" is D) racing process B (which
+# has already rolled over to D+1 and created its marker). A fake `date` pins
+# what sample.sh sees as "today" so the race is deterministic instead of
+# depending on the wall clock actually crossing midnight mid-test.
+FAKEDATE="$TMP/fakedate"; mkdir -p "$FAKEDATE"
+cat > "$FAKEDATE/date" <<'FAKE'
+#!/usr/bin/env bash
+case "$1" in
+  +%F) echo "2026-01-01" ;;
+  +%s) echo "1767225600" ;;
+  *)   exec /bin/date "$@" ;;
+esac
+FAKE
+chmod +x "$FAKEDATE/date"
+
+HOME5="$TMP/home5"; mkdir -p "$HOME5/state"
+# B already created D+1's marker before A (running with the pinned "today" of
+# D = 2026-01-01) gets to the prune step.
+: > "$HOME5/state/orphan-policy-broken.2026-01-02"
+# A genuinely stale marker from well before D should still be pruned — the
+# fix narrows what gets deleted, it must not stop deleting old ones.
+: > "$HOME5/state/orphan-policy-broken.2025-12-31"
+
+PATH="$FAKEDATE:$PATH" CLAUDE_WATCH_FLOOR=0 CLAUDE_WATCH_MEMFLOOR=0 CLAUDE_WATCH_TOPN=8 \
+  CLAUDE_WATCH_HOME="$HOME5" bash "$STUB/tools/sample.sh" >/dev/null 2>"$HOME5/err"
+
+if [ -e "$HOME5/state/orphan-policy-broken.2026-01-02" ]; then
+  ok "a later (D+1) marker created by another process survives A's prune"
+else
+  bad "a later (D+1) marker created by another process survives A's prune (deleted — the next D+1 sample will warn again)"
+fi
+if [ -e "$HOME5/state/orphan-policy-broken.2025-12-31" ]; then
+  bad "a genuinely stale marker is still pruned (found untouched)"
+else
+  ok "a genuinely stale marker is still pruned"
+fi
+if [ -e "$HOME5/state/orphan-policy-broken.2026-01-01" ]; then
+  ok "today's own marker is created"
+else
+  bad "today's own marker is created"
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

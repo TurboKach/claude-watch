@@ -371,7 +371,20 @@ report() {
         # when its policy file left a match regex empty (tools/sample.sh).
         # Tracked as a running max, the same shape as lastep below, so it can
         # be compared against it directly.
-        if (key == "disabled" && ep > oscan_disabled_lastep) oscan_disabled_lastep = ep
+        #
+        # saw_oscan_disabled is a SEPARATE boolean, not inferred from
+        # oscan_disabled_lastep being nonzero. Epoch "0" is a legal value here
+        # (the sys-row validation above permits it — ten digits, integer,
+        # nothing more), and the default awk gives an uninitialized variable
+        # like oscan_disabled_lastep is also numeric 0. Without this flag, a file
+        # whose last sample legitimately carries epoch 0 and NO disabled
+        # marker at all would still satisfy `oscan_disabled_lastep == lastep`
+        # (0 == 0) below and misreport the scan as disabled — "absent reads as
+        # healthy", just inverted: here "absent" reads as the alarm.
+        if (key == "disabled") {
+          saw_oscan_disabled = 1
+          if (ep > oscan_disabled_lastep) oscan_disabled_lastep = ep
+        }
         next
       }
     }
@@ -425,7 +438,10 @@ report() {
       # one $now of that run). When true, the orphan section simply did not
       # run on the last pass, so "not present in the final sample" proves
       # nothing — still_alive must read unknown, not false, for every tree.
-      scan_off_at_end = (oscan_disabled_lastep == lastep)
+      # saw_oscan_disabled gates this: without it, a file with no disabled
+      # marker at all could still hit oscan_disabled_lastep == lastep by both
+      # sitting at awk default zero (see the epoch-0 note above).
+      scan_off_at_end = (saw_oscan_disabled && oscan_disabled_lastep == lastep)
 
       # Out-of-order epochs are an error, not a silent reinterpretation: the old
       # sort produced a plausible-looking answer from a file that is truncated or
@@ -876,10 +892,15 @@ orphans() {
     return 2
   fi
   # An empty awk dynamic regex matches EVERY string (`A[p] ~ ""` is always
-  # true), so if the policy file failed to source and left either variable
-  # empty, PROV alone would turn every PPID-1 process into a reapable orphan —
-  # a silent failure mode: more output, not an error. Both must be checked.
-  if [ -z "${ORPHAN_MATCH_RE:-}" ] || [ -z "${ORPHAN_PROVENANCE_RE:-}" ]; then
+  # true), so a policy file that failed to source and left any of the three
+  # variables empty misbehaves either way: MATCH/PROV empty turns every
+  # PPID-1 process into a reapable orphan, EXCL empty silently filters every
+  # candidate back out (0 orphans found — indistinguishable from nothing to
+  # report, but this is the command that also drives --kill, so "quietly
+  # finds nothing" is as dangerous here as "quietly finds everything"). See
+  # the invariant comment in tools/orphan-policy.sh — all three are checked
+  # together, as one broken-policy condition.
+  if [ -z "${ORPHAN_MATCH_RE:-}" ] || [ -z "${ORPHAN_EXCLUDE_RE:-}" ] || [ -z "${ORPHAN_PROVENANCE_RE:-}" ]; then
     printf '%serror:%s cannot read %s/tools/orphan-policy.sh\n' "$C_RED" "$C_RST" "$REPO_DIR" >&2
     return 1
   fi

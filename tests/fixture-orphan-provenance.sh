@@ -157,6 +157,39 @@ else
   ok "  ...and does not fall through to matching everything"
 fi
 
+# ---------------------------------------------- the empty-EXCL guard (G1) ---
+# The opposite failure mode from PROV/MATCH: an empty EXCLUDE_RE does not turn
+# every process into an orphan, it turns `args[p] ~ EXCL` true for every one
+# of them, so scan_orphans() filters every real candidate back OUT. That is
+# indistinguishable from "nothing to report" on a command that also drives
+# --kill — a leaked node process below is a genuine candidate the guard must
+# refuse on, not silently swallow into a clean "no orphaned dev processes".
+# Uses an empty string, not `unset`, to match the actual failure mode (a
+# policy file that sources cleanly but leaves the assignment blank) rather
+# than tripping claude-watch's own `set -u` on an unset shell variable.
+(
+  ps() { printf '2 1 0.0 100 02:00:00 node app.js\n'; }
+  set -- --help
+  # shellcheck source=../claude-watch
+  . "$REPO/claude-watch" >/dev/null 2>&1
+  ORPHAN_EXCLUDE_RE=''
+  orphans
+) > "$TMP/guardx.out" 2> "$TMP/guardx.err"
+rc_guardx=$?
+if [ "$rc_guardx" != 0 ]; then ok "empty ORPHAN_EXCLUDE_RE: orphans refuses (exit $rc_guardx)"
+else bad "empty ORPHAN_EXCLUDE_RE: orphans refuses (got exit 0)"; fi
+if grep -q 'cannot read' "$TMP/guardx.err"; then
+  ok "  ...and names the policy file it could not read"
+else
+  bad "  ...and names the policy file it could not read"; sed 's/^/        /' "$TMP/guardx.err"
+fi
+if [ -s "$TMP/guardx.out" ]; then
+  bad "  ...and does not fall through to a clean \"no orphaned dev processes\" (a real leak was hidden)"
+  sed 's/^/        /' "$TMP/guardx.out"
+else
+  ok "  ...and does not fall through to a clean \"no orphaned dev processes\""
+fi
+
 # The complement: with the policy intact, the same run must NOT refuse — the
 # guard above is not simply always-on.
 (

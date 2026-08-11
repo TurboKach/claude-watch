@@ -308,6 +308,34 @@ echo "I. a disabled orphan scan must not present as the tree disappearing"
 if load_report "$I_DATE" I; then
   str "I orphan_scan_disabled is true at day end" 'd["orphan_scan_disabled"]' true
   str "I disabled scan reads unknown, not gone"   "$BY_NAME"'["leaky-tool"]["still_alive"]' None
+  # --json is not the only reader of this state — the human TEXT report has
+  # its own branch (claude-watch:522) that must reach the same conclusion.
+  # Asserting only against $JSON would leave that branch permanently
+  # unreviewed by this suite.
+  if grep -q 'unknown (scan disabled)' "$TEXT"; then
+    ok "I TEXT report also reads the orphan as unknown, not gone"
+  else
+    bad "I TEXT report also reads the orphan as unknown, not gone"; sed 's/^/        /' "$TEXT"
+  fi
+fi
+
+# ============================ J. epoch 0 must not fake a disabled marker ==
+# A single sys row whose epoch is literally "0" — legal input: the sys-row
+# validator accepts any plain integer of at most ten digits, "0" included
+# (claude-watch:312) — and NO orphan_scan-disabled row anywhere in the file.
+# oscan_disabled_lastep, awk's own zero-default for a variable that is never
+# assigned, must not be mistaken for "a marker was seen at epoch 0": that
+# collision would make lastep (also 0, the running max of this file's one
+# epoch) compare equal to it and report the scan as disabled when it was
+# never even mentioned in the file.
+J_DATE=2026-01-11
+{
+  sysrow 0 1.00 1000000 1000000 0 8
+} > "$TMP/raw/$J_DATE.tsv"
+
+echo "J. a legal epoch-0 sys row with no marker must not misreport scan-disabled"
+if load_report "$J_DATE" J; then
+  str "J orphan_scan_disabled stays false with no marker present" 'd["orphan_scan_disabled"]' false
 fi
 
 # ================================================== F/G/H. degenerate input ==
