@@ -44,6 +44,17 @@ DEADLINE="${CLAUDE_WATCH_DISK_DEADLINE:-120}"
 GRACE=3                                          # TERM -> KILL delay for the walk
 MAXDEPTH=4
 IDLE_DAYS=14
+# The boundary convention, shared with the analyzer: an entry whose mtime lands
+# EXACTLY on the 14-day cutoff counts as ACTIVE, not idle. `find -newer` is
+# strict, so the reference stamp is placed a second BEFORE the cutoff to make
+# that so. The two sides must agree: if the scanner calls exact-cutoff idle and
+# the analyzer calls it active, the cache says `confirmed` and the analyzer
+# silently downgrades it at print time, which reads as a bug in both.
+IDLE_SLACK=1
+# TEST HOOK, not a user knob (epoch seconds): the cutoff is 14 days before the
+# run, so a fixture cannot otherwise place a file exactly on a moving boundary.
+# Deliberately undocumented — do not put it in the README or the usage text.
+IDLE_CUTOFF="${CLAUDE_WATCH_DISK_IDLE_CUTOFF:-}"
 TOPN=20                                          # dir rows kept per group
 LOCK="$STATE/disk-scan.lock"
 LOCK_STALE=150                                   # seconds before a lock may be broken
@@ -205,8 +216,10 @@ START=$(date +%s)
 HOMEDEV=$(stat -f %d "$HOME" 2>/dev/null || printf '')
 
 # One reference file, so the idle test is a single find per hit instead of a
-# stat over every child.
-touch -t "$(date -v-${IDLE_DAYS}d +%Y%m%d%H%M.%S)" "$REF" 2>/dev/null
+# stat over every child. It is stamped IDLE_SLACK seconds before the cutoff, so
+# an entry sitting exactly on the cutoff is newer than it and reads as active.
+[ -n "$IDLE_CUTOFF" ] || IDLE_CUTOFF=$(date -v-${IDLE_DAYS}d +%s)
+touch -t "$(date -r $(( IDLE_CUTOFF - IDLE_SLACK )) +%Y%m%d%H%M.%S)" "$REF" 2>/dev/null
 
 past_deadline() { [ $(( $(date +%s) - START )) -ge "$DEADLINE" ]; }
 
