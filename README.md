@@ -355,6 +355,7 @@ Fixture-based tests for the report aggregation are the remaining gap; the smoke 
 - **CPU and memory only.** GPU and Neural Engine power are not measured; real per-process watts need `sudo powermetrics`. A process heating the machine mostly via GPU will under-report here.
 - **10-second resolution** in `claude-watch`. Spikes shorter than that are under-sampled.
 - **`advise` covers disk and leaks, not CPU or memory.** They are listed in its `deferred_domains` and it says so in its own footer, because a tool built to answer "why is my laptop hot" must not stay quiet about the part it cannot see. Even `report`'s CPU figures are partial by construction: anything under `CLAUDE_WATCH_FLOOR` (5% of one core) or outside the top `CLAUDE_WATCH_TOPN` (8) per sample is never recorded, so twenty processes at 4% — 0.8 cores — produce no rows at all. **A quiet CPU report is not a cool machine.**
+- **A non-numeric `CLAUDE_WATCH_ORPHAN_MIN` is handled inconsistently.** `orphans` rejects it (`is_uint`, exit 2), but `tools/sample.sh` and `tools/advise-leaks.sh` pass it to awk, where `MIN * 60` coerces it to `0` — so `advise` flags every unparented process while `orphans` refuses to scan at all. An empty or unset value is fine and agrees everywhere; only a set-but-invalid one diverges. Set it to an integer, or leave it unset.
 
 ## Uninstall
 
