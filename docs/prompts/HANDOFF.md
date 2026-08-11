@@ -9,7 +9,10 @@ Repo: https://github.com/TurboKach/claude-watch — public, MIT, `main`.
 > shape of things; this file remains the reference for gotchas (§4) and the decisions log (§3).
 >
 > Since this was written, the tool gained the reaping commands (§11), a `--json` agent interface and
-> two Claude Code skills (§12), and a read-only smoke suite (§7a). All merged to `main`.
+> two Claude Code skills (§12), a read-only smoke suite (§7a), and `advise` / `disk` — ranked
+> findings over a multi-day window, which closes §7f and supersedes §7h's ranking. All merged to
+> `main`. `advise`'s design rationale lives in `advise-plan.md`; its known defects are §7i and the
+> one decision that overrode the plan is §7j.
 
 ---
 
@@ -44,10 +47,16 @@ That last point is why the tool reports machine-wide consumers alongside Claude 
 
 ```
 claude-top                  live tree; standalone, reads ps directly, no state
-claude-watch                CLI: report | orphans | worktrees | status | hook | doctor
+claude-watch                CLI: report | advise | disk | orphans | worktrees
+                                 | status | hook | doctor
 tools/sample.sh             ONE sampling pass; launchd runs it
 tools/orphan-policy.sh      what counts as a leaked dev process; sourced by BOTH
                             sample.sh (records) and claude-watch (kills)
+tools/advise.sh             window reader + shared scalars + ranking + renderers;
+                            sourced lazily inside advise(), never at file scope
+tools/advise-disk.sh        disk domain: reads the cache, applies thresholds
+tools/advise-leaks.sh       leaks domain: calls scan_orphans / scan_worktrees
+tools/disk-scan.sh          the ONLY thing that scans the filesystem
 tools/com.turbokach.claudewatch.plist   StartInterval=10, RunAtLoad
 
 ~/.claude-watch/
@@ -55,7 +64,19 @@ tools/com.turbokach.claudewatch.plist   StartInterval=10, RunAtLoad
   state/cwd/<pid>           cached session cwd (lsof is the expensive part)
   state/label/<pid>         cached iTerm tab label
   state/last-shown          new-day marker for the hook
+  state/disk.tsv            disk facts cache, TTL 6h (CLAUDE_WATCH_DISK_CACHE)
+  state/disk-scan.lock/     mkdir-lock owned by disk-scan.sh alone
+  state/advise.log          one line per advise run, for "unchanged since N days"
 ```
+
+Each `tools/advise-<domain>.sh` splits into a **pure** `<domain>_findings()` and an
+impure `advise_<domain>()`. That split is what makes "severity is a pure function of
+(value, threshold)" true in code rather than aspirationally, and it is what lets the
+fixtures run without the parent script.
+
+`advise` is read-only **structurally**, not by convention: it has no side-effecting
+path at all, and rejects `--kill`, `--remove`, `--yes` and `--refresh` with exit 2.
+It never scans; the disk domain reads a cache that only `disk --refresh` writes.
 
 Two invariants worth protecting:
 
@@ -82,7 +103,9 @@ Two invariants worth protecting:
 
 **Do not rediscover these the hard way.**
 
-1. **`ps` right-pads the pid column.** Parsing by leading characters silently drops sessions whose pid is narrower than the widest pid on the machine. Use `$6` (first token of argv) via awk field splitting. This was a real bug that only showed up because two sessions happened to have 5-digit pids.
+1. **`ps` right-pads the pid column.** Parsing by leading characters silently drops sessions whose pid is narrower than the widest pid on the machine. Split into fields with awk and take argv by index — never by character offset.
+
+   **Corrected 2026-08-06:** this entry used to say "use `$6` (first token of argv)". The sampler's `ps` line gained a column in schema v2, so argv now begins at **`$7`**. The two offsets downstream of it moved with it. If you are copying this idiom into new code, read the live `ps -axo` list in `tools/sample.sh` and count — do not trust either number in this file.
 
 2. **macOS `awk` is version 20200816 and byte-oriented.** `length("├─")` is **6**, not 2. Worse, the continuation-byte class `"[\200-\277]"` *errors out* in a UTF-8 locale. Any awk doing display-width work must run under `LC_ALL=C` and count cells manually (see `cells()`/`trunc()` in `claude-top`). Truncating a coloured string naively also cuts ANSI escapes in half.
 
@@ -134,7 +157,13 @@ Two invariants worth protecting:
     byte-identical test**; when they drifted, every freshly-STALE worktree was refused at removal
     time with "changed since it was listed". Covered by `tests/fixture-worktree-unpushed.sh`.
 
-18. **`pgrep -f codex` is useless on macOS.** The path `/var/run/com.apple.security.cryptexd/codex.system/...` appears in the inherited environment of nearly every process, so the string "codex" in argv matches almost everything. Any future Codex detection needs a different key.
+18. **`df -k /` measures the wrong volume.** On APFS `/` is the sealed system volume — it reported **46% used** on this machine while `df -k "$HOME"` reported `/System/Volumes/Data` at **96%**. Same free space, wildly different `used`, and no symptom: an implementer who reaches for `/` gets a reassuring, wrong answer that looks entirely plausible. Always `df -k "$HOME"`.
+
+    The denominator is `volume_total_kb = used_kb + avail_kb`, and every percentage in the disk domain divides by that and nothing else. `df`'s **Size** column is the APFS *container*, which includes space this volume cannot claim — dividing by it turns 95.3% used into a comforting 87.3% on a volume with 19.8GiB left. `df`'s **Capacity** column (96%) is computed with reserved space and is not re-derivable from anything published, so it is recorded and quoted as *df says*, never computed against.
+
+19. **Sampler schema v2, and two data eras in one window.** The sampler records more per sample than it did (memory size, swap cap, and the fields the deferred CPU/memory analyzer needs), so raw TSV has **two eras** and a window that spans the change contains both. The era is decided **per `sys` row**, not per file — a truncated row (the sampler appends with `>>`; a panic mid-append is possible) must degrade that one row and must never silently read as estimate-era. Nothing that reads raw TSV may assume a fixed column count for the file.
+
+20. **`pgrep -f codex` is useless on macOS.** The path `/var/run/com.apple.security.cryptexd/codex.system/...` appears in the inherited environment of nearly every process, so the string "codex" in argv matches almost everything. Any future Codex detection needs a different key.
 
 ---
 
@@ -211,14 +240,100 @@ The known blind spot. A process heating the machine mostly via GPU under-reports
 ### 7e. Sleep/wake gaps
 Coverage is `samples × interval`, and the interval is derived from the data (median delta, ignoring gaps >600s). A closed laptop produces a long gap that is excluded — verify the "observed" figure reads sensibly across an overnight sleep.
 
-### 7f. Weekly/monthly rollups
-`claude-watch report` handles one day. A `--week` view over the retained window is a natural extension, and all the data is already there.
+### 7f. Weekly/monthly rollups — DONE
+Closed by `advise`'s window selector: `--window 24h | week | month | Nh | Nd | Nw`, clamped to
+`CLAUDE_WATCH_KEEP_DAYS` and honest about how much data actually exists inside the requested span
+(`requested_days` / `available_days` / `covered_days` / `missing_or_failed_days`). The window is
+read **once** per run and its metadata comes out of the same pass, so a second consumer (the v2
+CPU/memory analyzer) folds in rather than re-reading — a month window costs ~4.4s of read before
+`gzcat`, which does not survive being done twice.
+
+`claude-watch report` still handles one day only, deliberately. It is a digest of a day; the
+multi-day view is a different question and got a different command.
 
 ### 7g. Orphan actions — DONE
 Shipped as `claude-watch orphans [--kill]` and `claude-watch worktrees [--remove]`. See §11.
 
 ### 7h. Disk: agent transcripts are the biggest reclaimable thing on the machine
 Measured 2026-08-06: `~/.claude` **5.9G** (of which `~/.claude/projects` transcripts **3.7G**) and `~/.codex/sessions` **783M** across 3254 files. That dwarfs anything the process or worktree reaping recovers (~170M combined). Deliberately left out of the reaping commands because deleting transcripts is irreversible and needs its own rules about what Claude Code still needs in order to resume a session. Worth its own plan.
+
+> **Correction, measured 2026-08-06 (later the same day, during the `advise` plan).** The heading
+> above is wrong and is left standing so the mistake is legible: **transcripts are fourth, not
+> first.** The real ranking of reclaimable space on this machine:
+>
+> | thing | size |
+> |---|---|
+> | rebuildable build artifacts under `~/Dev` (57 dirs) | **~25.5 GiB** — `buzz/target` 11.0G, `src-tauri/target` 6.5G, plus the `.venv`s and `.next`s |
+> | `node_modules` under `~/Dev` | **~4.8 GiB** |
+> | `~/.claude` | 6.0G |
+> | `~/.codex/sessions` | 783M |
+>
+> The volume (`/System/Volumes/Data`) is at **4.7% available — 19.8 GiB of 422 GiB**. The original
+> claim came from measuring `~/.claude` and `~/.codex` and nothing else: the biggest thing on the
+> disk was never counted, so the thing that *was* counted won. Rebuildable artifacts are also the
+> *safer* target — they come back from a build, whereas a deleted transcript is gone — which is why
+> v1 prints removal commands for confirmed build output and reports transcripts with a size and no
+> command at all.
+
+### 7i. Known defects, deliberately not fixed
+
+Recorded here rather than fixed, each with the reason.
+
+**`report --json`'s `minfree` can never record a genuine zero.** In `report()`'s `END` block
+(`claude-watch:263` before the aggregation rewrite, ~`:312` after — grep the idiom, not the line):
+`if (minfree == 0 || $6 + 0 < minfree)`. The sentinel for "unset" is the same value as a legitimate
+measurement, so a sample reporting free = 0 is overwritten by whatever comes next, and `min_free_kb`
+ends up as the *last* sample's value rather than the minimum. Pre-existing, and the case is rare
+enough (free memory reported as exactly 0 KB) that changing the aggregation was not worth the
+`report --json` golden-diff risk in this release. **The v2 memory analyzer must not copy the idiom**
+— use a separate `seen` flag, not a magic zero.
+
+**`tools/sample.sh` has no single-writer lock.** It assigns `now` early and appends only at the end,
+so two concurrent samplers can interleave and inflate the sample count. `report()` now *detects*
+every resulting drift and says so on stderr, but it cannot prevent it. The open question, stated
+plainly because it is a real trade and not an oversight: **lock and drop a sample, or keep reporting
+drift.** A lock silently loses a sample where the drift is at least announced today, and it adds
+persistent state to a sampler whose entire design premise is that nothing stays resident between
+samples (§2, invariant 1). **Decided for this release: keep reporting drift.** Revisit only with
+evidence that the drift is frequent enough to distort a report.
+
+**`doctor`'s sampler-pileup check false-positives during multi-agent runs.** It counts
+`pgrep -f 'tools/sample.sh'`, which matches *any* shell command line quoting that filename — a test
+harness, a grep, another agent's editor invocation — not just real samplers. Same shape of defect as
+§4.20's `pgrep -f codex`. It errs toward a false alarm on a healthy machine, which is the harmless
+direction, so it stays until someone needs `doctor` to be quiet during fan-out.
+
+**Deferred v2 scope: the CPU and memory analyzer.** Not built in v1, and the reason it is not built
+is worth keeping: the sampler's CPU view is blind twice over (everything under `CLAUDE_WATCH_FLOOR`,
+and everything past `CLAUDE_WATCH_TOPN` per sample), so shipping CPU advice before addressing that
+means shipping a confident all-clear. v1 carries the caveat text instead, in `caveats[]`, in the
+human footer, in SKILL.md and in README's Limitations. `docs/prompts/advise-plan.md` §10 holds the
+full unit spec with every finding already verified against the code — per-pid differencing, the
+`cpu_seconds <= interval × ncpu` sanity invariant, `cpu.unexplained_load` from the `sys` row's load
+average, pageout *deltas* rather than since-boot counters, the unratified thresholds, and the
+fixture list. Read it before rebuilding any of that from scratch. v1 makes it cheaper: the sampler
+already records what v2 needs, the window pass already emits metadata rows for a second consumer to
+fold into, and the contracts already carry `cpu_basis`, `CW_MEMSIZE_KB` and `CW_SWAP_CAP_MB`.
+
+Also still open and not lost: §7b unit unification, §7c GPU/ANE, §7d retention outside the hook,
+per-app breakdown of `~/Library/Containers` (TCC-hostile to walk), and transcript deletion commands.
+
+### 7j. User decision that overrode the plan: partial scans cap per group, not globally
+
+The plan had a partial disk scan cap **every** reclaim finding at `info`. Overridden: the cap
+applies **only to groups whose own measurement was affected**.
+
+Why: on any Mac without Full Disk Access, `~/Library/Caches` and `~/Library/Containers` deny
+permission on every single scan. A global cap therefore mutes the 25.5 GiB rebuildable finding —
+fully measured, entirely actionable — down to `info` **forever, on essentially every Mac**. The cap
+was written to stop the tool making confident claims about numbers it did not measure; applied
+globally it does the opposite, hiding a number it measured perfectly well behind a permission error
+somewhere else.
+
+Mechanically it is a **5th column on the cache's `group` row** (`affected ∈ 0|1`). The global
+`scan partial=1` still drives the summary banner and the "this is a floor" language; the per-group
+flag drives **severity capping only**. `disk.volume_low` is unaffected either way — it comes from
+`df`, which always completes.
 
 ---
 
@@ -228,6 +343,11 @@ Measured 2026-08-06: `~/.claude` **5.9G** (of which `~/.claude/projects` transcr
 claude-watch                    # today so far
 claude-watch report yesterday   # what the hook prints
 claude-watch report 2026-08-01  # any retained day
+claude-watch advise             # what should I fix, ranked worst-first
+claude-watch advise --window week --json        # or month / Nh / Nd / Nw
+claude-watch advise --show-thresholds           # every knob and its source
+claude-watch disk               # disk domain from cache; never scans
+claude-watch disk --refresh     # the ONLY scan (~10s, hard 120s deadline)
 claude-watch status             # sampling alive? how recent?
 claude-watch doctor             # 8 checks, exit 0 when healthy
 claude-watch orphans            # list leaked process trees; --kill to reap
@@ -239,7 +359,16 @@ launchctl load   ~/Library/LaunchAgents/com.turbokach.claudewatch.plist
 tail -f ~/Library/Logs/claudewatch.err.log     # must stay empty
 ```
 
-Raw data is plain TSV — `epoch, kind, key, cores, rss_kb, detail`, where `kind` is `sys` | `session` | `proc` | `orphan`. Grep it directly when debugging a report.
+Raw data is plain TSV — `epoch, kind, key, cores, rss_kb, detail, …`, where `kind` is `sys` |
+`session` | `proc` | `orphan`. Grep it directly when debugging a report, but **do not assume a fixed
+column count**: schema v2 added fields, so a retained window contains rows from both eras and the
+era is decided per `sys` row (§4.19).
+
+The disk facts cache (`state/disk.tsv`) is a separate 5-column TSV, `kind` ∈ `epoch` | `scan` |
+`note` | `vol` | `group` | `dir`. A cache with a `note` row and no `scan partial=1` is malformed.
+
+Exit codes: `0` ran (findings may be `critical` — a full disk is not a tool failure, `doctor` is the
+health gate); `1` data directory unreadable, or the cache could not be written; `2` usage error.
 
 ---
 
@@ -252,7 +381,9 @@ Raw data is plain TSV — `epoch, kind, key, cores, rss_kb, detail`, where `kind
 - **Don't parse `ps` by column offsets.**
 - **Keep session labels absent rather than wrong** when a cwd is ambiguous.
 - **Session labels are a soft dependency** on `claude-code-statusline`, which writes `~/.claude/session-labels/`. Without it, labels are omitted and everything else works. Don't turn this into a hard dependency.
-- The repo's README sample output uses **neutral project names** on purpose. The original history contained real ones and was squashed to remove them — keep published samples anonymised.
+- The repo's README sample output uses **neutral project names** on purpose. The original history contained real ones and was squashed to remove them — keep published samples anonymised. **This now extends to `advise`**, whose findings embed absolute paths from `~/Dev` and `~/Downloads` verbatim: any sample output in README, SKILL.md or a plan uses `/Users/you/…` and invented project names. Paste a real `advise --json` into a document and you have published the user's project list.
+- **`advise` must never scan, and must never re-rank downstream.** Severity, `severity_rank` and `priority` are computed once and published; the skill relays them. A relay that re-derives severity is the failure the `primary` object exists to prevent.
+- **No domain that was not measured may say `ok`.** `unknown` (1) outranks `ok` (0) in the published order for exactly this reason: a broken measurement must not read as health. `measurement_state: "unavailable"` ⟺ `severity: "unknown"` is fixture-asserted.
 - **Both reaping commands list by default.** `--kill` / `--remove` are what make them destructive; keep the bare command a dry run.
 - **Never widen `is_agent_worktree()`** to cover worktrees the user made by hand. Hand-made worktrees being *structurally* invisible — not merely deprioritised — is what makes the bulk "yes to all" safe.
 - **Leftover agent branches are reported, never deleted.** A branch is cheap and may be the only copy of unmerged work.
@@ -286,7 +417,7 @@ backdated worktrees, and has no automated coverage. See §7a.
 
 ## 12. Agent interface
 
-`report`, `orphans`, `worktrees` and `status` take `--json`. `--json` prints and returns before any
+`advise`, `disk`, `report`, `orphans`, `worktrees` and `status` take `--json`. `--json` prints and returns before any
 confirmation or kill path is reachable, so it is read-only by construction, not by convention.
 Report rankings are sorted **once**, above the human/JSON branch, so the two modes cannot disagree
 about order. Everything user-derived (cwds, session labels, argv, paths) goes through `jesc()`.
