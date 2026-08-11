@@ -551,5 +551,31 @@ eq "  ... measurement_state unavailable, not complete"  "$(field "$(srow)" 4)" u
 eq "  ... never claims processes were counted"          "$(printf '%s' "$NOW_OUT" | grep -c 'no leaked processes')" 0
 eq "  ... no findings for a domain that was never measured" "$(nfrows)" 0
 
+echo "advise_leaks / orphans: CLAUDE_WATCH_ORPHAN_MIN override must agree (U-min)"
+
+# tools/advise-leaks.sh:365 called scan_orphans with ORPHAN_MIN_DEFAULT
+# unconditionally, ignoring CLAUDE_WATCH_ORPHAN_MIN -- so raising the
+# override above a process's age silenced `orphans` while `advise` kept
+# reporting the same process as a leak. Same live-claude-watch sourcing
+# pattern as the P1 test above; ps reports one PPID-1 "node app.js" (matches
+# ORPHAN_MATCH_RE) whose age straddles a 90-minute override on either side.
+orphan_agree_case() {  # <etime> -> "advise:<0|1> orphans:<0|1>"
+  local etime=$1
+  (
+    ps() { printf '2 1 0.0 102400 %s node app.js\n' "$etime"; }
+    set -- --help
+    # shellcheck source=../claude-watch
+    . "$REPO/claude-watch" >/dev/null 2>&1
+    unset -f scan_worktrees
+    CLAUDE_WATCH_ORPHAN_MIN=90
+    al=$(advise_leaks 2>/dev/null | grep -c 'leaks\.orphans')
+    oj=$(orphans --json 2>/dev/null | grep -c '"root_pid"')
+    printf 'advise:%s orphans:%s' "$([ "$al" -gt 0 ] && echo 1 || echo 0)" "$([ "$oj" -gt 0 ] && echo 1 || echo 0)"
+  )
+}
+
+eq "80-min orphan under 90-min override -> reported by neither" "$(orphan_agree_case 01:20:00)" "advise:0 orphans:0"
+eq "100-min orphan over 90-min override -> reported by both"    "$(orphan_agree_case 01:40:00)" "advise:1 orphans:1"
+
 printf '%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ]

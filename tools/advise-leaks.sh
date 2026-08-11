@@ -362,7 +362,10 @@ advise_leaks() {
   w=$(mktemp) || { rm -f "$o"; leaks_findings "" ""; return 1; }
 
   if declare -F scan_orphans >/dev/null 2>&1; then
-    scan_orphans "${ORPHAN_MIN_DEFAULT:-60}" > "$o" 2>/dev/null && ov=$(leaks_agg_orphans "$o")
+    # Same effective-min expression as tools/sample.sh:26 and claude-watch:904 —
+    # this used to skip the CLAUDE_WATCH_ORPHAN_MIN override, so `advise` and
+    # `orphans` could disagree about whether a given orphan counts as a leak.
+    scan_orphans "${CLAUDE_WATCH_ORPHAN_MIN:-${ORPHAN_MIN_DEFAULT:-60}}" > "$o" 2>/dev/null && ov=$(leaks_agg_orphans "$o")
   fi
   if declare -F scan_worktrees >/dev/null 2>&1; then
     # One lsof sweep, exactly as the worktrees command does it: without it every
