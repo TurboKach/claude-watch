@@ -19,7 +19,11 @@ TOPN="${CLAUDE_WATCH_TOPN:-8}"              # cap on machine-wide rows per sampl
 POLICY="$(dirname "${BASH_SOURCE[0]:-$0}")/orphan-policy.sh"
 # shellcheck source=orphan-policy.sh
 . "$POLICY" || { echo "claude-watch: cannot read $POLICY" >&2; exit 1; }
-ORPHAN_MIN="${CLAUDE_WATCH_ORPHAN_MIN:-$ORPHAN_MIN_DEFAULT}"  # unparented dev processes older than this are flagged
+# The inner :-60 matches claude-watch:893 and tools/advise-leaks.sh:365 — the
+# same explicit fallback everywhere, so a policy file that leaves
+# ORPHAN_MIN_DEFAULT empty (SKIP_ORPHANS above only covers the three regexes)
+# cannot give this consumer a 0-minute threshold while the other two use 60.
+ORPHAN_MIN="${CLAUDE_WATCH_ORPHAN_MIN:-${ORPHAN_MIN_DEFAULT:-60}}"  # unparented dev processes older than this are flagged
 
 mkdir -p "$RAW" "$STATE/cwd" "$STATE/label" || exit 1
 

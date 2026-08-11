@@ -233,6 +233,10 @@ report() {
     }
     function cores_col(c) { return (c >= 4) ? C_RED : (c >= 1) ? C_HOT : C_OK }
     function tilde(p) { sub("^" HOME_DIR, "~", p); return p }
+    # The one canonical-epoch test, shared by every row kind that needs it — see
+    # its use on sys rows below for why: plain integer, no leading zero, at most
+    # ten digits (the exact-integer bound that keeps epoch equality injective).
+    function canon_epoch(e) { return (e ~ /^(0|[1-9][0-9]*)$/ && length(e) <= 10) }
 
     # --json exists so an agent reads values instead of regexing a layout that
     # is free to change. Session labels, cwds and process names are arbitrary
@@ -309,7 +313,7 @@ report() {
         # The bound is a length() test, not /[0-9]{1,10}/: macOS awk 20200816
         # does not implement brace intervals and matches them as literal text,
         # which would reject every real ten-digit epoch instead.
-        if ($1 !~ /^(0|[1-9][0-9]*)$/ || length($1) > 10) { badep++; next }
+        if (!canon_epoch($1)) { badep++; next }
         # Rows are append-only and time-ordered, so an epoch differing from the
         # previous one is a new sample: adjacency dedupes without keeping every
         # epoch. The gap histogram and the running max replace the two arrays a
@@ -381,7 +385,18 @@ report() {
         # marker at all would still satisfy `oscan_disabled_lastep == lastep`
         # (0 == 0) below and misreport the scan as disabled — "absent reads as
         # healthy", just inverted: here "absent" reads as the alarm.
-        if (key == "disabled") {
+        #
+        # This row epoch gets no dedicated dispatch of its own — unlike a sys
+        # row, a malformed one is never counted or reported, just ignored — so
+        # it must still pass canon_epoch() before it can move either running
+        # max. Skipping that would let a damaged or fabricated row (say "000",
+        # a numeric-string zero that never updates oscan_disabled_lastep off
+        # its own default-zero start) stand in for a real marker. The equality
+        # test below only ever fires against lastep, which is itself only ever
+        # set from a canonically-valid sys epoch, so requiring canon_epoch()
+        # here is what ties a "disabled" marker to an actual observed sample
+        # rather than to any string that happens to compare equal.
+        if (key == "disabled" && canon_epoch(ep)) {
           saw_oscan_disabled = 1
           if (ep > oscan_disabled_lastep) oscan_disabled_lastep = ep
         }
@@ -588,7 +603,18 @@ tmp_cleanup() {
 # Emits, per orphan tree, one T row followed by its P rows in tree order:
 #   T <root> <name> <age_s> <subtree_rss_kb> <nproc> <subtree_cpu>
 #   P <root> <pid> <depth> <rss_kb> <age_s> <argv>
+#
+# The required-non-empty guard lives HERE, not in each caller, because this is
+# the one place ORPHAN_MATCH_RE/EXCLUDE_RE/PROVENANCE_RE actually get consumed
+# (the invariant in tools/orphan-policy.sh). orphans() below still checks first
+# so a human gets a specific "cannot read orphan-policy.sh" error; a caller
+# that skips that check — tools/advise-leaks.sh's advise_leaks, or anything
+# added later — gets the same fail-closed behavior for free instead of a
+# measured-empty scan silently reading as "nothing leaked".
 scan_orphans() {
+  if [ -z "${ORPHAN_MATCH_RE:-}" ] || [ -z "${ORPHAN_EXCLUDE_RE:-}" ] || [ -z "${ORPHAN_PROVENANCE_RE:-}" ]; then
+    return 1
+  fi
   ps -Ao pid=,ppid=,pcpu=,rss=,etime=,args= 2>/dev/null | LC_ALL=C awk \
     -v MATCH="$ORPHAN_MATCH_RE" -v EXCL="$ORPHAN_EXCLUDE_RE" -v PROV="$ORPHAN_PROVENANCE_RE" -v MIN="$1" '
     function esec(e,   a, b, d, n, h, m) {

@@ -194,5 +194,54 @@ else
   bad "today's own marker is created"
 fi
 
+printf '\n  -- P2: an empty ORPHAN_MIN_DEFAULT must not become a 0-minute threshold --\n'
+# All three match regexes are intact this time — only the age-floor default is
+# missing, a distinct edit mistake from F1/G1's missing regex. SKIP_ORPHANS
+# (checked above) does not cover ORPHAN_MIN_DEFAULT, so before this fix the
+# sampler passed the empty string straight to awk's `OM * 60`, which coerces
+# to 0 — every age-qualified process flags, at any age, while claude-watch
+# orphans and advise-leaks.sh both still default to 60 minutes
+# (`${ORPHAN_MIN_DEFAULT:-60}`). Two different thresholds from one broken
+# variable is exactly the bug: pin the sampler's OWN behaviour against the
+# same default, not against the other readers (which cannot run headless ps
+# scans here).
+STUBM="$TMP/stubm"; mkdir -p "$STUBM/tools"
+cp "$REPO/tools/sample.sh" "$STUBM/tools/sample.sh"
+cat > "$STUBM/tools/orphan-policy.sh" <<'POLICY'
+ORPHAN_MATCH_RE='(node|tsx|npm|npx|yarn|pnpm|bun|deno)'
+ORPHAN_EXCLUDE_RE='(Applications|/usr/libexec|/System/)'
+ORPHAN_PROVENANCE_RE='(/private)?/tmp/claude-[0-9]+/|/\.claude/worktrees/'
+ORPHAN_MIN_DEFAULT=
+POLICY
+
+HOME6="$TMP/home6"; mkdir -p "$HOME6"
+# pid 5000: a 5-minute-old node process, reparented to launchd (ppid 1) — too
+# young to flag at the correct 60-minute default, but well past a 0-minute one.
+# pid 5001: a 90-minute-old node process — the positive control, proving a
+# fixed threshold is still being ENFORCED rather than the section having been
+# disabled outright.
+SNAP=$'5000 1 0.0 10000 05:00 0:01.00 node app.js\n5001 1 0.0 10000 1:30:00 0:01.00 node app2.js'
+export SNAP
+ps() { printf '%s\n' "$SNAP"; }
+export -f ps
+CLAUDE_WATCH_FLOOR=0 CLAUDE_WATCH_MEMFLOOR=0 CLAUDE_WATCH_TOPN=8 \
+  CLAUDE_WATCH_HOME="$HOME6" bash "$STUBM/tools/sample.sh" >/dev/null 2>"$HOME6/err6"
+unset -f ps
+unset SNAP
+
+DAY6=$(ls "$HOME6/raw" 2>/dev/null | head -n1)
+if [ -z "$DAY6" ]; then
+  bad "sample.sh wrote a day file against an empty ORPHAN_MIN_DEFAULT"
+else
+  young=$(awk -F'\t' '$2 == "orphan" && $3 == "node" && $6 == 300' "$HOME6/raw/$DAY6" | wc -l | tr -d ' ')
+  old=$(awk -F'\t' '$2 == "orphan" && $3 == "node" && $6 == 5400' "$HOME6/raw/$DAY6" | wc -l | tr -d ' ')
+  [ "$young" = 0 ] \
+    && ok "a 5-minute-old process is NOT flagged (threshold fell back to 60m, matching claude-watch/advise-leaks.sh)" \
+    || bad "a 5-minute-old process is NOT flagged (got $young — an empty default silently became a 0-minute threshold)"
+  [ "$old" = 1 ] \
+    && ok "a 90-minute-old process IS still flagged (the fallback enforces a real threshold, not \"scanning disabled\")" \
+    || bad "a 90-minute-old process IS still flagged (got $old matches, want 1)"
+fi
+
 printf '\n%d passed, %d failed\n' "$pass" "$fail"
 [ "$fail" -eq 0 ]

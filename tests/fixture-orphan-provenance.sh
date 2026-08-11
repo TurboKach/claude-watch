@@ -190,6 +190,31 @@ else
   ok "  ...and does not fall through to a clean \"no orphaned dev processes\""
 fi
 
+# ---------------------------------------- scan_orphans() itself, direct (P1) --
+# orphans() (above) checks the policy before ever calling scan_orphans() — but
+# tools/advise-leaks.sh's advise_leaks() calls scan_orphans() directly with no
+# check of its own (advise-leaks.sh:365). A guard that lives only in orphans()
+# leaves that path to read a broken policy as a measured "0 leaked processes".
+# So the guard has to live INSIDE scan_orphans() too; this calls the function
+# straight, bypassing orphans() entirely, to prove that.
+(
+  ps() { printf '2 1 0.0 100 02:00:00 node app.js\n'; }
+  set -- --help
+  # shellcheck source=../claude-watch
+  . "$REPO/claude-watch" >/dev/null 2>&1
+  ORPHAN_EXCLUDE_RE=''
+  scan_orphans 0
+) > "$TMP/direct.out" 2> "$TMP/direct.err"
+rc_direct=$?
+if [ "$rc_direct" != 0 ]; then ok "scan_orphans() itself refuses on an empty ORPHAN_EXCLUDE_RE (exit $rc_direct)"
+else bad "scan_orphans() itself refuses on an empty ORPHAN_EXCLUDE_RE (got exit 0)"; fi
+if [ -s "$TMP/direct.out" ]; then
+  bad "  ...and prints no rows at all (a measured-empty scan, not a refusal)"
+  sed 's/^/        /' "$TMP/direct.out"
+else
+  ok "  ...and prints no rows at all"
+fi
+
 # The complement: with the policy intact, the same run must NOT refuse — the
 # guard above is not simply always-on.
 (

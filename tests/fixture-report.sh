@@ -338,6 +338,30 @@ if load_report "$J_DATE" J; then
   str "J orphan_scan_disabled stays false with no marker present" 'd["orphan_scan_disabled"]' false
 fi
 
+# ==================== K. a malformed status-row epoch must not count ==========
+# Combines J's legal-epoch-0 sys row with a MALFORMED "000" disabled marker.
+# "000" is a numeric string equal to 0 — awk parses $1 as a number for the `>`
+# comparison that tracks oscan_disabled_lastep — but it is not a CANONICAL
+# epoch (claude-watch's own sys-row rule rejects leading zeros other than a
+# bare "0"), so it is not what the real sampler ever writes: pure corruption.
+# Before validating this row the same way, saw_oscan_disabled=1 fired on sight
+# of the row regardless of its epoch, and oscan_disabled_lastep — never having
+# been raised off its own default-zero start by a "000" that never beats `>` —
+# stayed at 0 too, which the legal epoch-0 sys row's lastep then matched. That
+# reported a day with no genuine marker in it as scan-disabled. J alone (no
+# marker at all) cannot catch this: it is the marker's malformed epoch,
+# stacked on a legal epoch-0 sample, that used to trip the false alarm.
+K_DATE=2026-01-12
+{
+  sysrow 0 1.00 1000000 1000000 0 8
+  oscanrow 000
+} > "$TMP/raw/$K_DATE.tsv"
+
+echo "K. a malformed (non-canonical) orphan_scan epoch must not trigger scan-disabled"
+if load_report "$K_DATE" K; then
+  str "K orphan_scan_disabled stays false against a malformed marker epoch" 'd["orphan_scan_disabled"]' false
+fi
+
 # ================================================== F/G/H. degenerate input ==
 # Three ways to hand the aggregation nothing to divide by. None may produce
 # invalid JSON, a nan, or a non-zero exit.

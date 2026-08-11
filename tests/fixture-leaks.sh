@@ -522,5 +522,34 @@ eq "...measurement_state unavailable"                 "$(field "$(srow)" 4)" una
 eq "...same reason leaks_findings already uses when neither scan can run" \
    "$(field "$(srow)" 5)" scan_permission_denied
 
+echo "advise_leaks: a broken orphan policy must not read as a clean scan (P1)"
+
+# advise-leaks.sh:365 calls the real scan_orphans() (defined in claude-watch)
+# directly, with no policy check of its own. Before this fix that meant an
+# empty ORPHAN_EXCLUDE_RE made scan_orphans() run anyway, filter every
+# candidate back out via `args ~ ""`, and hand advise_leaks a MEASURED
+# all-zero scan — advise_leaks read that exactly like "0 leaked processes",
+# the same all-clear text as a genuinely clean machine. The fix moved the
+# guard into scan_orphans() itself, so this sources the real claude-watch
+# (for the real scan_orphans), breaks the policy the same way orphans()'s own
+# guard test does, and calls the REAL advise_leaks end to end.
+# scan_worktrees is unset first so this pins the orphans half in isolation —
+# the same "a scan did not run" shape §A3 already covers above, not a live
+# worktree scan of this machine's own git state.
+(
+  ps() { printf '2 1 0.0 100 02:00:00 node app.js\n'; }
+  set -- --help
+  # shellcheck source=../claude-watch
+  . "$REPO/claude-watch" >/dev/null 2>&1
+  unset -f scan_worktrees
+  ORPHAN_EXCLUDE_RE=''
+  advise_leaks
+) > "$TMP/brokenpolicy.out" 2>/dev/null
+NOW_OUT=$(cat "$TMP/brokenpolicy.out")
+eq "broken policy: leaks S row is unknown, not ok"      "$(field "$(srow)" 3)" unknown
+eq "  ... measurement_state unavailable, not complete"  "$(field "$(srow)" 4)" unavailable
+eq "  ... never claims processes were counted"          "$(printf '%s' "$NOW_OUT" | grep -c 'no leaked processes')" 0
+eq "  ... no findings for a domain that was never measured" "$(nfrows)" 0
+
 printf '%d passed, %d failed, %d skipped\n' "$pass" "$fail" "$skip"
 [ "$fail" -eq 0 ]
