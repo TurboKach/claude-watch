@@ -843,6 +843,39 @@ eq "  and DISK_ACTION_MAX commands print" \
 has "  largest first inside the tier"  "$(first_item "$A")" "rm -rf '$TMPR/rb1/target'"
 has "  the remainder is counted"       "$A" "+ 2 more"
 
+# D2c: the revalidation budget must follow size, not cache order. Group A
+# (node_modules, published) lists 20 small confirmed rows FIRST; group B
+# (rebuildable, published) lists 5 large confirmed rows SECOND — the same
+# shape as the live cache the plan diagnosed. DISK_RESTAT_MAX is forced to 5,
+# provably smaller than A's row count alone: under cache-order spending, A's
+# first 5 rows exhaust the whole budget before B is ever reached and B loses
+# every command to rows 1000x smaller. A's rows never need to exist on disk —
+# not being selected means disk_confirm_still_valid is never called on them.
+mk_target "$TMP/big1"; mk_target "$TMP/big2"; mk_target "$TMP/big3"
+mk_target "$TMP/big4"; mk_target "$TMP/big5"
+budget_body=$(printf 'group\tnode_modules\t26738688\t20\t0\n'
+  for n in $(seq 1 20); do
+    printf 'dir\t%s/tiny%d/target\t%d000\tnode_modules\tconfirmed\n' "$TMP" "$n" "$n"
+  done
+  printf 'group\trebuildable\t26738688\t5\t0\n'
+  printf 'dir\t%s/big1/target\t9000000\trebuildable\tconfirmed\n' "$TMP"
+  printf 'dir\t%s/big2/target\t8000000\trebuildable\tconfirmed\n' "$TMP"
+  printf 'dir\t%s/big3/target\t7000000\trebuildable\tconfirmed\n' "$TMP"
+  printf 'dir\t%s/big4/target\t6000000\trebuildable\tconfirmed\n' "$TMP"
+  printf 'dir\t%s/big5/target\t5000000\trebuildable\tconfirmed' "$TMP")
+good_cache "$TMP/budget.tsv" "$budget_body"
+save_r=$DISK_RESTAT_MAX; DISK_RESTAT_MAX=5
+CLAUDE_WATCH_DISK_GROUP_WARN_GIB=1000 from_cache "$TMP/budget.tsv"
+DISK_RESTAT_MAX=$save_r
+has "budget follows size: B's largest gets a command" \
+  "$(F disk.reclaimable.rebuildable 14)" "rm -rf '$TMPR/big1/target'"
+has "  and B's 5 rows are all revalidated" \
+  "$(F disk.reclaimable.rebuildable 13)" "Confidence: 5 confirmed, 0 likely"
+has "  displaced group A still produces a finding, 0 confirmed" \
+  "$(F disk.reclaimable.node_modules 13)" "Confidence: 0 confirmed, 20 likely"
+hasnt "  and A's action carries no command" \
+  "$(F disk.reclaimable.node_modules 14)" "rm -rf"
+
 # The 14d boundary, pinned without a wall-clock race. `find -newer` is strict,
 # so an entry sitting exactly on the stamp reads as idle — which is precisely
 # why disk_body builds the stamp at `date -v-14d -v-1S`, one second BEFORE the

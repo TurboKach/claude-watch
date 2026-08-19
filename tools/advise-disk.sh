@@ -923,6 +923,27 @@ disk_body() {
     disk_group_published "$pb" "$total" && pub="$pub$pa"$'\n'
   done < "$cache"
 
+  # Pass 2: which confirmed dir rows earn a probe. The budget follows size
+  # across ALL published groups, not cache order (D2c) — a row that fails
+  # disk_path_safe would never print a command anyway, so it never displaces
+  # a row that could. Newline-delimited for the same reason `pub` is: a path
+  # cannot contain a newline (advise_disk rejects such a row first).
+  local sel=$'\n' sk sa sb sc sd
+  while IFS=$'\t' read -r sb sa; do
+    sel="$sel$sa"$'\n'
+  done < <(
+    while IFS=$'\t' read -r sk sa sb sc sd || [ -n "$sk" ]; do
+      [ "$sk" = dir ] || continue
+      [ "$sd" = confirmed ] || continue
+      case $pub in
+        *$'\n'"$sc"$'\n'*) : ;;
+        *) continue ;;
+      esac
+      disk_path_safe "$sa" || continue
+      printf '%s\t%s\n' "$sb" "$sa"
+    done < "$cache" | sort -t $'\t' -k1,1nr | head -n "$DISK_RESTAT_MAX"
+  )
+
   local stamp cutoff
   # Rebase the clock rather than remember an offset, so the test below reads
   # `SECONDS` directly. Safe ONLY because disk_body is invoked through a process
@@ -949,12 +970,15 @@ disk_body() {
     touch -t "$cutoff" "$stamp" 2>/dev/null || { rm -f "$stamp"; stamp=''; }
   fi
 
-  local probes=0 k a b c d
+  local k a b c d
   while IFS=$'\t' read -r k a b c d || [ -n "$k" ]; do
     case $k in
       scan|note|group) printf '%s\t%s\t%s\t%s\t%s\n' "$k" "$a" "$b" "$c" "$d" ;;
       dir)
-        local conf=$d path=$a age='-' mt resolved
+        local conf=$d path=$a age='-' mt resolved selected=0
+        case $sel in
+          *$'\n'"$a"$'\n'*) selected=1 ;;
+        esac
         if [ -d "$a" ]; then
           mt=$(stat -f %m "$a" 2>/dev/null)
           disk_is_uint "$mt" && age=$(( now - mt )) && [ "$age" -ge 0 ] || age='-'
@@ -978,12 +1002,11 @@ disk_body() {
             conf=likely   # no command would be printed anyway; skip the probe
           elif [ -z "$stamp" ]; then
             conf=likely   # could not build the cutoff: refuse rather than guess
-          elif [ "$probes" -ge "$DISK_RESTAT_MAX" ]; then
-            conf=likely
+          elif [ "$selected" != 1 ]; then
+            conf=likely   # not among the top DISK_RESTAT_MAX rows by size across all published groups (D2c)
           elif [ "$SECONDS" -ge "$DISK_PROBE_SECONDS" ]; then
             conf=likely   # out of wall-clock budget: downgrade, never promote
           else
-            probes=$((probes + 1))
             if resolved=$(disk_confirm_still_valid "$a" "$stamp"); then
               path=$resolved
             else
