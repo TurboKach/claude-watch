@@ -5,9 +5,18 @@
 # synthetic tree, and so the analyzer can be tested against a hand-written cache
 # with no real disk involved.
 #
-# It NEVER walks $HOME blindly: that is slow and it trips TCC-protected
-# directories. Discovery is one bounded, single-volume `find` per configured repo
-# root, plus a fixed shortlist of directories whose kind is known from the path.
+# Discovery is one bounded, single-volume `find` per configured repo root, plus a
+# kind table of directories whose kind is known from the path (Downloads,
+# Library/Caches, Library/Containers, the .claude/.codex transcript dirs,
+# Library/Developer), measured by ONE bounded $HOME sweep (`du -kxd 4`, one
+# volume) rather than a separate `du` per entry. The sweep runs LAST, after the
+# repo roots, so they keep first claim on the deadline budget, and it is skipped
+# entirely once the deadline has passed. Everything the sweep sees that is not
+# under a kind-table path is an unattributed residual (see step 4b's `cover`
+# row) — never folded into a group. A denial inside the sweep affects only the
+# kind-table group whose path it names, never the whole scan (:29-37); only a
+# denial that names no recoverable path, or a sweep that fails with no stderr at
+# all, affects every group the sweep feeds.
 #
 # Output contract (five tab-separated columns, see the plan §3c):
 #   epoch  -           <unix>          -                -
@@ -292,6 +301,10 @@ confidence_of() {  # <path> <basename> <group>
 # Runs in a background subshell, so every result travels back through $RAWOUT as
 # it lands and a killed walk still yields what it had measured:
 #   H <group> <size_kb> <confidence> <path>   a measured directory
+#   T <group> <size_kb>                       a kind-table entry's own sweep
+#                                              total — worker-only, NEVER written
+#                                              to the cache; assembly prefers it
+#                                              over that group's summed H rows
 #   A <group>                                 THAT group's measurement is short
 #   S                                         a repo root finished
 #   V                                         a root skipped: other volume
@@ -355,46 +368,39 @@ measure() {  # <file of newline-delimited paths> — one batched du for the lot
   done < "$WORK/aff"
 }
 
-measure_fixed() {  # <path> <group> — the shortlist: kind is known from the path
-  local p=$1 grp=$2 size path drc berr="$WORK/berr" dout="$WORK/dout"
-  : > "$berr"
-  du -skx "$p" > "$dout" 2>"$berr"
-  drc=$?
-  while IFS="$TAB" read -r size path; do
-    [ -n "${path:-}" ] || continue
-    # Never `confirmed`: ~/Downloads and ~/Library/Caches are not directories a
-    # read-only tool gets to author an `rm -rf` for, however certain their kind.
-    printf 'H\t%s\t%s\t%s\t%s\n' "$grp" "$size" "likely" "$path" >> "$RAWOUT"
-  done < "$dout"
-  [ -s "$berr" ] && cat "$berr" >> "$ERRLOG"
-  { [ "$drc" != 0 ] || [ -s "$berr" ]; } && affect "$grp"
-  return 0
-}
-
 walk() {
-  local root rp dev p i n frc
-  local sp=() sg=()
+  local root rp dev p i frc relp rest grp dep
 
-  # Register the fixed shortlist as claimed prefixes BEFORE the roots, so that
+  # Register the kind table as claimed prefixes BEFORE the roots, so that
   # CLAUDE_WATCH_REPO_ROOTS=$HOME cannot count a hit under ~/Library/Containers
-  # twice — once in its own group and once inside the containers total.
-  n=0
-  for i in "$HOME/Downloads:downloads" \
-           "$HOME/Library/Caches:caches" \
-           "$HOME/Library/Containers:containers" \
-           "$HOME/.claude/projects:transcripts" \
-           "$HOME/.codex/sessions:transcripts"; do
-    p=${i%:*}
+  # twice — once in its own group and once inside the containers total. Each
+  # entry is <relpath-from-$HOME>:<group>:<detail_depth>: depth 0 means the
+  # whole directory is one measurement; depth > 0 means the entry ALSO gets a
+  # descendant row per child at exactly that depth (Library/Developer needs its
+  # immediate grandchildren — CoreSimulator/Devices, Xcode/DerivedData — broken
+  # out, not folded into one opaque total).
+  : > "$WORK/entries"
+  for i in "Downloads:downloads:0" \
+           "Library/Caches:caches:0" \
+           "Library/Containers:containers:0" \
+           ".claude/projects:transcripts:0" \
+           ".codex/sessions:transcripts:0" \
+           "Library/Developer:developer:2"; do
+    relp=${i%%:*}
+    rest=${i#*:}
+    grp=${rest%%:*}
+    dep=${rest#*:}
+    p="$HOME/$relp"
     [ -d "$p" ] || continue
     rp=$(physdir "$p") || continue
     [ -n "$rp" ] || continue
-    case "$rp" in *"$TAB"*|*"$NL"*) printf 'U\n' >> "$RAWOUT"; affect "${i##*:}"; continue ;; esac
+    case "$rp" in *"$TAB"*|*"$NL"*) printf 'U\n' >> "$RAWOUT"; affect "$grp"; continue ;; esac
     dev=$(stat -f %d "$rp" 2>/dev/null)
     if [ -n "$HOMEDEV" ] && [ "$dev" != "$HOMEDEV" ]; then
-      printf 'V\n' >> "$RAWOUT"; affect "${i##*:}"; continue
+      printf 'V\n' >> "$RAWOUT"; affect "$grp"; continue
     fi
-    sp[$n]=$rp; sg[$n]=${i##*:}; n=$((n + 1))
     printf '%s\n' "$rp" >> "$CLAIM"
+    printf '%s\t%s\t%s\n' "$rp" "$grp" "$dep" >> "$WORK/entries"
   done
 
   # --- configured repo roots ---
@@ -469,13 +475,99 @@ walk() {
     printf 'S\n' >> "$RAWOUT"
   done < "$WORK/roots"
 
-  # --- fixed shortlist, measured last so the repo roots get the budget first ---
-  i=0
-  while [ "$i" -lt "$n" ]; do
-    if past_deadline; then printf 'D\n' >> "$RAWOUT"; return 0; fi
-    measure_fixed "${sp[$i]}" "${sg[$i]}"
-    i=$((i + 1))
-  done
+  # --- one $HOME sweep, run last so the repo roots get first claim on the
+  # deadline budget. It measures every kind-table entry above from a SINGLE
+  # `du -kxd 4 $HOME`, into a file, never a pipe (same reason as measure()'s own
+  # du call above: in a pipeline du's exit status is unreadable). -x bounds it
+  # to one volume; -d 4 bounds which rows are PRINTED, not what is traversed —
+  # deep enough for Library/Developer's grandchildren (Library=1, Developer=2, +2 = 4).
+  if past_deadline; then printf 'D\n' >> "$RAWOUT"; return 0; fi
+  local homerp sout="$WORK/sweep.out" serr="$WORK/sweep.err" src wholesale g
+  homerp=$(physdir "$HOME")
+  [ -n "$homerp" ] || homerp=$HOME
+  du -kxd "$MAXDEPTH" "$homerp" > "$sout" 2>"$serr"
+  src=$?
+
+  # Emit T/H rows for the registered kind-table entries from this one sweep.
+  # Everything else $sout sees (the bulk of $HOME) matches no entry and is
+  # silently dropped here — an unattributed residual for step 4b's `cover` row
+  # to account for, never folded into a group.
+  CW_ENTRIES="$WORK/entries" LC_ALL=C awk -F'\t' '
+    BEGIN {
+      m = 0
+      while ((getline line < ENVIRON["CW_ENTRIES"]) > 0) {
+        split(line, f, "\t")
+        m++; epath[m] = f[1]; egrp[m] = f[2]; edepth[m] = f[3] + 0
+      }
+      close(ENVIRON["CW_ENTRIES"])
+    }
+    {
+      size = $1; path = $2
+      for (i = 1; i <= m; i++) {
+        if (path == epath[i]) {
+          if (edepth[i] == 0) printf "H\t%s\t%s\tlikely\t%s\n", egrp[i], size, path
+          else                printf "T\t%s\t%s\n", egrp[i], size
+          next
+        }
+        if (edepth[i] > 0) {
+          pre = epath[i] "/"
+          if (substr(path, 1, length(pre)) == pre) {
+            rest = substr(path, length(pre) + 1)
+            if (split(rest, seg, "/") == edepth[i]) {
+              printf "H\t%s\t%s\tlikely\t%s\n", egrp[i], size, path
+              next
+            }
+          }
+        }
+      }
+    }' "$sout" >> "$RAWOUT"
+
+  [ -s "$serr" ] && cat "$serr" >> "$ERRLOG"
+
+  # Failure attribution (:29-37): a denial must never mute a group it says
+  # nothing about. Each stderr line is matched to the table entry whose
+  # registered path is that path or a prefix of it — only THAT entry's group is
+  # affected. A line under no entry falls in the residual and affects no group
+  # (step 4b's coverage count, not severity). Only a line no path can be
+  # recovered from, or a non-zero exit with no stderr at all, taints every
+  # sweep-fed group — mirroring measure()'s own hit == "" fallback.
+  wholesale=0
+  if [ -s "$serr" ]; then
+    CW_ENTRIES="$WORK/entries" CW_ERR="$serr" LC_ALL=C awk -F'\t' '
+      BEGIN {
+        m = 0
+        while ((getline line < ENVIRON["CW_ENTRIES"]) > 0) {
+          split(line, f, "\t")
+          m++; epath[m] = f[1]; egrp[m] = f[2]
+        }
+        close(ENVIRON["CW_ENTRIES"])
+        while ((getline e < ENVIRON["CW_ERR"]) > 0) {
+          sub(/^[a-z]+: /, "", e)
+          sub(/: [^:]*$/, "", e)
+          if (e !~ /^\//) { print "WHOLESALE"; continue }
+          hit = ""
+          for (i = 1; i <= m; i++) {
+            if (e == epath[i] || index(e, epath[i] "/") == 1) { hit = egrp[i]; break }
+          }
+          print (hit == "") ? "RESIDUAL" : hit
+        }
+      }' | sort -u > "$WORK/sweepaff"
+    while IFS= read -r g; do
+      case "$g" in
+        ''|RESIDUAL) : ;;
+        WHOLESALE)   wholesale=1 ;;
+        *)           affect "$g" ;;
+      esac
+    done < "$WORK/sweepaff"
+  elif [ "$src" != 0 ]; then
+    wholesale=1
+  fi
+  if [ "$wholesale" = 1 ]; then
+    cut -f2 "$WORK/entries" | sort -u > "$WORK/sweepgroups"
+    while IFS= read -r g; do
+      [ -n "$g" ] && affect "$g"
+    done < "$WORK/sweepgroups"
+  fi
   return 0
 }
 
@@ -582,16 +674,26 @@ tmp="$CACHE_DIR/.disk.tsv.$$"
     BEGIN { while ((getline a < ENVIRON["CW_AFF"]) > 0) if (a != "") aff[a] = 1 }
     $1 == "H" {
       g = $2
-      if (!(g in tot)) glist[++gn] = g
+      if (!(g in seen0)) { glist[++gn] = g; seen0[g] = 1 }
       tot[g] += $3 + 0; cnt[g]++
       k = ++seen[g]
       KB[g, k] = $3 + 0; CF[g, k] = $4; PT[g, k] = $5
+    }
+    # A kind-table entry sweep total (T) is the true size of its whole
+    # subtree; the summed H rows are only its depth-N children and can fall
+    # short of that (content outside any tracked child, intermediate dirs).
+    # T wins whenever present — dir_count and the dir sample stay H-derived.
+    $1 == "T" {
+      g = $2
+      if (!(g in seen0)) { glist[++gn] = g; seen0[g] = 1 }
+      Ttot[g] = $3 + 0; hasT[g] = 1
     }
     END {
       OFS = "\t"
       for (gi = 1; gi <= gn; gi++) {
         g = glist[gi]
-        print "group", g, tot[g], cnt[g], (g in aff) ? 1 : 0
+        gt = (g in hasT) ? Ttot[g] : tot[g] + 0
+        print "group", g, gt, cnt[g] + 0, (g in aff) ? 1 : 0
       }
       for (gi = 1; gi <= gn; gi++) {
         g = glist[gi]

@@ -97,6 +97,12 @@ kb "$SRC/Downloads/iso" 500
 mkdir -p "$SRC/Library/Containers/app/node_modules"
 kb "$SRC/Library/Containers/app/node_modules/blob" 70  # must not be counted twice
 
+# D1a: the kind-table entry with detail_depth=2 — Library/Developer's own total
+# PLUS one dir row per depth-2 grandchild (CoreSimulator/Devices, Xcode/DerivedData).
+mkdir -p "$SRC/Library/Developer/CoreSimulator/Devices" "$SRC/Library/Developer/Xcode/DerivedData"
+kb "$SRC/Library/Developer/CoreSimulator/Devices/blob" 300
+kb "$SRC/Library/Developer/Xcode/DerivedData/blob" 250
+
 RP=$( cd -P "$SRC" && pwd -P )                          # the scanner emits physical paths
 
 # ------------------------------------------------------- run A: the tree -----
@@ -133,12 +139,22 @@ between "rebuildable group total is 100K"   "$(gtot rebuildable)" 100 112
 eq      "rebuildable counts 1 directory"    "$(gcount rebuildable)" "1"
 between "downloads group total is 500K"     "$(gtot downloads)" 500 520
 between "containers group total is 70K"     "$(gtot containers)" 70 96
+# developer = the kind-table T record (the sweep's own Library/Developer row),
+# not the summed H rows: CoreSimulator/Devices 300 + Xcode/DerivedData 250.
+between "developer group total is 550K (the sweep's own T row)" "$(gtot developer)" 550 578
+eq      "developer counts 2 directories (one per depth-2 child)" "$(gcount developer)" "2"
 
 # --- confidence, the column that gates every removal command ---
 eq "marker + idle  -> confirmed"  "$(dirconf "$RP/repo/node_modules")"      "confirmed"
 eq "marker, in use -> likely"     "$(dirconf "$RP/active/node_modules")"    "likely"
 eq "name only      -> unverified" "$(dirconf "$RP/repo/target")"            "unverified"
 eq "no marker      -> unverified" "$(dirconf "$RP/we ird ; dir/node_modules")" "unverified"
+# Sweep rows are never confirmed, exactly like the old fixed shortlist: a
+# read-only tool does not get to author an rm -rf for a kind known from the path.
+eq "sweep row confidence is likely (CoreSimulator/Devices)" \
+   "$(dirconf "$RP/Library/Developer/CoreSimulator/Devices")" "likely"
+eq "sweep row confidence is likely (Xcode/DerivedData)" \
+   "$(dirconf "$RP/Library/Developer/Xcode/DerivedData")" "likely"
 
 # --- what must not be there ---
 absent "the src/ decoy is not a hit"          "$RP/repo/src"
@@ -191,8 +207,41 @@ eq "no deadline note"                  "$(noteval deadline)" ""
 eq "node_modules is affected (a path was dropped from it)" "$(gaff node_modules)" "1"
 eq "rebuildable is not affected"                           "$(gaff rebuildable)" "0"
 eq "downloads is not affected"                             "$(gaff downloads)" "0"
+eq "developer is not affected"                             "$(gaff developer)" "0"
 eq "the lock is released"              "$([ -e "$DA/state/disk-scan.lock" ] && echo present || echo gone)" "gone"
 eq "no work directory is left behind"  "$(ls -d "$DA"/state/disk-scan.work.* 2>/dev/null | wc -l | tr -d ' ')" "0"
+
+# --- D1a: per-child sizes, and the group total against an independent measure ---
+between "CoreSimulator/Devices dir row is ~300K" "$(dirsize "$RP/Library/Developer/CoreSimulator/Devices")" 300 314
+between "Xcode/DerivedData dir row is ~250K"     "$(dirsize "$RP/Library/Developer/Xcode/DerivedData")" 250 264
+indep_dev=$(du -skx "$RP/Library/Developer" 2>/dev/null | awk '{print $1}')
+eq "developer total equals an independent du -skx of that path" "$(gtot developer)" "$indep_dev"
+
+# --- D1a: per group, dir rows can never sum past the group total ---
+if LC_ALL=C awk -F'\t' '
+    $1=="group" { tot[$2]=$3+0 }
+    $1=="dir"   { sum[$4]+=$3+0 }
+    END { bad=0; for (g in sum) if (sum[g] > tot[g]) { print g, sum[g], tot[g]; bad=1 }; exit bad
+  }' "$CACHE" > "$TMP/sumcheck"; then
+  ok "per-group dir row sizes never exceed the group total"
+else
+  bad "per-group dir row sizes never exceed the group total"; sed 's/^/        /' "$TMP/sumcheck"
+fi
+
+# --- D1a: T is a worker record only, and never leaks into the cache ---
+if LC_ALL=C awk -F'\t' '$1=="T"||$1=="H"||$1=="A"||$1=="S"||$1=="V"||$1=="U"||$1=="D"||$1=="Z"{print; f=1} END{exit !f}' \
+     "$CACHE" > "$TMP/wkrows"; then
+  bad "no cache line begins with a worker-record kind"; sed 's/^/        /' "$TMP/wkrows"
+else
+  ok "no cache line begins with a worker-record kind"
+fi
+
+# --- D1a: the parts-<=-whole guard has nothing to say about a correct run ---
+if grep -q 'exceed the volume used' "$ERR"; then
+  bad "the parts-<=-whole guard is silent on a real run"; sed 's/^/        /' "$ERR"
+else
+  ok "the parts-<=-whole guard is silent on a real run"
+fi
 
 # ------------------------------------------- run B: a clean tree, no notes ---
 echo "clean scan"
@@ -337,6 +386,47 @@ eq "roots_total still counts it"                   "$(scancol 5)" "2"
 eq "partial=1"                                     "$(scancol 2)" "1"
 eq "node_modules cannot claim completeness"        "$(gaff node_modules)" "1"
 eq "rebuildable cannot either"                     "$(gaff rebuildable)" "1"
+
+# ------------------------------- kind table: no double counting (developer) --
+# A node_modules planted ONE level below Library/Developer, reachable by find
+# (repo root == $HOME here, so find walks the whole tree, same shape as run A)
+# but off the tracked depth-2 (so the sweep folds it into the developer total,
+# never its own dir row). It must not ALSO become a node_modules group hit —
+# proving the kind table's CLAIM registration, BEFORE the repo roots, dedups it.
+echo "kind table: no double counting (developer)"
+DVH="$TMP/homeDev"
+mkdir -p "$DVH/Library/Developer/node_modules"
+kb "$DVH/Library/Developer/node_modules/blob" 90
+DDV="$TMP/dataDev"; CACHE="$DDV/state/disk.tsv"
+HOME="$DVH" CLAUDE_WATCH_HOME="$DDV" CLAUDE_WATCH_REPO_ROOTS="$DVH" \
+  bash "$SCAN" > "$OUT" 2> "$ERR"
+DVHP=$( cd -P "$DVH" && pwd -P )
+absent "a node_modules under Library/Developer is not a dir row anywhere" \
+  "$DVHP/Library/Developer/node_modules"
+eq "and it produced no node_modules group at all" "$(gtot node_modules)" ""
+
+# ------------------------------------- kind table: per-denial attribution ----
+# A mode-000 directory under Library/Containers must affect ONLY containers —
+# never developer, node_modules or rebuildable, which the denial says nothing
+# about. The repo root is deliberately $SRC/repo, NOT this $HOME, so the
+# unrelated repo-root `find` pass never touches the blocked directory itself
+# (that would trip its own pre-existing blanket-taint path and prove nothing
+# about the sweep's OWN per-denial attribution, which is what this covers).
+echo "kind table: per-denial attribution (containers)"
+DHOME="$TMP/homeDenial"
+mkdir -p "$DHOME/Library/Containers/app" "$DHOME/Library/Developer/Xcode/DerivedData" \
+         "$DHOME/Library/Containers/blocked"
+kb "$DHOME/Library/Containers/app/blob" 40
+kb "$DHOME/Library/Developer/Xcode/DerivedData/blob" 30
+chmod 000 "$DHOME/Library/Containers/blocked"
+DDH="$TMP/dataDenial"; CACHE="$DDH/state/disk.tsv"
+HOME="$DHOME" CLAUDE_WATCH_HOME="$DDH" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
+  bash "$SCAN" > "$OUT" 2> "$ERR"
+chmod 755 "$DHOME/Library/Containers/blocked"
+eq "a denial under Containers affects only containers" "$(gaff containers)" "1"
+eq "developer is not affected by an unrelated denial"   "$(gaff developer)" "0"
+eq "node_modules is not affected either"                "$(gaff node_modules)" "0"
+eq "rebuildable is not affected either"                 "$(gaff rebuildable)" "0"
 
 # --------------------------------------------------------------- the lock ----
 echo "lock"
