@@ -247,6 +247,11 @@ eq "  five groups published, one volume finding" "$(nfind)" 6
 eq "  no below_threshold: the lone suppressed group doesn't clear the bar alone" \
   "$(F disk.reclaimable.below_threshold 3)" ""
 has "  but the summary still names it"   "$(S 6)" "1 groups below the line totalling 4.9 GiB (largest node_modules 4.9 GiB)"
+# No below_threshold finding fires here (the lone suppressed group's sum stays
+# under the bar too), so the JSON carries nothing more about it — the summary
+# must not promise "--json for all" data that was never emitted.
+hasnt "  and it makes no --json promise it can't keep" "$(S 6)" "--json"
+has "  it says plainly that nothing more is published" "$(S 6)" "even summed they stay under the line"
 
 echo "the 2026-08-19 incident, before the floor: four groups suppressed, summed"
 # Same real numbers, GiB floor pinned out of reach so the world looks exactly
@@ -270,6 +275,14 @@ eq "  action is empty, no target named" "$(F disk.reclaimable.below_threshold 14
 hasnt "  and detail never carries rm -rf" "$(F disk.reclaimable.below_threshold 13)" "rm -rf"
 has "  summary names all four"         "$(S 6)" "4 groups below the line totalling 23.4 GiB (largest caches 6.7 GiB)"
 eq "  containers + downloads + volume + aggregate = 4 findings" "$(nfind)" 4
+# The finding's own detail is the only place a JSON consumer can find the
+# suppressed groups; it must name every one of them, not just the largest, or
+# "--json for all" is a promise the tool doesn't keep.
+has "  detail lists every suppressed group, not just the largest" \
+  "$(F disk.reclaimable.below_threshold 13)" "rebuildable"
+has "  including transcripts"          "$(F disk.reclaimable.below_threshold 13)" "transcripts"
+has "  including node_modules"         "$(F disk.reclaimable.below_threshold 13)" "node_modules"
+has "  and the summary points at real JSON data" "$(S 6)" "--json for the full per-group breakdown"
 
 echo "reclaimable groups: the below_threshold invariant finding"
 # Each group individually under the floor (percent knob pinned high in
@@ -569,14 +582,49 @@ printf 'epoch\t-\t%s\t-\t-\nscan\t0\t0\t3\t3\nvol\t/System/Volumes/Data\t%s\t%s\
 from_cache "$TMP/covdup.tsv"
 eq "two cover rows -> malformed"         "$(S 5)" cache_malformed
 
+# The row's own internal contract: complete=1 claims both numbers were
+# actually measured, so '-' (the scanner's "not measured" marker) under
+# complete=1 contradicts the row's own claim and must fail closed, even
+# though each field type-checks in isolation ('-' is a legal home_total, 1 is
+# a legal complete).
+printf 'epoch\t-\t%s\t-\t-\nscan\t0\t0\t3\t3\nvol\t/System/Volumes/Data\t%s\t%s\t%s\ncover\thome\t-\t1000\t1\n' \
+  "$NOW" "$V_USED" "$V_AVAIL" "$V_DF" > "$TMP/covcontradict1.tsv"
+from_cache "$TMP/covcontradict1.tsv"
+eq "complete=1 with home_total='-' -> malformed" "$(S 5)" cache_malformed
+printf 'epoch\t-\t%s\t-\t-\nscan\t0\t0\t3\t3\nvol\t/System/Volumes/Data\t%s\t%s\t%s\ncover\thome\t1000\t-\t1\n' \
+  "$NOW" "$V_USED" "$V_AVAIL" "$V_DF" > "$TMP/covcontradict2.tsv"
+from_cache "$TMP/covcontradict2.tsv"
+eq "  complete=1 with attributed='-' -> malformed" "$(S 5)" cache_malformed
+
+# The scanner-side invariant (complete=0 => partial=1 and a coverage_incomplete
+# note) is required, not merely typed: a cover row that claims complete=0 with
+# no scan-level partial or note to back it up is a malformed/hand-edited
+# cache, not a well-formed "coverage unknown" one. Every field here still
+# type-checks in isolation, which is exactly what a per-field check alone
+# would miss.
+printf 'epoch\t-\t%s\t-\t-\nscan\t0\t0\t3\t3\nvol\t/System/Volumes/Data\t%s\t%s\t%s\ncover\thome\t1000\t500\t0\n' \
+  "$NOW" "$V_USED" "$V_AVAIL" "$V_DF" > "$TMP/covorphan.tsv"
+from_cache "$TMP/covorphan.tsv"
+eq "complete=0 with no partial/note -> malformed" "$(S 5)" cache_malformed
+printf 'epoch\t-\t%s\t-\t-\nscan\t1\t0\t3\t3\nvol\t/System/Volumes/Data\t%s\t%s\t%s\ncover\thome\t1000\t500\t0\n' \
+  "$NOW" "$V_USED" "$V_AVAIL" "$V_DF" > "$TMP/covorphan2.tsv"
+from_cache "$TMP/covorphan2.tsv"
+eq "  complete=0 with partial=1 but no coverage_incomplete note -> malformed" "$(S 5)" cache_malformed
+printf 'epoch\t-\t%s\t-\t-\nscan\t1\t0\t3\t3\nnote\tcoverage_incomplete\t1\t-\t-\nvol\t/System/Volumes/Data\t%s\t%s\t%s\ncover\thome\t1000\t500\t0\n' \
+  "$NOW" "$V_USED" "$V_AVAIL" "$V_DF" > "$TMP/covpaired.tsv"
+from_cache "$TMP/covpaired.tsv"
+eq "  complete=0 paired with both -> validates ok" "$(S 5)" ""
+
 echo "the coverage sentence, end to end through from_cache/advise_disk"
 good_cache "$TMP/cover.tsv" "cover	home	10485760	8388608	1"
 from_cache "$TMP/cover.tsv"
 has "coverage residual renders in the summary" "$(S 6)" '$HOME is not attributed to any group'
 has "  with the correct GiB figure"    "$(S 6)" '2.0 GiB'
 
-good_cache "$TMP/covincomplete.tsv" "cover	home	-	-	0"
+printf 'epoch\t-\t%s\t-\t-\nscan\t1\t0\t3\t3\nnote\tcoverage_incomplete\t1\t-\t-\nvol\t/System/Volumes/Data\t%s\t%s\t%s\ncover\thome\t-\t-\t0\n' \
+  "$NOW" "$V_USED" "$V_AVAIL" "$V_DF" > "$TMP/covincomplete.tsv"
 from_cache "$TMP/covincomplete.tsv"
+eq "well-formed incomplete cover row validates ok" "$(S 5)" ""
 has "incomplete coverage is stated"    "$(S 6)" "coverage is incomplete"
 hasnt "  and no residual figure is printed" "$(S 6)" "not attributed to any group"
 

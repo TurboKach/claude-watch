@@ -554,10 +554,11 @@ disk_findings() {
   # ---- disk.reclaimable.<group> ------------------------------------------
   local i j disk_conf_rank_v=1
   # Suppressed groups (below both the percent line and the GiB floor) are
-  # accumulated here rather than dropped: their count, sum, and largest member
-  # feed the below_threshold invariant finding and the summary suffix below,
-  # so a suppression can never again vanish with no note, count, or reason.
-  local supn=0 supkb=0 supbestlab='' supbestkb=0
+  # accumulated here rather than dropped: their count, sum, largest member and
+  # a full per-group listing feed the below_threshold invariant finding and
+  # the summary suffix below, so a suppression can never again vanish with no
+  # note, count, or reason.
+  local supn=0 supkb=0 supbestlab='' supbestkb=0 supdetail=''
   for (( i = 0; i < ${#glabel[@]}; i++ )); do
     local lab=${glabel[$i]} sz=${gsize[$i]} cnt=${gcount[$i]} aff=${gaff[$i]}
     # >= 2% of volume_total_kb, or >= the GiB floor; nothing below both lines is
@@ -565,6 +566,7 @@ disk_findings() {
     if ! disk_group_published "$sz" "$total"; then
       supn=$((supn + 1)); supkb=$(( supkb + sz ))
       [ "$sz" -gt "$supbestkb" ] && { supbestkb=$sz; supbestlab=$lab; }
+      supdetail="${supdetail:+$supdetail, }${lab} $(disk_h "$sz")"
       continue
     fi
 
@@ -667,7 +669,7 @@ disk_findings() {
       "$(disk_rank info)" "$bshare" disk.reclaimable.below_threshold \
       "$bshare" "$supkb" "$bthr" "$bthrname" "$supkb" \
       "$(disk_clean "$(disk_h "$supkb") suppressed below the group line across ${supn} groups (largest ${supbestlab} $(disk_h "$supbestkb")) — $(disk_pct "$supkb" "$total")% of the volume, a floor")" \
-      "$(disk_clean "${supn} groups sit individually below the ${DISK_GROUP_WARN_PCT}% / ${DISK_GROUP_WARN_GIB} GiB line but clear it summed; this names an amount, not a target, so no action is offered. --json for all")")$'\n'
+      "$(disk_clean "${supn} groups sit individually below the ${DISK_GROUP_WARN_PCT}% / ${DISK_GROUP_WARN_GIB} GiB line but clear it summed; this names an amount, not a target, so no action is offered. Suppressed: ${supdetail}.")")$'\n'
   fi
 
   # ---- summary ------------------------------------------------------------
@@ -686,9 +688,17 @@ disk_findings() {
   # Suppressed groups are always named here, whether or not their sum cleared
   # the bar for the below_threshold finding above — this is the "measured but
   # unpublished" defect: 23.5 GiB across four groups printed with no note,
-  # count, or reason. That can no longer happen: --json for all.
+  # count, or reason. That can no longer happen. But the per-group breakdown
+  # lives ONLY in that finding's detail, so --json is promised only when the
+  # finding will actually be there (the sum itself clears the bar); when the
+  # sum stays under too, say so instead of pointing at data that isn't emitted.
   if [ "$supn" -gt 0 ]; then
-    base="$base; ${supn} groups below the line totalling $(disk_h "$supkb") (largest ${supbestlab} $(disk_h "$supbestkb")) — --json for all"
+    base="$base; ${supn} groups below the line totalling $(disk_h "$supkb") (largest ${supbestlab} $(disk_h "$supbestkb"))"
+    if disk_group_published "$supkb" "$total"; then
+      base="$base — --json for the full per-group breakdown"
+    else
+      base="$base; even summed they stay under the line, so no further breakdown is published"
+    fi
   fi
   # The cover row's residual (D1c): a measurement, not a finding — no
   # severity, no action. complete=1 with both numbers numeric and a positive
@@ -823,6 +833,7 @@ disk_cache_validate() {
   local roots_scanned='' roots_total=''
   local vols=0 epochs=0 notes=0 scans=0 covers=0
   local bad=0 k a b c d e extra
+  local cover_incomplete=0 note_coverage_incomplete=0
   while IFS=$'\t' read -r k a b c d e extra || [ -n "$k" ]; do
     [ -n "$k" ] || continue
     # §3c is a FIVE column format. A row with a sixth field is either a path
@@ -843,7 +854,8 @@ disk_cache_validate() {
       note)
         notes=$((notes + 1))
         disk_is_uint "$b" || bad=1
-        case $a in deadline|permission_denied|root_off_home_volume|path_unrepresentable|depth_capped|coverage_incomplete) ;; *) bad=1 ;; esac ;;
+        case $a in deadline|permission_denied|root_off_home_volume|path_unrepresentable|depth_capped|coverage_incomplete) ;; *) bad=1 ;; esac
+        [ "$a" = coverage_incomplete ] && note_coverage_incomplete=1 ;;
       vol)
         vols=$((vols + 1))
         disk_is_uint "$b" || bad=1
@@ -874,7 +886,16 @@ disk_cache_validate() {
         [ -n "$a" ] || bad=1
         case $b in -) ;; *) disk_is_uint "$b" || bad=1 ;; esac
         case $c in -) ;; *) disk_is_uint "$c" || bad=1 ;; esac
-        case $d in 0|1) ;; *) bad=1 ;; esac ;;
+        case $d in 0|1) ;; *) bad=1 ;; esac
+        # The row's own internal contract: complete=1 claims both numbers were
+        # actually measured, so '-' (the scanner's "not measured" marker) under
+        # complete=1 is self-contradictory, not merely a type mismatch.
+        if [ "$d" = 1 ]; then
+          case $b in -) bad=1 ;; esac
+          case $c in -) bad=1 ;; esac
+        elif [ "$d" = 0 ]; then
+          cover_incomplete=1
+        fi ;;
       # An unknown row kind is a newer scanner, not a broken cache: ignore it.
     esac
     [ "$bad" = 1 ] && break
@@ -882,6 +903,13 @@ disk_cache_validate() {
 
   # §3c: a cache with a note row and no `scan partial=1` is malformed.
   [ "$notes" -gt 0 ] && [ "$partial" != 1 ] && bad=1
+  # cover.complete=0 is the scanner's own claim that coverage could not be
+  # measured; the scanner is required to pair it with both `scan partial=1`
+  # and `note coverage_incomplete` (disk-scan.sh:719, plan step 4b item 4).
+  # Trusting the cover row alone would let a hand-edited or malformed cache
+  # claim incompleteness with none of the state that is supposed to accompany
+  # it — fail closed on this cross-row invariant exactly like the one above.
+  [ "$cover_incomplete" = 1 ] && { [ "$partial" != 1 ] || [ "$note_coverage_incomplete" != 1 ]; } && bad=1
   [ "$epochs" = 1 ] || bad=1
   [ "$vols" = 1 ] || bad=1
   [ "$scans" -le 1 ] || bad=1
