@@ -17,9 +17,11 @@
 # kind-table group whose path it names, never the whole scan (:44-52); a line
 # whose path cannot be recovered folds into that same unattributed residual —
 # it names nothing, so it cannot say a GROUP was short any more than a line
-# naming an untracked path can. Only a sweep that fails with no stderr at all —
-# no diagnostic to attribute anything from, so nothing measured by it can be
-# trusted — affects every group the sweep feeds.
+# naming an untracked path can. A sweep that fails with no stderr at all — no
+# diagnostic to attribute anything from, so nothing measured by it can be
+# trusted — affects every group the sweep feeds; so does a pathless `du`
+# diagnostic that names the WALK ITSELF, not one file (`fts_open`/`fts_read`),
+# since nothing after that point in the sweep was measured either.
 #
 # Output contract (five tab-separated columns, see the plan §3c):
 #   epoch  -           <unix>          -                -
@@ -545,6 +547,30 @@ walk() {
   trap ':' TERM
   { du -kxd "$MAXDEPTH" "$homerp" > "$sout" 2>"$serr"; src=$?; } 2>/dev/null
 
+  # Re-verify each kind-table path's canonical resolution NOW, at the point the
+  # sweep's own results are about to be consumed — not only back when the
+  # table was built (:410-450). The repo-root scan runs in between, and a path
+  # that turns into a symlink during that window passes the earlier check yet
+  # is exactly what the check exists to catch (:426-436): du physically does
+  # not follow it, so $sout's row for its literal path is the symlink's own
+  # tiny size, and nothing about that row says the group was short. Resolving
+  # again here, immediately after du has run rather than before the repo-root
+  # scan had a chance to run long, reflects what du actually walked instead of
+  # a filesystem snapshot taken before the window opened.
+  local vp vg vd
+  : > "$WORK/entries.verified"
+  while IFS="$TAB" read -r vp vg vd; do
+    [ -n "$vp" ] || continue
+    if [ "$(physdir "$vp")" = "$vp" ]; then
+      printf '%s\t%s\t%s\n' "$vp" "$vg" "$vd" >> "$WORK/entries.verified"
+    else
+      affect "$vg"
+      cov_complete=0
+      ucount=$((ucount + 1))
+    fi
+  done < "$WORK/entries"
+  mv "$WORK/entries.verified" "$WORK/entries"
+
   # Emit T/H rows for the registered kind-table entries from this one sweep.
   # Everything else $sout sees (the bulk of $HOME) matches no entry and is
   # silently dropped here — an unattributed residual for step 4b's `cover` row
@@ -589,10 +615,20 @@ walk() {
   # unparseable fragments; a nonstandard message has no path in it either),
   # falls into the same unattributed residual and affects no group (step 4b's
   # coverage count, not severity) — one bad line among a batch of good ones
-  # must not cap an unrelated, fully-measured group at `info`. Only a sweep
-  # that fails with no stderr at all — zero diagnostics, so there is nothing
-  # here to attribute from and no partial results are trustworthy — taints
-  # every sweep-fed group, mirroring measure()'s own hit == "" fallback.
+  # must not cap an unrelated, fully-measured group at `info`. A pathless line
+  # is not automatically that harmless case, though: `du`'s own `fts_open` and
+  # `fts_read` diagnostics are pathless too, but they say the WALK ITSELF broke
+  # off — not that one specific file or directory was denied — so nothing after
+  # that point in the sweep was measured. Folding those into the same
+  # unattributed residual as a garbled per-file line would let a real
+  # traversal failure report affected=0 on groups it never actually finished
+  # measuring, which is the same lie the wholesale-taint fallback below exists
+  # to prevent. Only a sweep that fails with no stderr at all — zero
+  # diagnostics, so there is nothing here to attribute from and no partial
+  # results are trustworthy — taints every sweep-fed group, mirroring
+  # measure()'s own hit == "" fallback; `fts_open`/`fts_read` takes the same
+  # path because they carry the same "nothing after this is trustworthy"
+  # meaning even though they did print something.
   wholesale=0
   if [ -s "$serr" ]; then
     CW_ENTRIES="$WORK/entries" CW_ERR="$serr" LC_ALL=C awk -F'\t' '
@@ -606,6 +642,7 @@ walk() {
         while ((getline e < ENVIRON["CW_ERR"]) > 0) {
           sub(/^[a-z]+: /, "", e)
           sub(/: [^:]*$/, "", e)
+          if (e == "fts_open" || e == "fts_read") { print "FATAL"; continue }
           if (e !~ /^\//) { print "RESIDUAL"; continue }
           hit = ""
           for (i = 1; i <= m; i++) {
@@ -621,11 +658,12 @@ walk() {
     local n_res
     n_res=$(grep -c '^RESIDUAL$' "$WORK/sweepraw" 2>/dev/null)
     ucount=$((ucount + ${n_res:-0}))
+    grep -q '^FATAL$' "$WORK/sweepraw" 2>/dev/null && wholesale=1
     sort -u "$WORK/sweepraw" > "$WORK/sweepaff"
     while IFS= read -r g; do
       case "$g" in
-        ''|RESIDUAL) : ;;
-        *)           affect "$g" ;;
+        ''|RESIDUAL|FATAL) : ;;
+        *)                  affect "$g" ;;
       esac
     done < "$WORK/sweepaff"
   elif [ "$src" != 0 ]; then

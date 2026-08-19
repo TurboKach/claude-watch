@@ -533,11 +533,15 @@ eq "so coverage_incomplete forces partial=1 on its own"       "$(scancol 2)" "1"
 # ------------------- kind table: an unparseable line does not taint ----------
 # A single stderr line no path can be recovered from at all — a nonstandard
 # diagnostic, or (in the real world) a filename containing a newline that
-# splits one du message into two garbled fragments — must fall into the same
-# unattributed residual as a line naming an untracked path, never wholesale-
-# taint every sweep-fed group. The stub runs the REAL du first, so the
-# genuine, correctly-attributable containers denial is still present, then
-# appends one line with no path in it at all.
+# splits one du message into two garbled fragments, leaving a tail fragment
+# like "Permission denied" with no path in front of it — must fall into the
+# same unattributed residual as a line naming an untracked path, never
+# wholesale-taint every sweep-fed group. This is deliberately NOT an
+# `fts_open`/`fts_read` line: those are pathless too, but they mean the WALK
+# ITSELF broke off, which is a different, fatal case covered separately below.
+# The stub runs the REAL du first, so the genuine, correctly-attributable
+# containers denial is still present, then appends one line with no path in
+# it at all.
 echo "kind table: an unparseable stderr line does not taint an unrelated group"
 UNPH="$TMP/homeUnparse"
 mkdir -p "$UNPH/Library/Developer/Xcode/DerivedData" "$UNPH/Library/Containers/app" \
@@ -552,7 +556,7 @@ UBIN="$TMP/ubin"; mkdir -p "$UBIN"
   printf '  if [ "$a" = "-kxd" ]; then\n'
   printf '    /usr/bin/du "$@"\n'
   printf '    rc=$?\n'
-  printf '    echo "fts_read: a diagnostic with no path in it" >&2\n'
+  printf '    echo "namefrag: Permission denied" >&2\n'
   printf '    exit $rc\n'
   printf '  fi\n'
   printf 'done\n'
@@ -571,6 +575,87 @@ if [ "$(noteval coverage_incomplete)" -ge 1 ] 2>/dev/null; then
 else
   bad "and note coverage_incomplete is recorded (got '$(noteval coverage_incomplete)')"
 fi
+
+# ------------------ kind table: fts_read/fts_open taints wholesale -----------
+# `du`'s own `fts_open`/`fts_read` diagnostics carry no path — but unlike a
+# garbled per-file line, they mean the WALK ITSELF stopped, so nothing after
+# that point in the sweep is trustworthy. Folding them into the same harmless
+# unattributed residual as the test above would let `du` exit non-zero after a
+# real traversal failure while every sweep-fed group still reports
+# affected=0, claiming a completeness it never measured — the mirror image of
+# the over-suppression bug this feature exists to fix. The stub runs the REAL
+# du first (so both containers and developer get genuine, clean data with no
+# denial of their own), then appends a bare `fts_read` line and exits non-zero,
+# exactly as a real du does when its traversal aborts mid-walk.
+echo "kind table: an fts_read/fts_open diagnostic taints every sweep-fed group"
+FTH="$TMP/homeFatal"
+mkdir -p "$FTH/Library/Developer/Xcode/DerivedData" "$FTH/Library/Containers/app"
+kb "$FTH/Library/Developer/Xcode/DerivedData/blob" 300
+kb "$FTH/Library/Containers/app/blob" 40
+FBIN="$TMP/fbin"; mkdir -p "$FBIN"
+{
+  printf '#!/bin/sh\n'
+  printf 'for a in "$@"; do\n'
+  printf '  if [ "$a" = "-kxd" ]; then\n'
+  printf '    /usr/bin/du "$@"\n'
+  printf '    echo "du: fts_read: Interrupted system call" >&2\n'
+  printf '    exit 1\n'
+  printf '  fi\n'
+  printf 'done\n'
+  printf 'exec /usr/bin/du "$@"\n'
+} > "$FBIN/du"
+chmod +x "$FBIN/du"
+DFT="$TMP/dataFatal"; CACHE="$DFT/state/disk.tsv"
+PATH="$FBIN:$PATH" HOME="$FTH" CLAUDE_WATCH_HOME="$DFT" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
+  bash "$SCAN" > "$OUT" 2> "$ERR"
+eq "developer has clean data yet is still marked affected" "$(gaff developer)" "1"
+eq "containers has clean data yet is still marked affected too" "$(gaff containers)" "1"
+eq "coverage is marked incomplete" "$(covcol 5)" "0"
+if [ "$(noteval coverage_incomplete)" -ge 1 ] 2>/dev/null; then
+  ok "and note coverage_incomplete is recorded"
+else
+  bad "and note coverage_incomplete is recorded (got '$(noteval coverage_incomplete)')"
+fi
+
+# ---------------- sweep: a symlink swapped in during the window --------------
+# The canonical-path/symlink divergence check runs once at table-build time
+# (:410-450 in disk-scan.sh) and, before this fix, only there — well before
+# the sweep's own `du` actually walks $HOME. A path that is a real directory
+# at table-build time but becomes a symlink in the window between then and the
+# sweep (the repo-root scan runs in that window and can take a while) passed
+# the earlier check, and the sweep's row for its literal path is then the
+# symlink's own tiny size with no stderr, no ucount, and cover.complete left
+# at 1 — the exact silent-absence bug this whole feature exists to close, just
+# moved to a different window. This test drives the swap deterministically:
+# the repo-root `find` call — which happens strictly after table-build and
+# strictly before the sweep in the scanner's own sequential execution — swaps
+# Library/Developer for a symlink as a side effect before delegating to the
+# real find.
+echo "sweep: a path swapped for a symlink between table-build and the sweep is still detected"
+SWH="$TMP/homeSwap"
+ELSEDEV="$TMP/elsewhereSwap"
+mkdir -p "$SWH/Library/Developer/Xcode/DerivedData" "$ELSEDEV/Xcode/DerivedData"
+kb "$SWH/Library/Developer/Xcode/DerivedData/blob" 300
+kb "$ELSEDEV/Xcode/DerivedData/blob" 9000
+FBIN3="$TMP/fbin3"; mkdir -p "$FBIN3"
+{
+  printf '#!/bin/sh\n'
+  printf 'rm -rf "%s/Library/Developer"\n' "$SWH"
+  printf 'ln -s "%s" "%s/Library/Developer"\n' "$ELSEDEV" "$SWH"
+  printf 'exec /usr/bin/find "$@"\n'
+} > "$FBIN3/find"
+chmod +x "$FBIN3/find"
+DSW="$TMP/dataSwap"; CACHE="$DSW/state/disk.tsv"
+PATH="$FBIN3:$PATH" HOME="$SWH" CLAUDE_WATCH_HOME="$DSW" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
+  bash "$SCAN" > "$OUT" 2> "$ERR"
+eq "the swapped entry produces no developer group at all" "$(gtot developer)" ""
+eq "coverage is marked incomplete, not falsely complete" "$(covcol 5)" "0"
+if [ "$(noteval coverage_incomplete)" -ge 1 ] 2>/dev/null; then
+  ok "and note coverage_incomplete is recorded"
+else
+  bad "and note coverage_incomplete is recorded (got '$(noteval coverage_incomplete)')"
+fi
+eq "and the scan is partial" "$(scancol 2)" "1"
 
 # --------------------------------------------------------------- the lock ----
 echo "lock"
