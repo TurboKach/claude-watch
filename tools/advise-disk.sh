@@ -445,7 +445,7 @@ disk_findings() {
 
   # ---- read the body ------------------------------------------------------
   local partial=0 dhit=0 rscanned=0 rtotal=0
-  local n_deadline=0 n_perm=0 n_offvol=0 n_unrep=0 n_depth=0
+  local n_deadline=0 n_perm=0 n_offvol=0 n_unrep=0 n_depth=0 n_covinc=0
   local chave=0 chome='' cattr='' ccomplete=''
   local glabel=() gsize=() gcount=() gaff=()
   local dpath=() dsize=() dgroup=() dconf=() dage=()
@@ -463,6 +463,7 @@ disk_findings() {
           root_off_home_volume) n_offvol=$b ;;
           path_unrepresentable) n_unrep=$b ;;
           depth_capped)         n_depth=$b ;;
+          coverage_incomplete)  n_covinc=$b ;;
         esac ;;
       group)
         glabel[${#glabel[@]}]=$a; gsize[${#gsize[@]}]=$b; gcount[${#gcount[@]}]=$c
@@ -512,6 +513,9 @@ disk_findings() {
     fi
     if [ -z "$lead" ] && [ "$n_depth" != 0 ]; then
       lead="disk scan stopped at its depth cap in ${n_depth} places — anything nested below it is not counted, so the totals below are a floor. Narrow CLAUDE_WATCH_REPO_ROOTS to the trees you care about"
+    fi
+    if [ -z "$lead" ] && [ "$n_covinc" != 0 ]; then
+      lead="disk scan could not attribute ${n_covinc} paths under \$HOME to a group, leaving its coverage incomplete — the totals below are a floor. Re-run: claude-watch disk --refresh"
     fi
     [ -n "$lead" ] || lead="disk scan reported itself partial with no reason recorded — the totals below are a floor. Re-run: claude-watch disk --refresh"
     remedy=$lead
@@ -910,6 +914,14 @@ disk_cache_validate() {
   # claim incompleteness with none of the state that is supposed to accompany
   # it — fail closed on this cross-row invariant exactly like the one above.
   [ "$cover_incomplete" = 1 ] && { [ "$partial" != 1 ] || [ "$note_coverage_incomplete" != 1 ]; } && bad=1
+  # The converse: `note coverage_incomplete` is the scanner's claim that a
+  # `cover ... complete=0` row backs it up (disk-scan.sh:776 only ever writes
+  # the note alongside that row). Without this, a coverage_incomplete note
+  # paired with complete=1 — or with no cover row at all — would validate as a
+  # sound measurement even though disk_findings' summary text and the cover
+  # row's own residual math would then disagree about whether coverage is
+  # complete. Fail closed here too.
+  [ "$note_coverage_incomplete" = 1 ] && [ "$cover_incomplete" != 1 ] && bad=1
   [ "$epochs" = 1 ] || bad=1
   [ "$vols" = 1 ] || bad=1
   [ "$scans" -le 1 ] || bad=1

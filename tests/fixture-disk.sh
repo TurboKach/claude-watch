@@ -369,6 +369,20 @@ eq "  depth_capped has no enum value"  "$(S 5)" ""
 eq "  but the domain is still partial" "$(S 4)" partial
 has "  and the reason still leads"     "$(S 6)" "disk scan stopped at its depth cap in 2 places"
 
+# coverage_incomplete, like depth_capped, has no §3e enum value of its own —
+# but when it is the ONLY note present, disk_findings must not fall through to
+# the generic "no reason recorded" text while the cover-row residual sentence
+# (driven independently, further down the summary) says coverage IS incomplete.
+# That combination is a self-contradicting summary in one sentence.
+COVINC="scan	1	0	3	3
+note	coverage_incomplete	4	-	-
+cover	home	-	-	0"
+pure_body "$V_USED" "$V_AVAIL" "$V_DF" "$COVINC"
+eq "coverage_incomplete has no enum value" "$(S 5)" ""
+eq "  but the domain is still partial"    "$(S 4)" partial
+hasnt "  summary never claims no reason"  "$(S 6)" "no reason recorded"
+has "  and names the real reason"         "$(S 6)" "leaving its coverage incomplete"
+
 # ============================================================ confidence gate ==
 echo "confidence gates the command"
 CONF="group	rebuildable	26738688	57	0
@@ -558,8 +572,10 @@ echo "cache states: coverage_incomplete note and the cover row (D1c)"
 # The note enum is closed: without coverage_incomplete in it, every cache the
 # D1a/D1b scanner writes reads cache_malformed and the whole domain goes
 # unknown. Mirrors the depth_capped case above: measured, partial, and no
-# measurement_reasons enum value of its own.
-printf 'epoch\t-\t%s\t-\t-\nscan\t1\t0\t3\t3\nnote\tcoverage_incomplete\t1\t-\t-\nvol\t/System/Volumes/Data\t%s\t%s\t%s\n' \
+# measurement_reasons enum value of its own. The note travels with its own
+# `cover ... complete=0` row (disk-scan.sh:776 never writes one without the
+# other), so this fixture carries both.
+printf 'epoch\t-\t%s\t-\t-\nscan\t1\t0\t3\t3\nnote\tcoverage_incomplete\t1\t-\t-\nvol\t/System/Volumes/Data\t%s\t%s\t%s\ncover\thome\t-\t-\t0\n' \
   "$NOW" "$V_USED" "$V_AVAIL" "$V_DF" > "$TMP/covnote.tsv"
 from_cache "$TMP/covnote.tsv"
 eq "coverage_incomplete note validates, not malformed" "$(S 5)" ""
@@ -614,6 +630,20 @@ printf 'epoch\t-\t%s\t-\t-\nscan\t1\t0\t3\t3\nnote\tcoverage_incomplete\t1\t-\t-
   "$NOW" "$V_USED" "$V_AVAIL" "$V_DF" > "$TMP/covpaired.tsv"
 from_cache "$TMP/covpaired.tsv"
 eq "  complete=0 paired with both -> validates ok" "$(S 5)" ""
+
+# The converse of the complete=0 invariant above: a `note coverage_incomplete`
+# is itself a claim that needs a `cover ... complete=0` row behind it. Without
+# this direction, a note with no cover row at all — or a note contradicted by
+# a cover row claiming complete=1 — would validate as a sound measurement even
+# though the scanner never writes either shape (disk-scan.sh:776).
+printf 'epoch\t-\t%s\t-\t-\nscan\t1\t0\t3\t3\nnote\tcoverage_incomplete\t1\t-\t-\nvol\t/System/Volumes/Data\t%s\t%s\t%s\n' \
+  "$NOW" "$V_USED" "$V_AVAIL" "$V_DF" > "$TMP/covnoteorphan.tsv"
+from_cache "$TMP/covnoteorphan.tsv"
+eq "coverage_incomplete note with no cover row -> malformed" "$(S 5)" cache_malformed
+printf 'epoch\t-\t%s\t-\t-\nscan\t1\t0\t3\t3\nnote\tcoverage_incomplete\t1\t-\t-\nvol\t/System/Volumes/Data\t%s\t%s\t%s\ncover\thome\t1000\t1000\t1\n' \
+  "$NOW" "$V_USED" "$V_AVAIL" "$V_DF" > "$TMP/covnotevscomplete.tsv"
+from_cache "$TMP/covnotevscomplete.tsv"
+eq "  coverage_incomplete note with cover complete=1 -> malformed" "$(S 5)" cache_malformed
 
 echo "the coverage sentence, end to end through from_cache/advise_disk"
 good_cache "$TMP/cover.tsv" "cover	home	10485760	8388608	1"
