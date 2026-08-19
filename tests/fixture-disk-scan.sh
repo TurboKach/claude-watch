@@ -37,6 +37,7 @@ gaff()    { CW_G="$1" LC_ALL=C awk -F'\t' '$1=="group" && $2==ENVIRON["CW_G"]{pr
 noteval() { CW_N="$1" LC_ALL=C awk -F'\t' '$1=="note" && $2==ENVIRON["CW_N"]{print $3}' "$CACHE"; }
 scancol() { LC_ALL=C awk -F'\t' -v n="$1" '$1=="scan"{print $n}' "$CACHE"; }   # 2=partial 3=deadline 4=scanned 5=total
 volcol()  { LC_ALL=C awk -F'\t' -v n="$1" '$1=="vol"{print $n}' "$CACHE"; }
+covcol()  { LC_ALL=C awk -F'\t' -v n="$1" '$1=="cover"{print $n}' "$CACHE"; }  # 2=label 3=home_total 4=attributed 5=complete
 
 eq() {  # <desc> <got> <want>
   if [ "$2" = "$3" ]; then ok "$1"; else bad "$1 (got '$2', wanted '$3')"; fi
@@ -237,11 +238,32 @@ else
 fi
 
 # --- D1a: the parts-<=-whole guard has nothing to say about a correct run ---
-if grep -q 'exceed the volume used' "$ERR"; then
+if grep -qE 'exceed the volume used|exceed the \$HOME sweep total' "$ERR"; then
   bad "the parts-<=-whole guard is silent on a real run"; sed 's/^/        /' "$ERR"
 else
   ok "the parts-<=-whole guard is silent on a real run"
 fi
+
+# --- D1b: the coverage row. It is the anti-regression device for the whole
+# feature: "how much of $HOME does any group account for" is a number the tool
+# now has to state, so a future blind spot shrinks a figure instead of going
+# silent. Both columns are measurements — the reader does the subtraction.
+eq "exactly one cover row"        "$(LC_ALL=C grep -c '^cover' "$CACHE" || true)" "1"
+eq "the cover row is labelled home" "$(covcol 2)" "home"
+indep_home=$(du -skx "$RP" 2>/dev/null | awk '{print $1}')
+eq "cover home_total equals an independent du -skx of \$HOME" "$(covcol 3)" "$indep_home"
+# The identity that keeps the row honest, asserted against the cache itself and
+# not against how the scanner happens to compute it: every group the reader can
+# see is a group the coverage figure counted.
+sum_groups=$(LC_ALL=C awk -F'\t' '$1=="group"{s+=$3} END{printf "%d", s+0}' "$CACHE")
+eq "cover attributed equals the sum of every group total" "$(covcol 4)" "$sum_groups"
+if [ "$(covcol 4)" -le "$(covcol 3)" ] 2>/dev/null; then
+  ok "cover attributed <= home_total"
+else
+  bad "cover attributed <= home_total (got $(covcol 4) of $(covcol 3))"
+fi
+eq "coverage is complete on a readable tree" "$(covcol 5)" "1"
+eq "and no coverage_incomplete note"         "$(noteval coverage_incomplete)" ""
 
 # ------------------------------------------- run B: a clean tree, no notes ---
 echo "clean scan"
@@ -427,6 +449,60 @@ eq "a denial under Containers affects only containers" "$(gaff containers)" "1"
 eq "developer is not affected by an unrelated denial"   "$(gaff developer)" "0"
 eq "node_modules is not affected either"                "$(gaff node_modules)" "0"
 eq "rebuildable is not affected either"                 "$(gaff rebuildable)" "0"
+
+# ------------------------------- coverage: an unattributed denial ------------
+# A denial in a corner of $HOME that sits under no kind-table path and no repo
+# root says nothing about any group, so it must affect none of them — but it is
+# exactly what makes the coverage figure short, and that has to be recorded
+# rather than absorbed. (The repo root is deliberately outside this $HOME so the
+# denial can only be seen by the sweep.)
+echo "coverage: an unattributed denial"
+CVH="$TMP/homeCov"
+mkdir -p "$CVH/Library/Containers/app" "$CVH/elsewhere/sub"
+kb "$CVH/Library/Containers/app/blob" 40
+kb "$CVH/elsewhere/sub/blob" 90
+chmod 000 "$CVH/elsewhere"
+DCV="$TMP/dataCov"; CACHE="$DCV/state/disk.tsv"
+HOME="$CVH" CLAUDE_WATCH_HOME="$DCV" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
+  bash "$SCAN" > "$OUT" 2> "$ERR"
+chmod 755 "$CVH/elsewhere"
+eq "an unattributed denial leaves coverage incomplete" "$(covcol 5)" "0"
+eq "note coverage_incomplete 1"                        "$(noteval coverage_incomplete)" "1"
+eq "and the scan is partial"                           "$(scancol 2)" "1"
+if LC_ALL=C awk -F'\t' '$1=="group" && $5==1 {print; f=1} END{exit !f}' "$CACHE" > "$TMP/covaff"; then
+  bad "and no group is affected by it"; sed 's/^/        /' "$TMP/covaff"
+else
+  ok "and no group is affected by it"
+fi
+
+# ------------------------- coverage: incomplete forces partial ---------------
+# A `note` row next to `scan partial=0` is a cache the analyzer rejects as
+# malformed, so an incomplete coverage figure has to drag `partial` with it even
+# when it is the ONLY thing that shortened the scan. A stub du prints one
+# unattributable stderr line that is not a denial — so none of the other note
+# reasons fire — and still exits 0.
+echo "coverage: incomplete forces partial"
+PBIN="$TMP/pbin"; mkdir -p "$PBIN"
+{
+  printf '#!/bin/sh\n'
+  printf 'for a in "$@"; do\n'
+  printf '  if [ "$a" = "-kxd" ]; then\n'
+  printf '    /usr/bin/du "$@"\n'
+  printf '    echo "du: $HOME/ghost: No such file or directory" >&2\n'
+  printf '    exit 0\n'
+  printf '  fi\n'
+  printf 'done\n'
+  printf 'exec /usr/bin/du "$@"\n'
+} > "$PBIN/du"
+chmod +x "$PBIN/du"
+DPT="$TMP/dataPart"; CACHE="$DPT/state/disk.tsv"
+PATH="$PBIN:$PATH" HOME="$HB" CLAUDE_WATCH_HOME="$DPT" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
+  bash "$SCAN" > "$OUT" 2> "$ERR"
+eq "an unattributable sweep error leaves coverage incomplete" "$(covcol 5)" "0"
+eq "and is counted"                                           "$(noteval coverage_incomplete)" "1"
+eq "with no other note reason to explain it" \
+   "$(noteval permission_denied)$(noteval deadline)$(noteval path_unrepresentable)$(noteval root_off_home_volume)" ""
+eq "so coverage_incomplete forces partial=1 on its own"       "$(scancol 2)" "1"
 
 # --------------------------------------------------------------- the lock ----
 echo "lock"
@@ -732,6 +808,17 @@ eq "deadline_hit=1" "$(scancol 3)" "1"
 eq "partial=1"      "$(scancol 2)" "1"
 eq "note deadline"  "$(noteval deadline)" "1"
 eq "the volume facts survive the deadline" "$([ -n "$(volcol 3)" ] && echo yes || echo no)" "yes"
+# D1b: the sweep never ran, so BOTH coverage numbers are unmeasured. A zero here
+# would read as "nothing of $HOME is attributed", which is a claim this run
+# cannot make — `-` is the same convention the vol row uses for df_size_kb.
+eq "cover home_total is - when the sweep never ran" "$(covcol 3)" "-"
+eq "cover attributed is - too"                      "$(covcol 4)" "-"
+eq "cover complete=0"                               "$(covcol 5)" "0"
+if [ "$(noteval coverage_incomplete)" -ge 1 ] 2>/dev/null; then
+  ok "note coverage_incomplete is recorded with a count >= 1"
+else
+  bad "note coverage_incomplete is recorded with a count >= 1 (got '$(noteval coverage_incomplete)')"
+fi
 eq "the walk really did block in du" \
    "$([ -e "$TMP/du-started" ] && echo yes || echo no)" "yes"
 sleep 5

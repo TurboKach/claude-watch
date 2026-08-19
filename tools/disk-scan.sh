@@ -14,7 +14,7 @@
 # entirely once the deadline has passed. Everything the sweep sees that is not
 # under a kind-table path is an unattributed residual (see step 4b's `cover`
 # row) — never folded into a group. A denial inside the sweep affects only the
-# kind-table group whose path it names, never the whole scan (:29-37); only a
+# kind-table group whose path it names, never the whole scan (:41-49); only a
 # denial that names no recoverable path, or a sweep that fails with no stderr at
 # all, affects every group the sweep feeds.
 #
@@ -23,8 +23,20 @@
 #   scan   <partial>   <deadline_hit>  <roots_scanned>  <roots_total>
 #   note   <reason>    <count>         -                -
 #   vol    <mount>     <used_kb>       <avail_kb>       <df_size_kb>
+#   cover  home        <home_total_kb> <attributed_kb>  <complete>
 #   group  <label>     <size_kb>       <dir_count>      <affected>
 #   dir    <path>      <size_kb>       <group_label>    <confidence>
+#
+# The `cover` row is what keeps a coverage gap from being silent: `home_total_kb`
+# is the sweep's own $HOME row and `attributed_kb` the sum of the group totals
+# below it, so "how much of $HOME does any group account for" is a number this
+# tool has to state. Both are MEASUREMENTS, never a difference: the reader
+# subtracts, which is why an over-count cannot be clamped here into a figure the
+# cache would present as a fact. A number this run did not measure is written
+# `-`, like the vol row's df_size_kb — a sweep that never ran writes
+# `cover  home  -  -  0`. `complete=0` (the sweep was skipped, killed, exited
+# non-zero, printed no $HOME row, or hit a denial outside every kind-table entry)
+# always travels with a `note coverage_incomplete <n>`, n >= 1, and partial=1.
 #
 # `scan partial` and `group affected` answer two different questions and must not
 # be collapsed. `partial=1` means the scan AS A WHOLE was less than total, and it
@@ -306,6 +318,11 @@ confidence_of() {  # <path> <basename> <group>
 #                                              to the cache; assembly prefers it
 #                                              over that group's summed H rows
 #   A <group>                                 THAT group's measurement is short
+#   C <home_kb|-> <complete> <count> <inhome> the sweep's own $HOME total and
+#                                              whether anything left the coverage
+#                                              figure short — the `cover` row's
+#                                              measurements; absent when the
+#                                              sweep never ran
 #   S                                         a repo root finished
 #   V                                         a root skipped: other volume
 #   U                                         a path a TSV cannot carry
@@ -483,6 +500,7 @@ walk() {
   # deep enough for Library/Developer's grandchildren (Library=1, Developer=2, +2 = 4).
   if past_deadline; then printf 'D\n' >> "$RAWOUT"; return 0; fi
   local homerp sout="$WORK/sweep.out" serr="$WORK/sweep.err" src wholesale g
+  local hometot ucount=0 cov_complete=1 inhome=1
   homerp=$(physdir "$HOME")
   [ -n "$homerp" ] || homerp=$HOME
   du -kxd "$MAXDEPTH" "$homerp" > "$sout" 2>"$serr"
@@ -524,7 +542,7 @@ walk() {
 
   [ -s "$serr" ] && cat "$serr" >> "$ERRLOG"
 
-  # Failure attribution (:29-37): a denial must never mute a group it says
+  # Failure attribution (:41-49): a denial must never mute a group it says
   # nothing about. Each stderr line is matched to the table entry whose
   # registered path is that path or a prefix of it — only THAT entry's group is
   # affected. A line under no entry falls in the residual and affects no group
@@ -551,7 +569,15 @@ walk() {
           }
           print (hit == "") ? "RESIDUAL" : hit
         }
-      }' | sort -u > "$WORK/sweepaff"
+      }' > "$WORK/sweepraw"
+    # Counted BEFORE the dedup: `note coverage_incomplete` states how many
+    # errors landed outside every entry, not how many distinct kinds of them.
+    # -E, not a BRE `\|`: BSD grep anchors a basic RE only at the two ends of
+    # the whole pattern, so `^A$\|^B$` quietly matches neither and the count
+    # would be a permanent 0.
+    ucount=$(grep -cE '^(RESIDUAL|WHOLESALE)$' "$WORK/sweepraw" 2>/dev/null)
+    ucount=${ucount:-0}
+    sort -u "$WORK/sweepraw" > "$WORK/sweepaff"
     while IFS= read -r g; do
       case "$g" in
         ''|RESIDUAL) : ;;
@@ -568,6 +594,26 @@ walk() {
       [ -n "$g" ] && affect "$g"
     done < "$WORK/sweepgroups"
   fi
+
+  # The coverage measurements for the `cover` row (:29-39). The sweep's own
+  # $HOME row is the whole; the parts are the group totals the assembly sums.
+  # Nothing is subtracted here — an over-count must reach the reader as the two
+  # numbers that produced it, never as a difference this script clamped.
+  hometot=$(CW_HOME="$homerp" LC_ALL=C awk -F'\t' '
+    $2 == ENVIRON["CW_HOME"] { v = $1 } END { if (v != "") print v }' "$sout")
+  [ "$src" = 0 ] || cov_complete=0
+  [ "$ucount" -gt 0 ] && cov_complete=0
+  # A sweep that printed no $HOME row measured no whole to compare against.
+  if [ -z "$hometot" ]; then hometot='-'; cov_complete=0; fi
+  # The note must never claim zero reasons for a figure it calls short.
+  [ "$cov_complete" = 0 ] && [ "$ucount" -lt 1 ] && ucount=1
+  # The parts-<=-whole check on these two numbers is only meaningful when every
+  # claimed path lies inside $HOME: CLAUDE_WATCH_REPO_ROOTS may legitimately
+  # point outside it, and that mass is attributed without being in the sweep.
+  CW_HOME="$homerp" LC_ALL=C awk '
+    BEGIN { h = ENVIRON["CW_HOME"]; p = h "/" }
+    $0 != h && substr($0, 1, length(p)) != p { exit 1 }' "$CLAIM" || inhome=0
+  printf 'C\t%s\t%s\t%s\t%s\n' "$hometot" "$cov_complete" "$ucount" "$inhome" >> "$RAWOUT"
   return 0
 }
 
@@ -656,6 +702,22 @@ if [ "$deadline_hit" = 1 ]; then
   sort -u "$AFF" -o "$AFF"
 fi
 
+# The coverage measurements ride back on the worker's C record. No record at all
+# means the sweep never ran — skipped or killed before it finished — and an
+# unmeasured number is written `-`, never a zero the reader would take as a fact.
+cov_home='-'; cov_complete=0; cov_count=1; cov_inhome=0; cov_swept=0
+cov_rec=$(LC_ALL=C awk -F'\t' '$1 == "C" { print; exit }' "$RAWOUT" 2>/dev/null)
+if [ -n "$cov_rec" ]; then
+  cov_home=$(printf '%s' "$cov_rec" | cut -f2)
+  cov_complete=$(printf '%s' "$cov_rec" | cut -f3)
+  cov_count=$(printf '%s' "$cov_rec" | cut -f4)
+  cov_inhome=$(printf '%s' "$cov_rec" | cut -f5)
+  cov_swept=1
+fi
+# A coverage figure this run already knows is short makes the scan partial: a
+# `note` row alongside `scan partial=0` is a cache the reader calls malformed.
+[ "$cov_complete" = 1 ] || partial=1
+
 tmp="$CACHE_DIR/.disk.tsv.$$"
 {
   printf 'epoch\t-\t%s\t-\t-\n' "$START"
@@ -664,13 +726,15 @@ tmp="$CACHE_DIR/.disk.tsv.$$"
   [ "$n_perm"    -gt 0 ] && printf 'note\tpermission_denied\t%s\t-\t-\n' "$n_perm"
   [ "$n_offvol"  -gt 0 ] && printf 'note\troot_off_home_volume\t%s\t-\t-\n' "$n_offvol"
   [ "$n_unrep"   -gt 0 ] && printf 'note\tpath_unrepresentable\t%s\t-\t-\n' "$n_unrep"
+  [ "$cov_complete" = 0 ] && printf 'note\tcoverage_incomplete\t%s\t-\t-\n' "$cov_count"
   [ -n "$vol_row" ] && printf '%s\n' "$vol_row"
   # Group totals cover every hit; dir rows are capped at the top 20 per group.
   # Size, confidence and path travel in three PARALLEL arrays, never packed into
   # one value. Packing them with SUBSEP and splitting again silently truncates
   # any path containing awk's own separator byte (0x1c) — and a truncated path is
   # a real, different directory that a `confirmed` row would authorise removing.
-  CW_AFF="$AFF" LC_ALL=C awk -F'\t' -v topn="$TOPN" '
+  CW_AFF="$AFF" LC_ALL=C awk -F'\t' -v topn="$TOPN" \
+      -v covhome="$cov_home" -v covcomp="$cov_complete" -v covswept="$cov_swept" '
     BEGIN { while ((getline a < ENVIRON["CW_AFF"]) > 0) if (a != "") aff[a] = 1 }
     $1 == "H" {
       g = $2
@@ -690,10 +754,20 @@ tmp="$CACHE_DIR/.disk.tsv.$$"
     }
     END {
       OFS = "\t"
+      # `attributed` is the sum of the very group totals printed below it, so
+      # the two can never drift: a group the reader can see is a group the
+      # coverage figure counted. Without a sweep there is no whole to compare
+      # against, and an unmeasured number is `-`, not a plausible zero.
+      att = 0
       for (gi = 1; gi <= gn; gi++) {
         g = glist[gi]
-        gt = (g in hasT) ? Ttot[g] : tot[g] + 0
-        print "group", g, gt, cnt[g] + 0, (g in aff) ? 1 : 0
+        GT[g] = (g in hasT) ? Ttot[g] : tot[g] + 0
+        att += GT[g]
+      }
+      print "cover", "home", covhome, (covswept == 1) ? att : "-", covcomp
+      for (gi = 1; gi <= gn; gi++) {
+        g = glist[gi]
+        print "group", g, GT[g], cnt[g] + 0, (g in aff) ? 1 : 0
       }
       for (gi = 1; gi <= gn; gi++) {
         g = glist[gi]
@@ -724,6 +798,18 @@ if [ -n "$vol_row" ]; then
     printf 'claude-watch disk: group totals (%s KB) exceed the volume used (%s KB) — double counting.\n' \
       "$sum_kb" "$used_kb" >&2
   fi
+fi
+# The same invariant one level down, on the coverage row: what the groups claim
+# cannot exceed the $HOME sweep they were measured out of. This is where an
+# over-count gets SAID — the row itself carries both measurements untouched,
+# because clamping a residual to zero in the cache is how a double count becomes
+# invisible again. Only meaningful when every claimed path is inside $HOME:
+# CLAUDE_WATCH_REPO_ROOTS may point outside it, and that mass is attributed
+# without ever being part of the sweep total.
+cov_attr=$(LC_ALL=C awk -F'\t' '$1 == "cover" { print $4; exit }' "$tmp")
+if [ "$cov_inhome" = 1 ] && [ "$cov_attr" -gt "$cov_home" ] 2>/dev/null; then
+  printf 'claude-watch disk: attributed group totals (%s KB) exceed the $HOME sweep total (%s KB) — double counting.\n' \
+    "$cov_attr" "$cov_home" >&2
 fi
 
 # The rename is atomic only because $tmp is on the cache's own volume.
