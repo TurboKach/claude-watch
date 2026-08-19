@@ -432,7 +432,7 @@ disk_findings() {
   # that was not measured, so both of these are `unknown` + `unavailable`, and
   # the invariant unavailable <=> unknown holds by construction.
   if [ "$cstate" = missing ]; then
-    local e10='disk: never scanned, so nothing here is measured. This takes about 10 seconds and is then cached for 6h. Run: claude-watch disk --refresh'
+    local e10='disk: never scanned, so nothing here is measured. This takes about 60-70 seconds and is then cached for 6h. Run: claude-watch disk --refresh'
     printf 'S\tdisk\tunknown\tunavailable\tcache_missing\t%s\t%s\n' "$(disk_clean "$e10")" "$(disk_clean "$e10")"
     return 0
   fi

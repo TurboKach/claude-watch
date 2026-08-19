@@ -457,8 +457,8 @@ from_cache "$TMP/does-not-exist.tsv"
 eq "missing cache -> unknown"          "$(S 3)" unknown
 eq "  unavailable <=> unknown"         "$(S 4)" unavailable
 eq "  reason"                          "$(S 5)" cache_missing
-eq "  summary is E10 verbatim"         "$(S 6)" "disk: never scanned, so nothing here is measured. This takes about 10 seconds and is then cached for 6h. Run: claude-watch disk --refresh"
-eq "  remedy is E10 too"               "$(S 7)" "disk: never scanned, so nothing here is measured. This takes about 10 seconds and is then cached for 6h. Run: claude-watch disk --refresh"
+eq "  summary is E10 verbatim"         "$(S 6)" "disk: never scanned, so nothing here is measured. This takes about 60-70 seconds and is then cached for 6h. Run: claude-watch disk --refresh"
+eq "  remedy is E10 too"               "$(S 7)" "disk: never scanned, so nothing here is measured. This takes about 60-70 seconds and is then cached for 6h. Run: claude-watch disk --refresh"
 eq "  and never a finding"             "$(nfind)" 0
 
 NOW=$(date +%s)
