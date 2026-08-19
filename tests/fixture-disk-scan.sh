@@ -254,7 +254,9 @@ indep_home=$(du -skx "$RP" 2>/dev/null | awk '{print $1}')
 eq "cover home_total equals an independent du -skx of \$HOME" "$(covcol 3)" "$indep_home"
 # The identity that keeps the row honest, asserted against the cache itself and
 # not against how the scanner happens to compute it: every group the reader can
-# see is a group the coverage figure counted.
+# see is a group the coverage figure counted. Holds here because run A's own
+# root IS $HOME — every hit is inside it. A root outside $HOME (below) breaks
+# this identity on purpose: attributed stays capped to $HOME, groups do not.
 sum_groups=$(LC_ALL=C awk -F'\t' '$1=="group"{s+=$3} END{printf "%d", s+0}' "$CACHE")
 eq "cover attributed equals the sum of every group total" "$(covcol 4)" "$sum_groups"
 if [ "$(covcol 4)" -le "$(covcol 3)" ] 2>/dev/null; then
@@ -264,6 +266,60 @@ else
 fi
 eq "coverage is complete on a readable tree" "$(covcol 5)" "1"
 eq "and no coverage_incomplete note"         "$(noteval coverage_incomplete)" ""
+
+# --- D1b, same-volume root outside $HOME: attributed and home_total must
+# describe the same universe. CLAUDE_WATCH_REPO_ROOTS may legitimately point
+# outside $HOME (a documented, supported config) — a hit under it is still a
+# real group total below, but it must never inflate `attributed` past what the
+# $HOME sweep actually measured, or the residual advise-disk derives from the
+# two (home_total - attributed) silently shrinks or vanishes.
+echo "coverage: a repo root outside \$HOME does not inflate attributed"
+HR="$TMP/homeR"; mkdir -p "$HR/Downloads"
+kb "$HR/Downloads/iso" 200                                # the only in-$HOME hit
+mkdir -p "$TMP/outsideR/proj/node_modules"
+printf '{}\n' > "$TMP/outsideR/proj/package.json"
+kb "$TMP/outsideR/proj/node_modules/big" 500              # same volume, outside $HOME
+DR="$TMP/dataR"; CACHE="$DR/state/disk.tsv"
+HOME="$HR" CLAUDE_WATCH_HOME="$DR" CLAUDE_WATCH_REPO_ROOTS="$TMP/outsideR/proj" \
+  bash "$SCAN" > "$OUT" 2> "$ERR"
+indep_homeR=$(du -skx "$HR" 2>/dev/null | awk '{print $1}')
+eq "cover home_total equals an independent du -skx of \$HOME (outside-root run)" \
+   "$(covcol 3)" "$indep_homeR"
+between "the out-of-\$HOME hit still gets a full group total" "$(gtot node_modules)" 500 520
+eq "cover attributed equals home_total, not the full group sum" "$(covcol 4)" "$(covcol 3)"
+sum_groups_R=$(LC_ALL=C awk -F'\t' '$1=="group"{s+=$3} END{printf "%d", s+0}' "$CACHE")
+if [ "$(covcol 4)" -lt "$sum_groups_R" ] 2>/dev/null; then
+  ok "cover attributed is less than the sum of every group total (the out-of-\$HOME one is excluded)"
+else
+  bad "cover attributed is less than the sum of every group total (got $(covcol 4) of $sum_groups_R)"
+fi
+eq "no root_off_home_volume note (same volume, just outside \$HOME)" \
+   "$(noteval root_off_home_volume)" ""
+eq "coverage is complete"                    "$(covcol 5)" "1"
+if grep -qE 'exceed the volume used|exceed the \$HOME sweep total' "$ERR"; then
+  bad "the parts-<=-whole guard is silent (outside-root run)"; sed 's/^/        /' "$ERR"
+else
+  ok "the parts-<=-whole guard is silent (outside-root run)"
+fi
+
+# --- D1b, the common case: a root that is a SUBDIRECTORY of $HOME (~/Dev, this
+# user's own config), not $HOME itself as in run A. The in-$HOME path must stay
+# byte-identical: attributed counts the repo-root hit exactly like any
+# kind-table one, with nothing excluded.
+echo "coverage: an in-\$HOME subdirectory root stays fully attributed"
+HS="$TMP/homeS"; mkdir -p "$HS/Downloads" "$HS/Dev/proj/node_modules"
+kb "$HS/Downloads/iso" 200
+printf '{}\n' > "$HS/Dev/proj/package.json"
+kb "$HS/Dev/proj/node_modules/big" 500
+DS="$TMP/dataS"; CACHE="$DS/state/disk.tsv"
+HOME="$HS" CLAUDE_WATCH_HOME="$DS" CLAUDE_WATCH_REPO_ROOTS="$HS/Dev" \
+  bash "$SCAN" > "$OUT" 2> "$ERR"
+between "the ~/Dev hit is measured as a group" "$(gtot node_modules)" 500 520
+sum_groups_S=$(LC_ALL=C awk -F'\t' '$1=="group"{s+=$3} END{printf "%d", s+0}' "$CACHE")
+eq "cover attributed equals the sum of every group total (~/Dev is inside \$HOME)" \
+   "$(covcol 4)" "$sum_groups_S"
+between "and covers both the downloads and node_modules hits" "$(covcol 4)" 700 734
+eq "coverage is complete"                    "$(covcol 5)" "1"
 
 # ------------------------------------------- run B: a clean tree, no notes ---
 echo "clean scan"

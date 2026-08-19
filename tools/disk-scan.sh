@@ -803,6 +803,13 @@ fi
 # `note` row alongside `scan partial=0` is a cache the reader calls malformed.
 [ "$cov_complete" = 1 ] || partial=1
 
+# The `cover` row's `attributed` figure (below) must describe the same universe
+# as `home_total`: only what lies under the measured $HOME. Resolved fresh here
+# (walk()'s own $homerp was local to its subshell and did not survive) with the
+# same physdir() canonicalisation, so a symlinked $HOME still compares correctly.
+home_phys=$(physdir "$HOME")
+[ -n "$home_phys" ] || home_phys=$HOME
+
 tmp="$CACHE_DIR/.disk.tsv.$$"
 {
   printf 'epoch\t-\t%s\t-\t-\n' "$START"
@@ -818,15 +825,23 @@ tmp="$CACHE_DIR/.disk.tsv.$$"
   # one value. Packing them with SUBSEP and splitting again silently truncates
   # any path containing awk's own separator byte (0x1c) — and a truncated path is
   # a real, different directory that a `confirmed` row would authorise removing.
-  CW_AFF="$AFF" LC_ALL=C awk -F'\t' -v topn="$TOPN" \
+  CW_AFF="$AFF" LC_ALL=C awk -F'\t' -v topn="$TOPN" -v home="$home_phys" \
       -v covhome="$cov_home" -v covcomp="$cov_complete" -v covswept="$cov_swept" '
-    BEGIN { while ((getline a < ENVIRON["CW_AFF"]) > 0) if (a != "") aff[a] = 1 }
+    BEGIN { while ((getline a < ENVIRON["CW_AFF"]) > 0) if (a != "") aff[a] = 1
+            homepre = home "/" }
     $1 == "H" {
       g = $2
       if (!(g in seen0)) { glist[++gn] = g; seen0[g] = 1 }
       tot[g] += $3 + 0; cnt[g]++
       k = ++seen[g]
       KB[g, k] = $3 + 0; CF[g, k] = $4; PT[g, k] = $5
+      # CLAUDE_WATCH_REPO_ROOTS may legitimately name a path outside $HOME (on
+      # the same volume): a hit under it is still a real, groupable directory,
+      # but it was never part of the $HOME sweep below and must not inflate
+      # `attributed` (:857-872) against a `home_total` that only ever measures
+      # $HOME. Kind-table hits are always under $HOME by construction (:404),
+      # so only repo-root hits can ever fail this check.
+      if ($5 == home || substr($5, 1, length(homepre)) == homepre) homeattr[g] += $3 + 0
     }
     # A kind-table entry sweep total (T) is the true size of its whole
     # subtree; the summed H rows are only its depth-N children and can fall
@@ -839,15 +854,21 @@ tmp="$CACHE_DIR/.disk.tsv.$$"
     }
     END {
       OFS = "\t"
-      # `attributed` is the sum of the very group totals printed below it, so
-      # the two can never drift: a group the reader can see is a group the
-      # coverage figure counted. Without a sweep there is no whole to compare
-      # against, and an unmeasured number is `-`, not a plausible zero.
+      # `attributed` and `home_total` must describe the same universe: only
+      # what the sweep below actually measured under $HOME. `GT[g]` (the group
+      # total printed below, unchanged) stays the FULL total including any
+      # out-of-$HOME repo-root mass — the reader still wants to see everything
+      # reclaimable, wherever it lives. `att` is the narrower, $HOME-only sum:
+      # a T-row group is a kind-table entry and is always inside $HOME, so its
+      # whole total counts; an H-only group counts only the portion `homeattr`
+      # already filtered to paths under $HOME (:844). Without a sweep there
+      # is no whole to compare against, and an unmeasured number is `-`, not a
+      # plausible zero.
       att = 0
       for (gi = 1; gi <= gn; gi++) {
         g = glist[gi]
         GT[g] = (g in hasT) ? Ttot[g] : tot[g] + 0
-        att += GT[g]
+        att += (g in hasT) ? Ttot[g] : homeattr[g] + 0
       }
       print "cover", "home", covhome, (covswept == 1) ? att : "-", covcomp
       for (gi = 1; gi <= gn; gi++) {
@@ -888,9 +909,10 @@ fi
 # cannot exceed the $HOME sweep they were measured out of. This is where an
 # over-count gets SAID — the row itself carries both measurements untouched,
 # because clamping a residual to zero in the cache is how a double count becomes
-# invisible again. Only meaningful when every claimed path is inside $HOME:
-# CLAUDE_WATCH_REPO_ROOTS may point outside it, and that mass is attributed
-# without ever being part of the sweep total.
+# invisible again. `attributed` (above) is now scoped to $HOME by construction —
+# a CLAUDE_WATCH_REPO_ROOTS path outside it no longer reaches this figure — so a
+# genuine over-count can only originate from inside $HOME. The `cov_inhome` gate
+# below predates that fix; left as is here, it is now redundant but harmless.
 cov_attr=$(LC_ALL=C awk -F'\t' '$1 == "cover" { print $4; exit }' "$tmp")
 if [ "$cov_inhome" = 1 ] && [ "$cov_attr" -gt "$cov_home" ] 2>/dev/null; then
   printf 'claude-watch disk: attributed group totals (%s KB) exceed the $HOME sweep total (%s KB) — double counting.\n' \

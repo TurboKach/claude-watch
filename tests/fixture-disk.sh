@@ -651,6 +651,18 @@ from_cache "$TMP/cover.tsv"
 has "coverage residual renders in the summary" "$(S 6)" '$HOME is not attributed to any group'
 has "  with the correct GiB figure"    "$(S 6)" '2.0 GiB'
 
+# home_total_kb and attributed_kb must describe the same universe (a P1 codex
+# finding, disk-scan.sh:846 / advise-disk.sh:714): this arithmetic (unchanged
+# here) is only correct because the scanner now confines `attributed` to what
+# its own $HOME sweep measured, excluding any mass from a
+# CLAUDE_WATCH_REPO_ROOTS path outside $HOME — had `attributed` still summed
+# that mass in, this same subtraction would have silently printed a smaller,
+# wrong residual. Pinned with 15 GiB home / 5 GiB attributed -> 10 GiB.
+good_cache "$TMP/cover3.tsv" "cover	home	15728640	5242880	1"
+from_cache "$TMP/cover3.tsv"
+has "coverage residual is correct when attributed is \$HOME-scoped" "$(S 6)" '$HOME is not attributed to any group'
+has "  10.0 GiB, not shrunk by out-of-\$HOME mass the scanner now excludes" "$(S 6)" '10.0 GiB'
+
 printf 'epoch\t-\t%s\t-\t-\nscan\t1\t0\t3\t3\nnote\tcoverage_incomplete\t1\t-\t-\nvol\t/System/Volumes/Data\t%s\t%s\t%s\ncover\thome\t-\t-\t0\n' \
   "$NOW" "$V_USED" "$V_AVAIL" "$V_DF" > "$TMP/covincomplete.tsv"
 from_cache "$TMP/covincomplete.tsv"
