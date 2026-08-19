@@ -503,8 +503,20 @@ walk() {
   local hometot ucount=0 cov_complete=1 inhome=1
   homerp=$(physdir "$HOME")
   [ -n "$homerp" ] || homerp=$HOME
-  du -kxd "$MAXDEPTH" "$homerp" > "$sout" 2>"$serr"
-  src=$?
+  # A deadline kill lands on this whole process group (:655-669) while du is
+  # still mid-sweep. Left untrapped, TERM tears this subshell down on the same
+  # signal that stops du, and every row du had already flushed to $sout — the
+  # whole point of the sweep — is discarded rather than converted below. Catch
+  # it: a no-op handler resets TERM to its default disposition across du's own
+  # fork+exec, so du still dies promptly, but the shell survives to run the
+  # conversion on whatever made it to disk. `src` still ends up non-zero (the
+  # killed du's own exit status), which the existing wholesale-taint check
+  # below already treats as "mark every sweep-fed group affected, coverage
+  # incomplete" — the same fallback a du that failed for any other
+  # unattributable reason gets. The outer `2>/dev/null` swallows only bash's
+  # own "Terminated" job notice; du's own stderr keeps its `2>"$serr"` redirect.
+  trap ':' TERM
+  { du -kxd "$MAXDEPTH" "$homerp" > "$sout" 2>"$serr"; src=$?; } 2>/dev/null
 
   # Emit T/H rows for the registered kind-table entries from this one sweep.
   # Everything else $sout sees (the bulk of $HOME) matches no entry and is
@@ -697,8 +709,12 @@ LC_ALL=C awk -F'\t' '$1 == "A" && $2 != "" { print $2 }' "$RAWOUT" 2>/dev/null |
 [ -s "$AFF" ] && partial=1
 # The deadline is the one reason that cannot be attributed: the walk was killed
 # mid-stride and cannot say what it had left to do, so nothing claims complete.
+# `T` rows count alongside `H`: a detail_depth>0 entry (developer) reports its
+# total from its own T record, not summed H rows, so a T-only group left out of
+# this pass would keep affected=0 and inherit volume severity as though it had
+# been measured in full.
 if [ "$deadline_hit" = 1 ]; then
-  LC_ALL=C awk -F'\t' '$1 == "H" { print $2 }' "$RAWOUT" 2>/dev/null >> "$AFF"
+  LC_ALL=C awk -F'\t' '$1 == "H" || $1 == "T" { print $2 }' "$RAWOUT" 2>/dev/null >> "$AFF"
   sort -u "$AFF" -o "$AFF"
 fi
 

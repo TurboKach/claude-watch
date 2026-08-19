@@ -827,6 +827,74 @@ eq "the blocked worker was killed, not orphaned" \
 eq "the lock is released after a deadline" \
    "$([ -e "$DD/state/disk-scan.lock" ] && echo present || echo gone)" "gone"
 
+# ------------------------------------------- deadline: mid-$HOME-sweep kill --
+# The deadline test above blocks in the FIRST du call (a repo root), so the
+# walk is killed before the sweep ever starts. This one lets the repo root
+# finish instantly and blocks the SWEEP's own du instead, proving two things a
+# skipped sweep cannot: that a row du had already flushed before the kill
+# survives into the cache (not discarded with the rest of the sweep), and that
+# a group whose total comes from the sweep's OWN T record — no matching H rows,
+# same shape as `developer` when Library/Developer has no depth-2 children —
+# is still marked `affected` rather than inheriting volume severity as if it
+# had been measured in full.
+#
+# The stub also writes ONE attributable stderr line for a DIFFERENT
+# kind-table entry (containers) before it blocks. That keeps the sweep off the
+# pre-existing "non-zero exit, no stderr at all" wholesale-taint path (which
+# would affect every sweep-fed group, developer included, for a reason that has
+# nothing to do with the H/T gap this test targets) and isolates what is
+# actually under test: whether the deadline-taint pass at assembly sees a
+# T-only group at all.
+echo "deadline mid-sweep: partial sweep data survives and is marked affected"
+DVH2="$TMP/homeDevSweep"
+mkdir -p "$DVH2/Library/Developer"                      # no depth-2 children -> T only
+mkdir -p "$DVH2/Library/Containers"
+BIN2="$TMP/binSweep"; mkdir -p "$BIN2"
+{
+  printf '#!/bin/sh\n'
+  printf 'for a in "$@"; do\n'
+  printf '  if [ "$a" = "-kxd" ]; then\n'
+  # $3 is the scanner's resolved (physdir) $HOME, the same path the entries
+  # table registers — a raw $HOME here would be the pre-symlink /var path on
+  # macOS and never match.
+  printf '    printf "%%s\\t%%s/Library/Developer\\n" 600 "$3"\n'
+  # A directory du could partly read still gets a stdout total (0, nothing
+  # readable) alongside the stderr denial — same shape as a real `du` hitting
+  # one unreadable child, and what gives containers an H row to check `gaff`
+  # against below.
+  printf '    printf "%%s\\t%%s/Library/Containers\\n" 0 "$3"\n'
+  printf '    printf "du: %%s/Library/Containers: Permission denied\\n" "$3" >&2\n'
+  printf '    touch %s/sweep-du-started\n' "$TMP"
+  printf '    sleep 6\n'
+  printf '    touch %s/sweep-du-survived\n' "$TMP"
+  printf '    exit 1\n'
+  printf '  fi\n'
+  printf 'done\n'
+  printf 'exec /usr/bin/du "$@"\n'
+} > "$BIN2/du"
+chmod +x "$BIN2/du"
+DDS="$TMP/dataDevSweep"; CACHE="$DDS/state/disk.tsv"
+PATH="$BIN2:$PATH" HOME="$DVH2" CLAUDE_WATCH_HOME="$DDS" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
+  CLAUDE_WATCH_DISK_DEADLINE=2 bash "$SCAN" > "$OUT" 2> "$ERR"; rcDS=$?
+eq "the deadline-mid-sweep run exits 0" "$rcDS" "0"
+eq "deadline_hit=1"                     "$(scancol 3)" "1"
+eq "partial=1"                          "$(scancol 2)" "1"
+eq "the sweep really did block in du"   "$([ -e "$TMP/sweep-du-started" ] && echo yes || echo no)" "yes"
+eq "the blocked sweep du was killed, not orphaned" \
+   "$([ -e "$TMP/sweep-du-survived" ] && echo survived || echo killed)" "killed"
+# Finding 1: the row du had already flushed before the kill is converted, not
+# discarded with the rest of the sweep it never finished.
+eq "developer's already-flushed T row survives the kill" "$(gtot developer)" "600"
+eq "developer has no matching H rows (T-only)"            "$(gcount developer)" "0"
+# The stderr line is attributed narrowly, exactly as designed: it names
+# containers, not developer, and does not trip the wholesale fallback.
+eq "the stderr denial affects only containers"                 "$(gaff containers)" "1"
+# Finding 2: a T-only group killed mid-sweep must not keep affected=0 and
+# inherit volume severity as though it had been measured in full — and, since
+# the stderr line above already took the wholesale path off the table, this
+# can only be satisfied by the deadline-taint pass also checking T rows.
+eq "the T-only developer group is marked affected by the kill" "$(gaff developer)" "1"
+
 # -------------------------------------------------------- the atomic write ---
 # The temp file must be created next to the cache: a temp on another volume
 # makes the final mv a copy, not a rename.
