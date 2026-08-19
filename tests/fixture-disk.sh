@@ -136,19 +136,77 @@ eq "avail one KB under 20% -> warn"    "$(S 3)" warn
 
 # ============================================================ group findings ==
 echo "reclaimable groups"
-# 2% of 442287516 = 8845750.32 KB.
+# 2% of 442287516 = 8845750.32 KB. Both sides of this boundary (8.4 GiB) clear
+# the 5 GiB floor on their own, so the floor knob is pinned high here to keep
+# testing the percent gate in isolation.
 BOUND_IN="group	rebuildable	8845751	4	0"
 BOUND_OUT="group	rebuildable	8845750	4	0"
 
-pure_body "$V_USED" "$V_AVAIL" "$V_DF" "$BOUND_IN"
+CLAUDE_WATCH_DISK_GROUP_WARN_GIB=1000 pure_body "$V_USED" "$V_AVAIL" "$V_DF" "$BOUND_IN"
 eq "group at 2% + 1 KB is surfaced"    "$(F disk.reclaimable.rebuildable 3)" disk.reclaimable.rebuildable
 eq "  threshold is 2% of the volume"   "$(F disk.reclaimable.rebuildable 8)" 8845751
 eq "  threshold knob"                  "$(F disk.reclaimable.rebuildable 9)" CLAUDE_WATCH_DISK_GROUP_WARN_PCT
 eq "  reclaim_kb is the group size"    "$(F disk.reclaimable.rebuildable 10)" 8845751
 
-pure_body "$V_USED" "$V_AVAIL" "$V_DF" "$BOUND_OUT"
+CLAUDE_WATCH_DISK_GROUP_WARN_GIB=1000 pure_body "$V_USED" "$V_AVAIL" "$V_DF" "$BOUND_OUT"
 eq "group at 2% - 1 KB is not shown"   "$(nfind)" 1
 has "  summary says nothing qualified" "$(S 6)" "no group over 2% of the volume"
+
+echo "reclaimable groups: absolute GiB floor"
+# 5*1048576 = 5242880 KB. The percent knob is pinned high here so it never
+# admits on its own, isolating the floor.
+GFLOOR_IN="group	rebuildable	5242880	4	0"
+GFLOOR_OUT="group	rebuildable	5242879	4	0"
+CLAUDE_WATCH_DISK_GROUP_WARN_PCT=100 pure_body "$V_USED" "$V_AVAIL" "$V_DF" "$GFLOOR_IN"
+eq "group at exactly the GiB floor publishes" "$(nfind)" 2
+CLAUDE_WATCH_DISK_GROUP_WARN_PCT=100 pure_body "$V_USED" "$V_AVAIL" "$V_DF" "$GFLOOR_OUT"
+eq "one KB under the GiB floor: not shown" "$(nfind)" 1
+
+echo "reclaimable groups: effective threshold (lower bar wins, tie -> percent)"
+# Floor-only, on V_TOTAL: the 5 GiB floor (5242880) is lower than the 2%
+# bar (8845751), so it is the one reported even though the group is admitted
+# by the floor alone.
+pure_body 0 "$V_TOTAL" "$V_DF" "group	rebuildable	6291456	3	0"
+eq "floor-only: threshold is the GiB floor" "$(F disk.reclaimable.rebuildable 8)" 5242880
+eq "  threshold knob is the GiB knob"  "$(F disk.reclaimable.rebuildable 9)" CLAUDE_WATCH_DISK_GROUP_WARN_GIB
+
+# Percent-only, on a 200 GiB volume: 2% (4194304) is lower than the 5 GiB
+# floor (5242880), so a group admitted by percent alone reports the percent
+# bar.
+pure_body 0 "$G200" 0 "group	rebuildable	4194304	3	0"
+eq "percent-only: threshold is the percent bar" "$(F disk.reclaimable.rebuildable 8)" 4194304
+eq "  threshold knob is the percent knob" "$(F disk.reclaimable.rebuildable 9)" CLAUDE_WATCH_DISK_GROUP_WARN_PCT
+
+# Over both, on an ok volume (so severity is not inherited): 26738688 KB
+# clears both bars, but the LOWER bar (the floor) is still what is reported.
+# Severity keys off disk_group_pct_admits, not off which bar is printed here
+# (item 4): this group is still `warn`, not `info`.
+pure_body $(( V_TOTAL - V_TOTAL * 60 / 100 )) $(( V_TOTAL * 60 / 100 )) "$V_DF" "group	rebuildable	26738688	57	0"
+eq "over both: threshold is still the lower bar" "$(F disk.reclaimable.rebuildable 8)" 5242880
+eq "  threshold knob is the GiB knob"  "$(F disk.reclaimable.rebuildable 9)" CLAUDE_WATCH_DISK_GROUP_WARN_GIB
+eq "  but severity is warn (pct-admitted)" "$(F disk.reclaimable.rebuildable 4)" warn
+
+echo "reclaimable groups: severity (floor-admitted vs percent-admitted)"
+# Floor-only group on a fully healthy (100% avail) volume: base severity is
+# info, not warn, and it raises the domain's worst no further than info.
+pure_body 0 "$V_TOTAL" "$V_DF" "group	rebuildable	6291456	3	0"
+eq "floor-only group on ok volume -> info" "$(F disk.reclaimable.rebuildable 4)" info
+eq "  domain worst is info, not warn"  "$(S 3)" info
+has "  and it explains itself"         "$(F disk.reclaimable.rebuildable 13)" "surfaced by the 5 GiB floor"
+# Percent-admitted group on an ok volume is still warn: the existing assertion
+# further below ("ok volume never demotes group") covers this.
+
+# A critical volume promotes a floor-only group to critical (inheritance can
+# still promote a floor-admitted base).
+pure_body "$V_USED" "$V_AVAIL" "$V_DF" "group	rebuildable	6291456	3	0"
+eq "critical volume promotes a floor-only group" "$(F disk.reclaimable.rebuildable 4)" critical
+
+# The affected cap applies LAST and can only lower: a floor-only group with
+# affected=1 on a critical volume still lands at info, same as any other
+# capped group, and carries the same cap sentence.
+pure_body "$V_USED" "$V_AVAIL" "$V_DF" "group	rebuildable	6291456	3	1"
+eq "affected floor-only group on critical volume -> info" "$(F disk.reclaimable.rebuildable 4)" info
+has "  and it carries the cap sentence" "$(F disk.reclaimable.rebuildable 13)" "capped at info because the scan could not measure all of it"
 
 # Inheritance: severity copied from disk.volume_low, never downward.
 pure_body "$V_USED" "$V_AVAIL" "$V_DF" "group	rebuildable	26738688	57	0"
@@ -163,6 +221,29 @@ pure_body "$V_USED" "$V_AVAIL" "$V_DF" "group	rebuildable	26738688	57	0"
 has "reclaim total is always a floor"  "$(S 6)" "(a floor)"
 has "  headline says floor too"        "$(F disk.reclaimable.rebuildable 12)" "a floor"
 has "  detail carries the rebuild cost" "$(F disk.reclaimable.rebuildable 13)" "a Rust target takes minutes to tens of minutes"
+
+echo "the 2026-08-19 incident, today's real numbers"
+# used 429435388 + avail 22902700 = 452338088 KB, matching the live cache in
+# the plan's Context table. The 2% bar is 9046762 KB (8.63 GiB); the 5 GiB
+# floor is 5242880 KB. Four of six groups sat below the percent line and were
+# silently unpublished. Three of those four clear the 5 GiB floor — caches
+# (6.7 GiB), rebuildable (6.4 GiB) and transcripts (5.37 GiB); node_modules,
+# at 4.908 GiB, is genuinely under the floor and correctly stays suppressed
+# (picked up instead by step 2's aggregate below_threshold finding).
+REAL_BODY="group	containers	13259944	4	0
+group	downloads	11736728	4	0
+group	caches	7024324	4	0
+group	rebuildable	6715136	4	0
+group	transcripts	5627436	4	0
+group	node_modules	5146676	4	0"
+pure_body 429435388 22902700 0 "$REAL_BODY"
+eq "the incident: containers still published" "$(F disk.reclaimable.containers 3)" disk.reclaimable.containers
+eq "  downloads still published"       "$(F disk.reclaimable.downloads 3)" disk.reclaimable.downloads
+eq "  caches now published by the floor" "$(F disk.reclaimable.caches 3)" disk.reclaimable.caches
+eq "  rebuildable now published by the floor" "$(F disk.reclaimable.rebuildable 3)" disk.reclaimable.rebuildable
+eq "  transcripts now published by the floor" "$(F disk.reclaimable.transcripts 3)" disk.reclaimable.transcripts
+eq "  node_modules (4.9 GiB) stays under the floor" "$(F disk.reclaimable.node_modules 3)" ""
+eq "  five groups published, one volume finding" "$(nfind)" 6
 
 # ============================================================== partial scans ==
 echo "partial scans"
@@ -654,7 +735,10 @@ group	rebuildable	26738688	2	0
 dir	$TMP/rb1/target	9000000	rebuildable	confirmed
 dir	$TMP/rb2/target	8000000	rebuildable	confirmed"
 save_r=$DISK_RESTAT_MAX; DISK_RESTAT_MAX=2
-from_cache "$TMP/filter.tsv"
+# node_modules (8845750 KB, 8.4 GiB) clears the 5 GiB floor on its own, so the
+# floor knob is pinned high to keep it below the line — this case is about the
+# percent gate's probe filter, not the floor.
+CLAUDE_WATCH_DISK_GROUP_WARN_GIB=1000 from_cache "$TMP/filter.tsv"
 DISK_RESTAT_MAX=$save_r
 A=$(F disk.reclaimable.rebuildable 14)
 has "budget goes to the published group" "$A" "rm -rf '$TMPR/rb1/target'"
@@ -668,12 +752,12 @@ eq "  sub-threshold group emits nothing" "$(nfind)" 2
 # between two copies of the test would show.
 good_cache "$TMP/parityin.tsv" "group	rebuildable	8845751	1	0
 dir	$TMP/rb1/target	8845751	rebuildable	confirmed"
-from_cache "$TMP/parityin.tsv"
+CLAUDE_WATCH_DISK_GROUP_WARN_GIB=1000 from_cache "$TMP/parityin.tsv"
 eq "group exactly at the 2% line: finding" "$(nfind)" 2
 has "  and its command is printed"     "$(F disk.reclaimable.rebuildable 14)" "rm -rf '$TMPR/rb1/target'"
 good_cache "$TMP/parityout.tsv" "group	rebuildable	8845750	1	0
 dir	$TMP/rb1/target	8845750	rebuildable	confirmed"
-from_cache "$TMP/parityout.tsv"
+CLAUDE_WATCH_DISK_GROUP_WARN_GIB=1000 from_cache "$TMP/parityout.tsv"
 eq "one KB below: no finding at all"   "$(nfind)" 1
 
 # THE SEAM. The whole file's missing assertion class is "the cache says
@@ -693,7 +777,7 @@ dir	$TMP/rb2/target	8000000	rebuildable	confirmed
 dir	$TMP/rb3/target	7000000	rebuildable	confirmed
 dir	$TMP/rb4/target	6000000	rebuildable	confirmed
 dir	$TMP/rb5/target	5000000	rebuildable	confirmed"
-from_cache "$TMP/seam.tsv"
+CLAUDE_WATCH_DISK_GROUP_WARN_GIB=1000 from_cache "$TMP/seam.tsv"
 A=$(F disk.reclaimable.rebuildable 14)
 has "seam: the render agrees with the cache" "$(F disk.reclaimable.rebuildable 13)" \
   "Confidence: 5 confirmed, 0 likely, 0 unverified"
@@ -743,7 +827,9 @@ r=$( CLAUDE_WATCH_DISK_CRIT_PCT=40 disk_findings ok "$V_USED" "$V_AVAIL" "$V_DF"
 eq "raising the crit pct still crits"  "$(printf '%s\n' "$r" | awk -F'\t' '$1=="S"{print $3}')" critical
 r=$( CLAUDE_WATCH_DISK_CRIT_GIB=1 disk_findings ok "$V_USED" "$V_AVAIL" "$V_DF" / 0 < /dev/null )
 eq "lowering the crit GiB -> warn"     "$(printf '%s\n' "$r" | awk -F'\t' '$1=="S"{print $3}')" warn
-r=$( CLAUDE_WATCH_DISK_GROUP_WARN_PCT=10 disk_findings ok "$V_USED" "$V_AVAIL" "$V_DF" / 0 <<< "group	rebuildable	26738688	57	0" )
+# 26738688 KB (25.5 GiB) clears the 5 GiB floor outright, so the floor knob is
+# pinned high here too — this case is about the percent knob alone.
+r=$( CLAUDE_WATCH_DISK_GROUP_WARN_PCT=10 CLAUDE_WATCH_DISK_GROUP_WARN_GIB=1000 disk_findings ok "$V_USED" "$V_AVAIL" "$V_DF" / 0 <<< "group	rebuildable	26738688	57	0" )
 eq "raising the group pct hides it"    "$(printf '%s\n' "$r" | grep -c '^F')" 1
 
 for badv in 2.5 -1 abc ''; do
@@ -755,6 +841,12 @@ for badv in 2.5 -1 abc ''; do
     eq "override '$badv' exits 2"      "$rc" 2
   fi
 done
+
+msg=$( CLAUDE_WATCH_DISK_GROUP_WARN_GIB=abc disk_findings ok "$V_USED" "$V_AVAIL" "$V_DF" / 0 < /dev/null 2>&1 >/dev/null )
+rc=$?
+eq "GROUP_WARN_GIB=abc exits 2"        "$rc" 2
+has "  message shape matches the other knobs" "$msg" 'CLAUDE_WATCH_DISK_GROUP_WARN_GIB="abc" is not a non-negative integer'
+eq "disk_default_for reports 5 for it" "$(disk_default_for CLAUDE_WATCH_DISK_GROUP_WARN_GIB)" 5
 
 # ================================================================== invariants ==
 echo "invariants"

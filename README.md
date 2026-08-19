@@ -112,7 +112,7 @@ claude-watch advise  CRITICAL disk — 4.7% free — 19.8 GiB of 422 GiB on /Sys
       25.5 GiB across 57 directories, a floor. Rebuild cost: .next comes back in seconds; a
       Rust target takes minutes to tens of minutes; … Confidence: 2 confirmed, 0 likely,
       0 unverified (only confirmed hits get a command).
-      critical at 8.4 GiB — CLAUDE_WATCH_DISK_GROUP_WARN_PCT · 25.5 GiB 6.0% of this domain
+      critical at 5.0 GiB — CLAUDE_WATCH_DISK_GROUP_WARN_GIB · 25.5 GiB 6.0% of this domain
       → cache is 2d old; (cd '/Users/you/Dev/engine' && cargo clean) — frees 11.0 GiB ·
         rm -rf '/Users/you/Dev/site/.next' — frees 1.2 GiB
 
@@ -329,6 +329,7 @@ The shell hook costs ~1.3ms on a normal shell start: the date comparison is an i
 | `CLAUDE_WATCH_DISK_WARN_PCT` | `20` | volume `warn` below this % free **and** below `_WARN_GIB` |
 | `CLAUDE_WATCH_DISK_WARN_GIB` | `50` | the absolute half of the same test |
 | `CLAUDE_WATCH_DISK_GROUP_WARN_PCT` | `2` | a reclaimable group is worth surfacing at this % of the volume |
+| `CLAUDE_WATCH_DISK_GROUP_WARN_GIB` | `5` | …or at this many GiB outright, even under the % line — whichever bar is lower publishes the group |
 | `CLAUDE_WATCH_LEAKS_ORPHAN_WARN_HOURS` | `24` | orphan tree age that warns |
 | `CLAUDE_WATCH_LEAKS_ORPHAN_WARN_MB` | `200` | orphan tree size that warns |
 | `CLAUDE_WATCH_LEAKS_WORKTREE_WARN_GIB` | `1` | reclaimable worktree space that warns |

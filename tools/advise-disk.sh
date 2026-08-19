@@ -45,10 +45,11 @@ disk_thresholds() {
   DISK_WARN_PCT=${CLAUDE_WATCH_DISK_WARN_PCT:-20}
   DISK_WARN_GIB=${CLAUDE_WATCH_DISK_WARN_GIB:-50}
   DISK_GROUP_WARN_PCT=${CLAUDE_WATCH_DISK_GROUP_WARN_PCT:-2}
+  DISK_GROUP_WARN_GIB=${CLAUDE_WATCH_DISK_GROUP_WARN_GIB:-5}
   local n v
   for n in CLAUDE_WATCH_DISK_CRIT_PCT CLAUDE_WATCH_DISK_CRIT_GIB \
            CLAUDE_WATCH_DISK_WARN_PCT CLAUDE_WATCH_DISK_WARN_GIB \
-           CLAUDE_WATCH_DISK_GROUP_WARN_PCT; do
+           CLAUDE_WATCH_DISK_GROUP_WARN_PCT CLAUDE_WATCH_DISK_GROUP_WARN_GIB; do
     eval "v=\${$n:-}"
     [ -n "$v" ] || continue
     if ! disk_is_uint "$v"; then
@@ -65,7 +66,8 @@ disk_default_for() {
     CLAUDE_WATCH_DISK_CRIT_GIB) printf '25' ;;
     CLAUDE_WATCH_DISK_WARN_PCT) printf '20' ;;
     CLAUDE_WATCH_DISK_WARN_GIB) printf '50' ;;
-    *)                          printf '2'  ;;
+    CLAUDE_WATCH_DISK_GROUP_WARN_PCT) printf '2' ;;
+    *)                          printf '5'  ;;
   esac
 }
 
@@ -136,18 +138,29 @@ disk_is_uint() { case "${1:-}" in ''|*[!0-9]*) return 1 ;; *) return 0 ;; esac; 
 # has already mis-split a row that contains a tab.
 disk_clean() { local s=${1//$'\t'/ }; printf '%s' "${s//$'\n'/ }"; }
 
-# A group under DISK_GROUP_WARN_PCT produces no finding, so none of its dir rows
-# can ever be printed. Three call sites: the findings loop, the summary loop, and
-# disk_body's probe filter. If they ever disagree, the probe filter is the
-# dangerous side — a group disk_findings publishes but disk_body refused to
-# revalidate loses every one of its commands, silently. Hence one function.
-# Anything non-numeric or a zero denominator answers "not published", which costs
-# a command and never authors one.
+# The percent half of the publish test, factored out so the arithmetic exists
+# in exactly one place: disk_group_published ORs it with the absolute GiB floor
+# below, and the severity rule (disk_findings' group loop) also asks this
+# specific question — "would this group publish on percent alone" — to tell a
+# percent-admitted group from a floor-admitted one.
+disk_group_pct_admits() {   # <size_kb> <total_kb>
+  local sz=$1 total=$2
+  [ $(( sz * 100 )) -ge $(( DISK_GROUP_WARN_PCT * total )) ]
+}
+
+# A group under DISK_GROUP_WARN_PCT of the volume AND under DISK_GROUP_WARN_GIB
+# produces no finding, so none of its dir rows can ever be printed. Three call
+# sites: the findings loop, the summary loop, and disk_body's probe filter. If
+# they ever disagree, the probe filter is the dangerous side — a group
+# disk_findings publishes but disk_body refused to revalidate loses every one of
+# its commands, silently. Hence one function. Anything non-numeric or a zero
+# denominator answers "not published", which costs a command and never authors
+# one — checked ahead of both tests below.
 disk_group_published() {   # <size_kb> <total_kb>
   local sz=$1 total=$2
   disk_is_uint "$sz" || return 1
   [ -n "$total" ] && [ "$total" -gt 0 ] 2>/dev/null || return 1
-  [ $(( sz * 100 )) -ge $(( DISK_GROUP_WARN_PCT * total )) ]
+  disk_group_pct_admits "$sz" "$total" || [ "$sz" -ge $(( DISK_GROUP_WARN_GIB * 1048576 )) ]
 }
 
 disk_rank() {
@@ -533,12 +546,20 @@ disk_findings() {
   local i j disk_conf_rank_v=1
   for (( i = 0; i < ${#glabel[@]}; i++ )); do
     local lab=${glabel[$i]} sz=${gsize[$i]} cnt=${gcount[$i]} aff=${gaff[$i]}
-    # >= 2% of volume_total_kb, and nothing below that line is surfaced at all.
+    # >= 2% of volume_total_kb, or >= the GiB floor; nothing below both lines is
+    # surfaced at all.
     disk_group_published "$sz" "$total" || continue
 
-    # Inheritance (§5): severity copied from disk.volume_low, never downward.
+    # Severity (settled decision 3): gsev = min(info-if-affected, max(base, vsev)).
+    # base is `warn` for a percent-admitted group and `info` for a group the
+    # floor alone admitted (kept off the percent line). Inheritance then copies
+    # severity from disk.volume_low, but only upward — this is max(base, vsev),
+    # and it is what lets a warn/critical volume still promote a floor-admitted
+    # group. The affected-cap below applies LAST and can only lower: it is what
+    # keeps a floor-admitted group (already `info`) from ever being raised by it.
     local gsev=warn
-    [ "$(disk_rank "$vsev")" -gt "$(disk_rank warn)" ] && gsev=$vsev
+    disk_group_pct_admits "$sz" "$total" || gsev=info
+    [ "$(disk_rank "$vsev")" -gt "$(disk_rank "$gsev")" ] && gsev=$vsev
     # Per-group partial cap: only a group whose OWN measurement was affected is
     # capped at info. The global `scan partial=1` drives the banner and
     # partial_reason; this flag drives severity capping and nothing else.
@@ -547,10 +568,24 @@ disk_findings() {
       gsev=info
       capnote=' This group is capped at info because the scan could not measure all of it.'
     fi
+    local floornote=''
+    if ! disk_group_pct_admits "$sz" "$total"; then
+      floornote=" Below the ${DISK_GROUP_WARN_PCT}% line; surfaced by the ${DISK_GROUP_WARN_GIB} GiB floor, so it enters at info."
+    fi
 
-    local gshare gthr best=n/a nconf=0 nlikely=0 nunver=0
+    local gshare gthr gthrname gpctthr ggibthr best=n/a nconf=0 nlikely=0 nunver=0
     gshare=$(disk_share "$sz" "$total")
-    gthr=$(( (DISK_GROUP_WARN_PCT * total + 99) / 100 ))
+    # The effective bar is the LOWER of the two, ties going to the percent bar so
+    # today's output is unchanged where the two coincide. This is display only:
+    # severity above keys off disk_group_pct_admits, not off which bar is named
+    # here, so a group over both lines is `warn` even when the GiB bar prints.
+    gpctthr=$(( (DISK_GROUP_WARN_PCT * total + 99) / 100 ))
+    ggibthr=$(( DISK_GROUP_WARN_GIB * 1048576 ))
+    if [ "$ggibthr" -lt "$gpctthr" ]; then
+      gthr=$ggibthr; gthrname=CLAUDE_WATCH_DISK_GROUP_WARN_GIB
+    else
+      gthr=$gpctthr; gthrname=CLAUDE_WATCH_DISK_GROUP_WARN_PCT
+    fi
 
     # Sort this group's dir rows by confidence rank first, then by size, largest
     # first within each tier — so the rows that carry a runnable command are the
@@ -581,11 +616,11 @@ disk_findings() {
     else
       detail="$detail Confidence: ${nconf} confirmed, ${nlikely} likely, ${nunver} unverified (only confirmed hits get a command)."
     fi
-    detail="$detail$capnote"
+    detail="$detail$floornote$capnote"
 
-    rows=$rows$(printf '%s\t%s\t%s\tF\tdisk\tdisk.reclaimable.%s\t%s\t%s\t%s\tkb\t%s\tCLAUDE_WATCH_DISK_GROUP_WARN_PCT\t%s\t%s\t%s\t%s\t%s\n' \
+    rows=$rows$(printf '%s\t%s\t%s\tF\tdisk\tdisk.reclaimable.%s\t%s\t%s\t%s\tkb\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$(disk_rank "$gsev")" "$gshare" "disk.reclaimable.$lab" \
-      "$lab" "$gsev" "$gshare" "$sz" "$gthr" "$sz" "$best" \
+      "$lab" "$gsev" "$gshare" "$sz" "$gthr" "$gthrname" "$sz" "$best" \
       "$(disk_clean "$(disk_h "$sz") of $(disk_group_what "$lab") — $(disk_pct "$sz" "$total")% of the volume, a floor")" \
       "$(disk_clean "$detail")" "$(disk_clean "$action")")$'\n'
     [ "$(disk_rank "$gsev")" -gt "$(disk_rank "$worst")" ] && worst=$gsev
@@ -600,7 +635,7 @@ disk_findings() {
   base="$(disk_pct "$avail" "$total")% free ($(disk_h "$avail") of $(disk_h "$total"))"
   # Reclaim totals are ALWAYS labelled a floor, not only on the partial path.
   case $ngroups in
-    0) base="$base; no group over ${DISK_GROUP_WARN_PCT}% of the volume" ;;
+    0) base="$base; no group over ${DISK_GROUP_WARN_PCT}% of the volume or ${DISK_GROUP_WARN_GIB} GiB" ;;
     1) base="$base; $(disk_h "$rtotalkb") of $(disk_group_what "$onelabel") (a floor)" ;;
     *) base="$base; $(disk_h "$rtotalkb") reclaimable across ${ngroups} groups (a floor)" ;;
   esac
