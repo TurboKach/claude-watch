@@ -817,7 +817,7 @@ cw_render() {
     fi
     [ "${CW_CLAMPED:-0}" = 1 ] && b_clamp="window clamped to ${CW_CLAMP_REASON}"
     if [ "$CW_DISK_CACHE_STATE" = ok ] && [ "$CW_DISK_STALE" = 1 ]; then
-      b_disk="disk facts are $(fmt_dur "$CW_DISK_AGE") old (refreshed every 6h) — nothing has rescanned since. For current numbers: claude-watch disk --refresh (~10s, 120s cap)"
+      b_disk="disk facts are $(fmt_dur "$CW_DISK_AGE") old (refreshed every 6h) — nothing has rescanned since. For current numbers: claude-watch disk --refresh (~60-70s, 120s cap)"
     fi
   fi
 

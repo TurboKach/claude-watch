@@ -99,7 +99,7 @@ claude-watch advise  CRITICAL disk — 4.7% free — 19.8 GiB of 422 GiB on /Sys
 
   DISK  CRITICAL 4.7% free (19.8 GiB of 422 GiB); 25.5 GiB of rebuildable build output (a floor)
     disk facts are 2d07h old (refreshed every 6h) — nothing has rescanned since. For current
-    numbers: claude-watch disk --refresh (~10s, 120s cap)
+    numbers: claude-watch disk --refresh (~60-70s, 120s cap)
     CRITICAL disk.volume_low
       4.7% free — 19.8 GiB of 422 GiB on /System/Volumes/Data
       under the 10% line (CLAUDE_WATCH_DISK_CRIT_PCT) AND under the 25 GiB line
@@ -142,7 +142,7 @@ claude-watch disk --refresh             # the only thing here that scans
 
 **Window.** Default `24h`. `week` = `7d`, `month` = `30d`, and `Nh` / `Nd` / `Nw` are accepted; anything else exits 2 naming every accepted form. The window is clamped to `CLAUDE_WATCH_KEEP_DAYS` (30) and the output says so when it clamps. A month asked of two days of data reports two days and says which — a month heading over two days of evidence is a confidently wrong answer.
 
-**`advise` never scans.** It reads the disk facts cached by `claude-watch disk --refresh`, which are used silently for **6 hours**, then still used but flagged stale with their age. If nothing has ever scanned, the disk domain is reported `unknown` with the remedy — it will not go away and scan on its own, because the one thing this project never does is start work you did not ask for. A refresh takes ~10s here and is stopped at a hard **120-second deadline**; whatever landed by then is written and labelled a floor.
+**`advise` never scans.** It reads the disk facts cached by `claude-watch disk --refresh`, which are used silently for **6 hours**, then still used but flagged stale with their age. If nothing has ever scanned, the disk domain is reported `unknown` with the remedy — it will not go away and scan on its own, because the one thing this project never does is start work you did not ask for. A refresh sweeps the whole home directory, so it takes ~60-70s here, and is stopped at a hard **120-second deadline**; whatever landed by then is written and labelled a floor.
 
 **Every reclaim total is a floor**, not a total, on every path — the scan is depth-capped, skips paths a TSV cannot carry, and skips roots on other volumes.
 
