@@ -13,6 +13,10 @@ Repo: https://github.com/TurboKach/claude-watch — public, MIT, `main`.
 > findings over a multi-day window, which closes §7f and supersedes §7h's ranking. All merged to
 > `main`. `advise`'s design rationale lives in `advise-plan.md`; its known defects are §7i and the
 > one decision that overrode the plan is §7j.
+>
+> **2026-08-19.** The disk scanner's two founding defects — a coverage gap that made `~/Library/Developer`
+> invisible, and silent suppression of reclaimable groups below a percent-only bar — are fixed. See
+> §13. Six related findings stay deliberately deferred; they live in `docs/tech-debt.md`, not here.
 
 ---
 
@@ -164,6 +168,16 @@ Two invariants worth protecting:
 19. **Sampler schema v2, and two data eras in one window.** The sampler records more per sample than it did (memory size, swap cap, and the fields the deferred CPU/memory analyzer needs), so raw TSV has **two eras** and a window that spans the change contains both. The era is decided **per `sys` row**, not per file — a truncated row (the sampler appends with `>>`; a panic mid-append is possible) must degrade that one row and must never silently read as estimate-era. Nothing that reads raw TSV may assume a fixed column count for the file.
 
 20. **`pgrep -f codex` is useless on macOS.** The path `/var/run/com.apple.security.cryptexd/codex.system/...` appears in the inherited environment of nearly every process, so the string "codex" in argv matches almost everything. Any future Codex detection needs a different key.
+
+21. **An untrapped TERM tears down more than the process it targets.** `disk-scan.sh`'s 120s
+    deadline sends TERM to the whole process group, which reaches both `du` and the subshell running
+    it. Left untrapped, TERM's default disposition kills the subshell too — before it can convert
+    whatever `du` had already flushed to disk — discarding the entire `$HOME` sweep, including a
+    fully-measured `developer` group, instead of salvaging what completed. Fixed with `trap ':' TERM`
+    around the sweep's `du` call: the no-op handler protects the subshell, and `du` still dies
+    promptly on the same signal because a trap does not survive fork+exec. Found in round 1 of
+    `/codex challenge` on the disk-scanner coverage fix (§13) — it silently reverted D1's entire
+    benefit under exactly the load condition (the deadline actually firing) the fix targets.
 
 ---
 
@@ -347,7 +361,7 @@ claude-watch advise             # what should I fix, ranked worst-first
 claude-watch advise --window week --json        # or month / Nh / Nd / Nw
 claude-watch advise --show-thresholds           # every knob and its source
 claude-watch disk               # disk domain from cache; never scans
-claude-watch disk --refresh     # the ONLY scan (~10s, hard 120s deadline)
+claude-watch disk --refresh     # the ONLY scan (~60-70s, hard 120s deadline — see §13)
 claude-watch status             # sampling alive? how recent?
 claude-watch doctor             # 8 checks, exit 0 when healthy
 claude-watch orphans            # list leaked process trees; --kill to reap
@@ -436,6 +450,71 @@ ship a daemon to describe itself.
 Two facts worth keeping: a Claude Bash call has **no tty** (verified), so `--kill`/`--remove` refuse
 unless `--yes` is explicit — the agent cannot destroy anything by accident. And `--yes` takes
 *everything* removable; per-item selection needs a real terminal, because `s` mode needs to prompt.
+
+---
+
+## 13. Disk scanner: coverage gap and silent suppression, fixed (2026-08-19)
+
+Plan: `docs/prompts/disk-scanner-coverage-plan.md`. 16 commits, `6b5adbf..68272f1` (plus the plan
+commit itself, `6b5adbf`, for 17 total), fixing two defects found on the author's own machine
+sitting at 5.1% free.
+
+**D2 — silent suppression.** `disk_group_published()` (`tools/advise-disk.sh`) was a pure
+percent-of-volume test with no absolute floor. On a 431 GiB volume the bar was 8.63 GiB, so 23.5
+GiB across four fully-measured groups (`caches`, `rebuildable`, `transcripts`, `node_modules`) was
+dropped with no trace, while the summary announced "23.8 GiB reclaimable across 2 groups" as if
+that were the whole picture. Fixed with `CLAUDE_WATCH_DISK_GROUP_WARN_GIB` (default 5) as an
+absolute floor alongside the percent bar, suppressed groups named and totalled in the summary
+line, and a new `disk.reclaimable.below_threshold` info finding when the suppressed total itself
+clears the bar.
+
+**D1 — coverage gap.** The scanner's discovery surface was two hardcoded lists (`$HOME/Dev` and a
+five-entry shortlist), so `~/Library/Developer` — 25.3 GiB, 5.9% of the volume — was structurally
+invisible; nothing looked there. Replaced with a kind table plus one `du -kxd 4 $HOME` sweep, a `T`
+worker record for entries the shortlist never had (§4.19-style schema growth: sweep rows differ in
+shape from shortlist rows), and a `cover` cache row stating how much of `$HOME` the scan could
+attribute to any known group — so a future blind spot shows up as an honest residual number instead
+of silence.
+
+**Measured effect on the author's machine:** reported reclaimable went from 23.8 GiB across 2
+groups to 69.2 GiB across 6, with 4.6 GiB of suppression now explicitly named in the summary and
+~93 GiB of `$HOME` made visible for the first time via the `cover` residual. Scan time rose from
+~10s to **62-64s** (cache TTL 6h, 120s deadline) — measured against the plan's own cost table
+("Measured cost of 'look everywhere'") and accepted as the trade for actually seeing `$HOME`. The
+`~10s` claim was corrected everywhere it was published: README (two sites), `SKILL.md`, the E10
+never-scanned message in `advise-disk.sh` (`tests/fixture-disk.sh` pins it verbatim, which is why
+it needed its own commit), and this file's own cheat-sheet (§8) — that last one was missed by the
+original round of corrections and is fixed as part of writing this section.
+
+**Design decisions a future session must not silently undo — all explicit, discussed calls:**
+
+- The "effective bar" arithmetic (`min(percent bar, GIB floor)`) is **deliberately duplicated** in
+  two places (severity gate and `threshold`/`threshold_name` reporting). Do not DRY it — the plan
+  states this explicitly; the two call sites have different failure-mode requirements.
+- Floor-admitted groups (below the percent line, above the GiB floor) enter at `info`; percent-
+  admitted groups keep `warn`. The rule, stated once and not to be re-derived per call site:
+  `gsev = min(info-if-affected, max(base, vsev))` — the affected-cap wins over volume-severity
+  inheritance, inheritance wins over the floor-vs-percent base, in that order.
+- `coverage_incomplete` maps to **no** `measurement_reasons` enum value, the same way
+  `depth_capped` doesn't. Do not invent one for it.
+- The full `$HOME` sweep is **always-on** — not conditional on disk pressure, not behind a flag.
+  The whole point of D1 was that the tool cannot know what it is missing without looking.
+
+**Review history.** Three `/codex challenge` rounds, 17 real findings, 11 fixed, 6 deferred to
+`docs/tech-debt.md` (a `du` stderr taint-matcher that has flipped between over- and under-tainting
+across all three rounds without converging, an unvalidated-`du`-output injection path, and a
+double-counting edge in the coverage residual — all P2, all with a documented "what would need to
+be true to fix it"). Round 1's single P1 finding is now §4.21: a deadline TERM landing on the whole
+process group discarded the entire sweep, silently reverting D1's whole benefit under exactly the
+condition — the deadline actually firing — it was built to handle.
+
+**Known state at HEAD (`68272f1`).** `bash tests/smoke.sh` exits **1**, not 0: `doctor` fails on
+three stale entries in `~/Library/Logs/claudewatch.err.log` dated Aug 18 04:21, from a real
+disk-full event that predates this feature (`No space left on device`, `mktemp` failures) —
+reproduced on an unmodified tree, so it is not a regression from this work. The user chose to keep
+the log rather than clear it. All 10 `tests/fixture-*.sh` files are green: 966 assertions, 0
+failures. None of this has been pushed; `main` is 17 commits ahead of `origin/main` (the plan
+commit plus the 16 that implement and review it), clean tree.
 
 ---
 

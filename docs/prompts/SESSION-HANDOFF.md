@@ -10,7 +10,11 @@ reference doc and it is still accurate. This file is the orientation.
 
 ## Status
 
-Merged to `main` (`0a1f40c`), **not pushed**. 20 commits, working tree clean, smoke suite green.
+Merged to `main` (`68272f1` as of 2026-08-19), **not pushed**. 101 commits total, working tree
+clean. `bash tests/smoke.sh` currently exits **1**: `doctor` fails on three stale entries in
+`~/Library/Logs/claudewatch.err.log` from a real disk-full event on 2026-08-18, which the user
+chose to keep rather than clear — reproduces on an unmodified tree, not a regression. All 10
+`tests/fixture-*.sh` files are green (966 assertions, 0 failures); see HANDOFF.md §13.
 
 What exists now:
 
@@ -20,7 +24,9 @@ What exists now:
 | `claude-watch report` | what actually used the machine, per day |
 | `claude-watch orphans` | leaked process trees — `--kill` to reap |
 | `claude-watch worktrees` | stale agent-created git worktrees — `--remove` to reap |
-| `--json` | on report / orphans / worktrees / status |
+| `claude-watch advise` | what to fix, ranked worst-first, over a window (disk + leaks so far) |
+| `claude-watch disk --refresh` | the only scan; whole-`$HOME` coverage, see HANDOFF.md §13 |
+| `--json` | on report / advise / disk / orphans / worktrees / status |
 | `skills/` | two Claude Code skills, symlinked into `~/.claude/skills` by `install.sh` |
 | `tests/smoke.sh` | read-only; destroys nothing, asserts the destructive paths refuse |
 
@@ -186,3 +192,11 @@ hardened anyway — cheap, and one is a security class.
 Worth knowing for calibration: the later rounds converged on progressively narrower pid-reuse
 windows. They were real, but a fresh reviewer starting from scratch would likely not rank them
 first. The highest-value unreviewed surface is still the report arithmetic (§7a).
+
+**2026-08-19, disk scanner coverage + publication-gate fix (D1/D2).** Three more `/codex challenge`
+rounds, 17 findings, 11 fixed, 6 deferred. The one worth remembering: round 1's P1 was a deadline
+kill landing on the whole process group and discarding the *entire* `$HOME` sweep — silently
+reverting the coverage fix's whole benefit under exactly the load condition it targets. The six
+deferrals (all P2, disk-scan.sh, a `du`-stderr taint matcher that has not converged across three
+rounds) are recorded in `docs/tech-debt.md`, not here — full detail lives there. See HANDOFF.md
+§13 for the fix itself and the design decisions a future session must not silently undo.
