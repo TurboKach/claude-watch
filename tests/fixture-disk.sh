@@ -994,10 +994,14 @@ has "  the remainder is counted"       "$A" "+ 2 more"
 # shape as the live cache the plan diagnosed. DISK_RESTAT_MAX is forced to 5,
 # provably smaller than A's row count alone: under cache-order spending, A's
 # first 5 rows exhaust the whole budget before B is ever reached and B loses
-# every command to rows 1000x smaller. A's rows never need to exist on disk —
-# not being selected means disk_confirm_still_valid is never called on them.
+# every command to rows 1000x smaller. A's rows are real mk_target trees, not
+# dangling paths: if displacement ever regressed to cache order, the first 5
+# would revalidate clean and print commands, so "A: 0 confirmed, no command"
+# is only true when the budget genuinely follows size, not because probing
+# A's paths happens to fail.
 mk_target "$TMP/big1"; mk_target "$TMP/big2"; mk_target "$TMP/big3"
 mk_target "$TMP/big4"; mk_target "$TMP/big5"
+for n in $(seq 1 20); do mk_target "$TMP/tiny$n"; done
 budget_body=$(printf 'group\tnode_modules\t26738688\t20\t0\n'
   for n in $(seq 1 20); do
     printf 'dir\t%s/tiny%d/target\t%d000\tnode_modules\tconfirmed\n' "$TMP" "$n" "$n"
