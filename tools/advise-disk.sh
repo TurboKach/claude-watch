@@ -544,11 +544,20 @@ disk_findings() {
 
   # ---- disk.reclaimable.<group> ------------------------------------------
   local i j disk_conf_rank_v=1
+  # Suppressed groups (below both the percent line and the GiB floor) are
+  # accumulated here rather than dropped: their count, sum, and largest member
+  # feed the below_threshold invariant finding and the summary suffix below,
+  # so a suppression can never again vanish with no note, count, or reason.
+  local supn=0 supkb=0 supbestlab='' supbestkb=0
   for (( i = 0; i < ${#glabel[@]}; i++ )); do
     local lab=${glabel[$i]} sz=${gsize[$i]} cnt=${gcount[$i]} aff=${gaff[$i]}
     # >= 2% of volume_total_kb, or >= the GiB floor; nothing below both lines is
     # surfaced at all.
-    disk_group_published "$sz" "$total" || continue
+    if ! disk_group_published "$sz" "$total"; then
+      supn=$((supn + 1)); supkb=$(( supkb + sz ))
+      [ "$sz" -gt "$supbestkb" ] && { supbestkb=$sz; supbestlab=$lab; }
+      continue
+    fi
 
     # Severity (settled decision 3): gsev = min(info-if-affected, max(base, vsev)).
     # base is `warn` for a percent-admitted group and `info` for a group the
@@ -626,6 +635,32 @@ disk_findings() {
     [ "$(disk_rank "$gsev")" -gt "$(disk_rank "$worst")" ] && worst=$gsev
   done
 
+  # ---- disk.reclaimable.below_threshold ------------------------------------
+  # When the SUM of the groups disk_group_published rejected clears the same
+  # effective bar (disk_group_published applied to the sum IS "clears the
+  # lower of the two bars", since OR-ing two thresholds and comparing against
+  # their min are the same test), name the total rather than let it vanish.
+  # Deliberately pinned at info and left OUT of the $worst computation below:
+  # unlike a group finding, this one never inherits from disk.volume_low — a
+  # critical volume must not promote an amount that names no target — and it
+  # carries no action, ever, because it points at a sum, not a directory.
+  if [ "$supn" -gt 0 ] && disk_group_published "$supkb" "$total"; then
+    local bpctthr bgibthr bthr bthrname bshare
+    bpctthr=$(( (DISK_GROUP_WARN_PCT * total + 99) / 100 ))
+    bgibthr=$(( DISK_GROUP_WARN_GIB * 1048576 ))
+    if [ "$bgibthr" -lt "$bpctthr" ]; then
+      bthr=$bgibthr; bthrname=CLAUDE_WATCH_DISK_GROUP_WARN_GIB
+    else
+      bthr=$bpctthr; bthrname=CLAUDE_WATCH_DISK_GROUP_WARN_PCT
+    fi
+    bshare=$(disk_share "$supkb" "$total")
+    rows=$rows$(printf '%s\t%s\t%s\tF\tdisk\tdisk.reclaimable.below_threshold\tinfo\t%s\t%s\tkb\t%s\t%s\t%s\tn/a\t%s\t%s\t\n' \
+      "$(disk_rank info)" "$bshare" disk.reclaimable.below_threshold \
+      "$bshare" "$supkb" "$bthr" "$bthrname" "$supkb" \
+      "$(disk_clean "$(disk_h "$supkb") suppressed below the group line across ${supn} groups (largest ${supbestlab} $(disk_h "$supbestkb")) — $(disk_pct "$supkb" "$total")% of the volume, a floor")" \
+      "$(disk_clean "${supn} groups sit individually below the ${DISK_GROUP_WARN_PCT}% / ${DISK_GROUP_WARN_GIB} GiB line but clear it summed; this names an amount, not a target, so no action is offered. --json for all")")$'\n'
+  fi
+
   # ---- summary ------------------------------------------------------------
   local base ngroups=0 rtotalkb=0 onelabel=''
   for (( i = 0; i < ${#glabel[@]}; i++ )); do
@@ -639,6 +674,13 @@ disk_findings() {
     1) base="$base; $(disk_h "$rtotalkb") of $(disk_group_what "$onelabel") (a floor)" ;;
     *) base="$base; $(disk_h "$rtotalkb") reclaimable across ${ngroups} groups (a floor)" ;;
   esac
+  # Suppressed groups are always named here, whether or not their sum cleared
+  # the bar for the below_threshold finding above — this is the "measured but
+  # unpublished" defect: 23.5 GiB across four groups printed with no note,
+  # count, or reason. That can no longer happen: --json for all.
+  if [ "$supn" -gt 0 ]; then
+    base="$base; ${supn} groups below the line totalling $(disk_h "$supkb") (largest ${supbestlab} $(disk_h "$supbestkb")) — --json for all"
+  fi
   local summary=$base
   # §3c: on a partial scan the domain summary leads with the reason.
   [ -n "$lead" ] && summary="$lead — $base"

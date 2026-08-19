@@ -244,6 +244,63 @@ eq "  rebuildable now published by the floor" "$(F disk.reclaimable.rebuildable 
 eq "  transcripts now published by the floor" "$(F disk.reclaimable.transcripts 3)" disk.reclaimable.transcripts
 eq "  node_modules (4.9 GiB) stays under the floor" "$(F disk.reclaimable.node_modules 3)" ""
 eq "  five groups published, one volume finding" "$(nfind)" 6
+eq "  no below_threshold: the lone suppressed group doesn't clear the bar alone" \
+  "$(F disk.reclaimable.below_threshold 3)" ""
+has "  but the summary still names it"   "$(S 6)" "1 groups below the line totalling 4.9 GiB (largest node_modules 4.9 GiB)"
+
+echo "the 2026-08-19 incident, before the floor: four groups suppressed, summed"
+# Same real numbers, GiB floor pinned out of reach so the world looks exactly
+# like it did before step 1: caches, rebuildable, transcripts and node_modules
+# all sit under the 2% line alone. Their SUM — 24513572 KB, 23.4 GiB — is what
+# the tool printed nothing about: "23.8 GiB reclaimable across 2 groups" while
+# 23.5 GiB across four groups vanished with no note, count, or reason.
+CLAUDE_WATCH_DISK_GROUP_WARN_GIB=1000 pure_body 429435388 22902700 0 "$REAL_BODY"
+eq "containers still published"        "$(F disk.reclaimable.containers 3)" disk.reclaimable.containers
+eq "  downloads still published"       "$(F disk.reclaimable.downloads 3)" disk.reclaimable.downloads
+eq "  caches suppressed"               "$(F disk.reclaimable.caches 3)" ""
+eq "  rebuildable suppressed"          "$(F disk.reclaimable.rebuildable 3)" ""
+eq "  transcripts suppressed"          "$(F disk.reclaimable.transcripts 3)" ""
+eq "  node_modules suppressed"         "$(F disk.reclaimable.node_modules 3)" ""
+eq "  the aggregate finding fires"     "$(F disk.reclaimable.below_threshold 3)" disk.reclaimable.below_threshold
+eq "  pinned at info"                  "$(F disk.reclaimable.below_threshold 4)" info
+eq "  reclaim_kb is the suppressed sum" "$(F disk.reclaimable.below_threshold 10)" 24513572
+has "  headline names the total"       "$(F disk.reclaimable.below_threshold 12)" "23.4 GiB"
+has "  and the largest suppressed group" "$(F disk.reclaimable.below_threshold 12)" "caches"
+eq "  action is empty, no target named" "$(F disk.reclaimable.below_threshold 14)" ""
+hasnt "  and detail never carries rm -rf" "$(F disk.reclaimable.below_threshold 13)" "rm -rf"
+has "  summary names all four"         "$(S 6)" "4 groups below the line totalling 23.4 GiB (largest caches 6.7 GiB)"
+eq "  containers + downloads + volume + aggregate = 4 findings" "$(nfind)" 4
+
+echo "reclaimable groups: the below_threshold invariant finding"
+# Each group individually under the floor (percent knob pinned high in
+# isolation), but their sum clears it. Ok volume, so this is the finding's
+# ONLY row — the case that pins "never raises worst".
+SUM_BODY="group	caches	3000000	4	0
+group	rebuildable	3000000	4	0"
+CLAUDE_WATCH_DISK_GROUP_WARN_PCT=100 pure_body $(( V_TOTAL - V_TOTAL * 60 / 100 )) $(( V_TOTAL * 60 / 100 )) "$V_DF" "$SUM_BODY"
+eq "each group under the floor, sum over it -> fires" "$(F disk.reclaimable.below_threshold 4)" info
+eq "  reclaim_kb is the suppressed sum" "$(F disk.reclaimable.below_threshold 10)" 6000000
+eq "  threshold is the GiB floor"      "$(F disk.reclaimable.below_threshold 8)" 5242880
+eq "  threshold knob is the GiB knob"  "$(F disk.reclaimable.below_threshold 9)" CLAUDE_WATCH_DISK_GROUP_WARN_GIB
+has "  headline names the count"       "$(F disk.reclaimable.below_threshold 12)" "2 groups"
+has "  and the largest (tie -> first seen)" "$(F disk.reclaimable.below_threshold 12)" "caches"
+eq "  action is empty"                 "$(F disk.reclaimable.below_threshold 14)" ""
+hasnt "  detail never carries rm -rf"  "$(F disk.reclaimable.below_threshold 13)" "rm -rf"
+eq "  it is the domain's only finding" "$(nfind)" 1
+eq "  and worst is NOT promoted to info" "$(S 3)" ok
+
+# Each group under the floor, sum ALSO under it: no finding at all.
+SUM_UNDER_BODY="group	caches	1000000	4	0
+group	rebuildable	1000000	4	0"
+CLAUDE_WATCH_DISK_GROUP_WARN_PCT=100 pure_body $(( V_TOTAL - V_TOTAL * 60 / 100 )) $(( V_TOTAL * 60 / 100 )) "$V_DF" "$SUM_UNDER_BODY"
+eq "each under, sum also under -> no finding" "$(nfind)" 0
+eq "  below_threshold does not fire"   "$(F disk.reclaimable.below_threshold 3)" ""
+
+# A critical volume must not promote the finding above info — it never
+# inherits from disk.volume_low, unlike group findings.
+CLAUDE_WATCH_DISK_GROUP_WARN_PCT=100 pure_body "$V_USED" "$V_AVAIL" "$V_DF" "$SUM_BODY"
+eq "critical volume: below_threshold stays info" "$(F disk.reclaimable.below_threshold 4)" info
+eq "  domain worst is critical (from volume_low, not this)" "$(S 3)" critical
 
 # ============================================================== partial scans ==
 echo "partial scans"
