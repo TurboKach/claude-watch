@@ -28,8 +28,9 @@
 #   scan_permission_denied  -> "permissions"
 #   (neither present)       -> null
 # The remaining §3c note reasons (root_off_home_volume, path_unrepresentable,
-# depth_capped) have no value in the closed §3e measurement_reasons enum, so
-# they set measurement_state=partial and drive the summary/remedy only.
+# depth_capped, coverage_incomplete) have no value in the closed §3e
+# measurement_reasons enum, so they set measurement_state=partial and drive
+# the summary/remedy only.
 #
 # Bash 3.2 (the macOS system bash) — no associative arrays anywhere.
 
@@ -237,6 +238,7 @@ disk_group_what() {
     downloads)    printf 'downloaded files' ;;
     caches)       printf 'application caches' ;;
     containers)   printf 'app containers (~/Library/Containers)' ;;
+    developer)    printf 'Xcode simulators, DerivedData and device support (~/Library/Developer)' ;;
     *)            printf '%s' "$1" ;;
   esac
 }
@@ -249,6 +251,7 @@ disk_group_cost() {
     downloads)    printf 'not rebuildable: these are files you chose to keep' ;;
     caches)       printf 'refilled on demand by the apps that own them' ;;
     containers)   printf 'app data, not build output: removing a container resets the app' ;;
+    developer)    printf 'simulator runtimes and device support re-download; DerivedData rebuilds in tens of minutes and Xcode re-indexes afterwards' ;;
     *)            printf 'rebuild cost unknown for this group' ;;
   esac
 }
@@ -443,6 +446,7 @@ disk_findings() {
   # ---- read the body ------------------------------------------------------
   local partial=0 dhit=0 rscanned=0 rtotal=0
   local n_deadline=0 n_perm=0 n_offvol=0 n_unrep=0 n_depth=0
+  local chave=0 chome='' cattr='' ccomplete=''
   local glabel=() gsize=() gcount=() gaff=()
   local dpath=() dsize=() dgroup=() dconf=() dage=()
   local k a b c d e
@@ -473,6 +477,11 @@ disk_findings() {
           ''|-|0) gaff[${#gaff[@]}]=0 ;;
           *)      gaff[${#gaff[@]}]=1 ;;
         esac ;;
+      cover)
+        # `cover home <home_total_kb> <attributed_kb> <complete>` — a
+        # measurement, not a derived residual (step 4b item 2): the summary
+        # below is the one place home_total - attributed is computed.
+        chave=1; chome=$b; cattr=$c; ccomplete=$d ;;
       dir)
         dpath[${#dpath[@]}]=$a; dsize[${#dsize[@]}]=$b; dgroup[${#dgroup[@]}]=$c
         dconf[${#dconf[@]}]=$d; dage[${#dage[@]}]=${e:--} ;;
@@ -681,6 +690,20 @@ disk_findings() {
   if [ "$supn" -gt 0 ]; then
     base="$base; ${supn} groups below the line totalling $(disk_h "$supkb") (largest ${supbestlab} $(disk_h "$supbestkb")) — --json for all"
   fi
+  # The cover row's residual (D1c): a measurement, not a finding — no
+  # severity, no action. complete=1 with both numbers numeric and a positive
+  # difference names the GiB not attributed to any group; anything short of
+  # that (complete=0, or a number the scanner could not measure) says only
+  # that coverage is incomplete, and nothing is appended when the difference
+  # is <= 0 (step 4b item 2). A cache with no cover row at all leaves chave=0
+  # and the summary unchanged.
+  if [ "$chave" = 1 ]; then
+    if [ "$ccomplete" = 1 ] && disk_is_uint "$chome" && disk_is_uint "$cattr" && [ "$chome" -gt "$cattr" ]; then
+      base="$base; $(disk_h $(( chome - cattr ))) of \$HOME is not attributed to any group"
+    elif [ "$ccomplete" != 1 ] || ! disk_is_uint "$chome" || ! disk_is_uint "$cattr"; then
+      base="$base; \$HOME coverage is incomplete, so the residual figure is unavailable"
+    fi
+  fi
   local summary=$base
   # §3c: on a partial scan the domain summary leads with the reason.
   [ -n "$lead" ] && summary="$lead — $base"
@@ -798,7 +821,7 @@ disk_cache_validate() {
   # findings — never `ok`, and never a garbage finding.
   local epoch='' used='' avail='' dfsize='' mount='' partial=0 deadline_hit=0
   local roots_scanned='' roots_total=''
-  local vols=0 epochs=0 notes=0 scans=0
+  local vols=0 epochs=0 notes=0 scans=0 covers=0
   local bad=0 k a b c d e extra
   while IFS=$'\t' read -r k a b c d e extra || [ -n "$k" ]; do
     [ -n "$k" ] || continue
@@ -820,7 +843,7 @@ disk_cache_validate() {
       note)
         notes=$((notes + 1))
         disk_is_uint "$b" || bad=1
-        case $a in deadline|permission_denied|root_off_home_volume|path_unrepresentable|depth_capped) ;; *) bad=1 ;; esac ;;
+        case $a in deadline|permission_denied|root_off_home_volume|path_unrepresentable|depth_capped|coverage_incomplete) ;; *) bad=1 ;; esac ;;
       vol)
         vols=$((vols + 1))
         disk_is_uint "$b" || bad=1
@@ -843,6 +866,15 @@ disk_cache_validate() {
         disk_is_uint "$b" || bad=1
         [ -n "$c" ] || bad=1
         case $d in confirmed|likely|unverified) ;; *) bad=1 ;; esac ;;
+      cover)
+        # A row we now compute on (§3.24): label non-empty, home_total and
+        # attributed each disk_is_uint or the literal '-' (the scanner writes
+        # '-' when the sweep never ran), complete in 0|1.
+        covers=$((covers + 1))
+        [ -n "$a" ] || bad=1
+        case $b in -) ;; *) disk_is_uint "$b" || bad=1 ;; esac
+        case $c in -) ;; *) disk_is_uint "$c" || bad=1 ;; esac
+        case $d in 0|1) ;; *) bad=1 ;; esac ;;
       # An unknown row kind is a newer scanner, not a broken cache: ignore it.
     esac
     [ "$bad" = 1 ] && break
@@ -853,6 +885,7 @@ disk_cache_validate() {
   [ "$epochs" = 1 ] || bad=1
   [ "$vols" = 1 ] || bad=1
   [ "$scans" -le 1 ] || bad=1
+  [ "$covers" -le 1 ] || bad=1
   if [ "$bad" != 1 ]; then
     disk_is_uint "$used" && disk_is_uint "$avail" || bad=1
   fi
@@ -973,7 +1006,7 @@ disk_body() {
   local k a b c d
   while IFS=$'\t' read -r k a b c d || [ -n "$k" ]; do
     case $k in
-      scan|note|group) printf '%s\t%s\t%s\t%s\t%s\n' "$k" "$a" "$b" "$c" "$d" ;;
+      scan|note|group|cover) printf '%s\t%s\t%s\t%s\t%s\n' "$k" "$a" "$b" "$c" "$d" ;;
       dir)
         local conf=$d path=$a age='-' mt resolved selected=0
         case $sel in

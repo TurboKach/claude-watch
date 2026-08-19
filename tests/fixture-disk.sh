@@ -302,6 +302,22 @@ CLAUDE_WATCH_DISK_GROUP_WARN_PCT=100 pure_body "$V_USED" "$V_AVAIL" "$V_DF" "$SU
 eq "critical volume: below_threshold stays info" "$(F disk.reclaimable.below_threshold 4)" info
 eq "  domain worst is critical (from volume_low, not this)" "$(S 3)" critical
 
+echo "reclaimable groups: the developer group (D1c)"
+# Over both bars, on an ok volume. Rows come in at `likely`, the only
+# confidence the scanner ever writes for sweep rows (step 4a item 5) — so no
+# rm -rf is expected here. This is NOT "no command at any confidence": a
+# hand-written `confirmed` developer row would produce one exactly like any
+# other group, and that path is unreachable from the scanner.
+pure_body $(( V_TOTAL - V_TOTAL * 60 / 100 )) $(( V_TOTAL * 60 / 100 )) "$V_DF" "group	developer	26738688	5	0
+dir	/Users/x/Library/Developer/Xcode/DerivedData/App-abc	20000000	developer	likely
+dir	/Users/x/Library/Developer/CoreSimulator/Devices/blob	6000000	developer	likely"
+eq "developer group is published"      "$(F disk.reclaimable.developer 3)" disk.reclaimable.developer
+has "  headline names what it is"      "$(F disk.reclaimable.developer 12)" "Xcode simulators, DerivedData and device support (~/Library/Developer)"
+has "  detail names the rebuild cost"  "$(F disk.reclaimable.developer 13)" "DerivedData rebuilds in tens of minutes and Xcode re-indexes afterwards"
+A=$(F disk.reclaimable.developer 14)
+hasnt "  the likely rows carry no command" "$A" "rm -rf"
+has "  and say why"                    "$A" "in active use, rebuilt on next build"
+
 # ============================================================== partial scans ==
 echo "partial scans"
 # Per-group capping: one affected group, one not. The volume finding comes from
@@ -524,6 +540,45 @@ eq "a tab inside a field -> malformed" "$(S 5)" cache_malformed
 printf 'epoch\t-\t%s\t-\t-\nepoch\t-\t%s\t-\t-\nvol\t/x\t%s\t%s\t0\n' "$NOW" "$NOW" "$V_USED" "$V_AVAIL" > "$TMP/dupe.tsv"
 from_cache "$TMP/dupe.tsv"
 eq "duplicate epoch rows -> malformed" "$(S 5)" cache_malformed
+
+echo "cache states: coverage_incomplete note and the cover row (D1c)"
+# The note enum is closed: without coverage_incomplete in it, every cache the
+# D1a/D1b scanner writes reads cache_malformed and the whole domain goes
+# unknown. Mirrors the depth_capped case above: measured, partial, and no
+# measurement_reasons enum value of its own.
+printf 'epoch\t-\t%s\t-\t-\nscan\t1\t0\t3\t3\nnote\tcoverage_incomplete\t1\t-\t-\nvol\t/System/Volumes/Data\t%s\t%s\t%s\n' \
+  "$NOW" "$V_USED" "$V_AVAIL" "$V_DF" > "$TMP/covnote.tsv"
+from_cache "$TMP/covnote.tsv"
+eq "coverage_incomplete note validates, not malformed" "$(S 5)" ""
+eq "  driving the partial banner"      "$(S 4)" partial
+eq "  domain severity is still measured" "$(S 3)" critical
+
+# A cover row is a row we compute on: a non-numeric home_total is malformed.
+printf 'epoch\t-\t%s\t-\t-\nscan\t0\t0\t3\t3\nvol\t/System/Volumes/Data\t%s\t%s\t%s\ncover\thome\tbogus\t1000\t1\n' \
+  "$NOW" "$V_USED" "$V_AVAIL" "$V_DF" > "$TMP/covbad.tsv"
+from_cache "$TMP/covbad.tsv"
+eq "cover row: non-numeric home_total -> malformed" "$(S 5)" cache_malformed
+
+printf 'epoch\t-\t%s\t-\t-\nscan\t0\t0\t3\t3\nvol\t/System/Volumes/Data\t%s\t%s\t%s\ncover\thome\t1000\t1000\t1\n' \
+  "$NOW" "$V_USED" "$V_AVAIL" "$V_DF" > "$TMP/covgood.tsv"
+from_cache "$TMP/covgood.tsv"
+eq "well-formed cover row validates ok"  "$(S 5)" ""
+
+printf 'epoch\t-\t%s\t-\t-\nscan\t0\t0\t3\t3\nvol\t/System/Volumes/Data\t%s\t%s\t%s\ncover\thome\t1000\t1000\t1\ncover\thome\t2000\t2000\t1\n' \
+  "$NOW" "$V_USED" "$V_AVAIL" "$V_DF" > "$TMP/covdup.tsv"
+from_cache "$TMP/covdup.tsv"
+eq "two cover rows -> malformed"         "$(S 5)" cache_malformed
+
+echo "the coverage sentence, end to end through from_cache/advise_disk"
+good_cache "$TMP/cover.tsv" "cover	home	10485760	8388608	1"
+from_cache "$TMP/cover.tsv"
+has "coverage residual renders in the summary" "$(S 6)" '$HOME is not attributed to any group'
+has "  with the correct GiB figure"    "$(S 6)" '2.0 GiB'
+
+good_cache "$TMP/covincomplete.tsv" "cover	home	-	-	0"
+from_cache "$TMP/covincomplete.tsv"
+has "incomplete coverage is stated"    "$(S 6)" "coverage is incomplete"
+hasnt "  and no residual figure is printed" "$(S 6)" "not attributed to any group"
 
 # =========================================================== the re-stat gate ==
 # This is the one section that touches a real filesystem, because the gate it
