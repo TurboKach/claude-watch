@@ -450,6 +450,32 @@ eq "developer is not affected by an unrelated denial"   "$(gaff developer)" "0"
 eq "node_modules is not affected either"                "$(gaff node_modules)" "0"
 eq "rebuildable is not affected either"                 "$(gaff rebuildable)" "0"
 
+# --------------------------- kind table: a symlinked entry is detected -------
+# du does not follow symlinks. A kind-table entry relocated via a same-volume
+# symlink (plausible on a machine short of space) must not vanish from the
+# sweep while `complete` still claims 1 — no descent, no stderr, no error, no
+# note. physdir() resolves the entry to wherever the symlink actually points;
+# that never matches the literal in-tree path the physical sweep can reach by
+# walking $HOME, and the divergence itself is the detection.
+echo "kind table: a symlinked entry is a detected gap, not a silent one"
+SLH="$TMP/homeSymlink"
+REALDEV="$TMP/realDeveloperData"
+mkdir -p "$SLH/Library" "$REALDEV/Xcode/DerivedData"
+kb "$REALDEV/Xcode/DerivedData/blob" 200
+ln -s "$REALDEV" "$SLH/Library/Developer"
+DSL="$TMP/dataSymlink"; CACHE="$DSL/state/disk.tsv"
+HOME="$SLH" CLAUDE_WATCH_HOME="$DSL" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
+  bash "$SCAN" > "$OUT" 2> "$ERR"
+eq "the symlinked entry produces no developer group at all" "$(gtot developer)" ""
+eq "an unrelated repo-root group is not affected by it"     "$(gaff node_modules)" "0"
+eq "coverage is marked incomplete, not falsely complete"    "$(covcol 5)" "0"
+if [ "$(noteval coverage_incomplete)" -ge 1 ] 2>/dev/null; then
+  ok "and note coverage_incomplete is recorded"
+else
+  bad "and note coverage_incomplete is recorded (got '$(noteval coverage_incomplete)')"
+fi
+eq "and the scan is partial" "$(scancol 2)" "1"
+
 # ------------------------------- coverage: an unattributed denial ------------
 # A denial in a corner of $HOME that sits under no kind-table path and no repo
 # root says nothing about any group, so it must affect none of them — but it is
@@ -503,6 +529,48 @@ eq "and is counted"                                           "$(noteval coverag
 eq "with no other note reason to explain it" \
    "$(noteval permission_denied)$(noteval deadline)$(noteval path_unrepresentable)$(noteval root_off_home_volume)" ""
 eq "so coverage_incomplete forces partial=1 on its own"       "$(scancol 2)" "1"
+
+# ------------------- kind table: an unparseable line does not taint ----------
+# A single stderr line no path can be recovered from at all — a nonstandard
+# diagnostic, or (in the real world) a filename containing a newline that
+# splits one du message into two garbled fragments — must fall into the same
+# unattributed residual as a line naming an untracked path, never wholesale-
+# taint every sweep-fed group. The stub runs the REAL du first, so the
+# genuine, correctly-attributable containers denial is still present, then
+# appends one line with no path in it at all.
+echo "kind table: an unparseable stderr line does not taint an unrelated group"
+UNPH="$TMP/homeUnparse"
+mkdir -p "$UNPH/Library/Developer/Xcode/DerivedData" "$UNPH/Library/Containers/app" \
+         "$UNPH/Library/Containers/blocked"
+kb "$UNPH/Library/Developer/Xcode/DerivedData/blob" 300
+kb "$UNPH/Library/Containers/app/blob" 40
+chmod 000 "$UNPH/Library/Containers/blocked"
+UBIN="$TMP/ubin"; mkdir -p "$UBIN"
+{
+  printf '#!/bin/sh\n'
+  printf 'for a in "$@"; do\n'
+  printf '  if [ "$a" = "-kxd" ]; then\n'
+  printf '    /usr/bin/du "$@"\n'
+  printf '    rc=$?\n'
+  printf '    echo "fts_read: a diagnostic with no path in it" >&2\n'
+  printf '    exit $rc\n'
+  printf '  fi\n'
+  printf 'done\n'
+  printf 'exec /usr/bin/du "$@"\n'
+} > "$UBIN/du"
+chmod +x "$UBIN/du"
+DUN="$TMP/dataUnparse"; CACHE="$DUN/state/disk.tsv"
+PATH="$UBIN:$PATH" HOME="$UNPH" CLAUDE_WATCH_HOME="$DUN" CLAUDE_WATCH_REPO_ROOTS="$SRC/repo" \
+  bash "$SCAN" > "$OUT" 2> "$ERR"
+chmod 755 "$UNPH/Library/Containers/blocked"
+eq "the genuine denial still attributes to containers only" "$(gaff containers)" "1"
+eq "the unparseable line does not taint the unrelated developer group" "$(gaff developer)" "0"
+eq "coverage is still marked incomplete" "$(covcol 5)" "0"
+if [ "$(noteval coverage_incomplete)" -ge 1 ] 2>/dev/null; then
+  ok "and note coverage_incomplete is recorded"
+else
+  bad "and note coverage_incomplete is recorded (got '$(noteval coverage_incomplete)')"
+fi
 
 # --------------------------------------------------------------- the lock ----
 echo "lock"

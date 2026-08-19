@@ -14,9 +14,12 @@
 # entirely once the deadline has passed. Everything the sweep sees that is not
 # under a kind-table path is an unattributed residual (see step 4b's `cover`
 # row) — never folded into a group. A denial inside the sweep affects only the
-# kind-table group whose path it names, never the whole scan (:41-49); only a
-# denial that names no recoverable path, or a sweep that fails with no stderr at
-# all, affects every group the sweep feeds.
+# kind-table group whose path it names, never the whole scan (:44-52); a line
+# whose path cannot be recovered folds into that same unattributed residual —
+# it names nothing, so it cannot say a GROUP was short any more than a line
+# naming an untracked path can. Only a sweep that fails with no stderr at all —
+# no diagnostic to attribute anything from, so nothing measured by it can be
+# trusted — affects every group the sweep feeds.
 #
 # Output contract (five tab-separated columns, see the plan §3c):
 #   epoch  -           <unix>          -                -
@@ -386,7 +389,15 @@ measure() {  # <file of newline-delimited paths> — one batched du for the lot
 }
 
 walk() {
-  local root rp dev p i frc relp rest grp dep
+  local root rp dev p i frc relp rest grp dep homerp expected
+  local ucount=0 cov_complete=1
+
+  # Resolved once, up front: both the kind-table divergence check below and
+  # the sweep's own `du` target (:546) need the SAME canonicalisation of
+  # $HOME, and computing it twice risks the two disagreeing on a machine
+  # where $HOME itself is a symlink.
+  homerp=$(physdir "$HOME")
+  [ -n "$homerp" ] || homerp=$HOME
 
   # Register the kind table as claimed prefixes BEFORE the roots, so that
   # CLAUDE_WATCH_REPO_ROOTS=$HOME cannot count a hit under ~/Library/Containers
@@ -412,6 +423,24 @@ walk() {
     rp=$(physdir "$p") || continue
     [ -n "$rp" ] || continue
     case "$rp" in *"$TAB"*|*"$NL"*) printf 'U\n' >> "$RAWOUT"; affect "$grp"; continue ;; esac
+    # du does not follow symlinks: if $relp — or an ancestor of it — is a
+    # symlink, even to another directory on the SAME volume (not unusual on a
+    # machine short of space, which is exactly the case this guards), the
+    # physical $homerp-rooted sweep below will never see it: no descent, no
+    # stderr, no error, and `complete` would stay 1 over content nothing ever
+    # measured. physdir() already resolves both sides canonically, so the
+    # literal in-tree path this entry would occupy with no symlink involved
+    # is `$homerp/$relp`; a divergence from the entry's actual resolution is
+    # the detection. Report it the same honest way as an unattributed sweep
+    # denial — coverage_incomplete, and affected on this entry's own group
+    # only — rather than let the gap stay invisible.
+    expected="$homerp/$relp"
+    if [ "$rp" != "$expected" ]; then
+      affect "$grp"
+      cov_complete=0
+      ucount=$((ucount + 1))
+      continue
+    fi
     dev=$(stat -f %d "$rp" 2>/dev/null)
     if [ -n "$HOMEDEV" ] && [ "$dev" != "$HOMEDEV" ]; then
       printf 'V\n' >> "$RAWOUT"; affect "$grp"; continue
@@ -499,11 +528,9 @@ walk() {
   # to one volume; -d 4 bounds which rows are PRINTED, not what is traversed —
   # deep enough for Library/Developer's grandchildren (Library=1, Developer=2, +2 = 4).
   if past_deadline; then printf 'D\n' >> "$RAWOUT"; return 0; fi
-  local homerp sout="$WORK/sweep.out" serr="$WORK/sweep.err" src wholesale g
-  local hometot ucount=0 cov_complete=1 inhome=1
-  homerp=$(physdir "$HOME")
-  [ -n "$homerp" ] || homerp=$HOME
-  # A deadline kill lands on this whole process group (:655-669) while du is
+  local sout="$WORK/sweep.out" serr="$WORK/sweep.err" src wholesale g
+  local hometot inhome=1
+  # A deadline kill lands on this whole process group (:686-700) while du is
   # still mid-sweep. Left untrapped, TERM tears this subshell down on the same
   # signal that stops du, and every row du had already flushed to $sout — the
   # whole point of the sweep — is discarded rather than converted below. Catch
@@ -554,13 +581,18 @@ walk() {
 
   [ -s "$serr" ] && cat "$serr" >> "$ERRLOG"
 
-  # Failure attribution (:41-49): a denial must never mute a group it says
+  # Failure attribution (:44-52): a denial must never mute a group it says
   # nothing about. Each stderr line is matched to the table entry whose
   # registered path is that path or a prefix of it — only THAT entry's group is
-  # affected. A line under no entry falls in the residual and affects no group
-  # (step 4b's coverage count, not severity). Only a line no path can be
-  # recovered from, or a non-zero exit with no stderr at all, taints every
-  # sweep-fed group — mirroring measure()'s own hit == "" fallback.
+  # affected. A line under no entry, OR a line no path can be recovered from at
+  # all (a filename containing a newline splits one du diagnostic into two
+  # unparseable fragments; a nonstandard message has no path in it either),
+  # falls into the same unattributed residual and affects no group (step 4b's
+  # coverage count, not severity) — one bad line among a batch of good ones
+  # must not cap an unrelated, fully-measured group at `info`. Only a sweep
+  # that fails with no stderr at all — zero diagnostics, so there is nothing
+  # here to attribute from and no partial results are trustworthy — taints
+  # every sweep-fed group, mirroring measure()'s own hit == "" fallback.
   wholesale=0
   if [ -s "$serr" ]; then
     CW_ENTRIES="$WORK/entries" CW_ERR="$serr" LC_ALL=C awk -F'\t' '
@@ -574,7 +606,7 @@ walk() {
         while ((getline e < ENVIRON["CW_ERR"]) > 0) {
           sub(/^[a-z]+: /, "", e)
           sub(/: [^:]*$/, "", e)
-          if (e !~ /^\//) { print "WHOLESALE"; continue }
+          if (e !~ /^\//) { print "RESIDUAL"; continue }
           hit = ""
           for (i = 1; i <= m; i++) {
             if (e == epath[i] || index(e, epath[i] "/") == 1) { hit = egrp[i]; break }
@@ -584,16 +616,15 @@ walk() {
       }' > "$WORK/sweepraw"
     # Counted BEFORE the dedup: `note coverage_incomplete` states how many
     # errors landed outside every entry, not how many distinct kinds of them.
-    # -E, not a BRE `\|`: BSD grep anchors a basic RE only at the two ends of
-    # the whole pattern, so `^A$\|^B$` quietly matches neither and the count
-    # would be a permanent 0.
-    ucount=$(grep -cE '^(RESIDUAL|WHOLESALE)$' "$WORK/sweepraw" 2>/dev/null)
-    ucount=${ucount:-0}
+    # Added to, never assigned over: `ucount` may already carry a count from a
+    # symlinked kind-table entry the walk found before the sweep even ran.
+    local n_res
+    n_res=$(grep -c '^RESIDUAL$' "$WORK/sweepraw" 2>/dev/null)
+    ucount=$((ucount + ${n_res:-0}))
     sort -u "$WORK/sweepraw" > "$WORK/sweepaff"
     while IFS= read -r g; do
       case "$g" in
         ''|RESIDUAL) : ;;
-        WHOLESALE)   wholesale=1 ;;
         *)           affect "$g" ;;
       esac
     done < "$WORK/sweepaff"
@@ -607,7 +638,7 @@ walk() {
     done < "$WORK/sweepgroups"
   fi
 
-  # The coverage measurements for the `cover` row (:29-39). The sweep's own
+  # The coverage measurements for the `cover` row (:32-42). The sweep's own
   # $HOME row is the whole; the parts are the group totals the assembly sums.
   # Nothing is subtracted here — an over-count must reach the reader as the two
   # numbers that produced it, never as a difference this script clamped.
