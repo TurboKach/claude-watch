@@ -185,12 +185,27 @@ disk_h() {
 # Keep this separate from disk_h: free space, thresholds, and volume totals are
 # measurements where ordinary nearest-rounding is the truthful presentation.
 disk_h_bound() {
-  local kb=$1 t
-  if   [ "$kb" -ge 1073741824 ]; then t=$(( (kb * 10 + 1073741824 - 1) / 1073741824 )); printf '%d.%d TiB' $((t / 10)) $((t % 10))
-  elif [ "$kb" -ge 104857600 ];  then printf '%d GiB' $(( (kb + 1048576 - 1) / 1048576 ))
-  elif [ "$kb" -ge 1048576 ];    then t=$(( (kb * 10 + 1048576 - 1) / 1048576 ));       printf '%d.%d GiB' $((t / 10)) $((t % 10))
-  elif [ "$kb" -ge 1024 ];       then printf '%d MiB' $(( (kb + 1024 - 1) / 1024 ))
-  else                                  printf '%d KiB' "$kb"
+  local kb=$1 unit q r t digit
+  if [ "$kb" -ge 1073741824 ]; then
+    unit=1073741824; q=$(( kb / unit )); r=$(( kb % unit ))
+    digit=$(( r * 10 / unit )); [ $(( r * 10 % unit )) -gt 0 ] && digit=$(( digit + 1 ))
+    t=$(( q * 10 + digit ))
+    printf '%d.%d TiB' $((t / 10)) $((t % 10))
+  elif [ "$kb" -ge 104857600 ]; then
+    unit=1048576; q=$(( kb / unit )); r=$(( kb % unit ))
+    [ "$r" -gt 0 ] && q=$(( q + 1 ))
+    printf '%d GiB' "$q"
+  elif [ "$kb" -ge 1048576 ]; then
+    unit=1048576; q=$(( kb / unit )); r=$(( kb % unit ))
+    digit=$(( r * 10 / unit )); [ $(( r * 10 % unit )) -gt 0 ] && digit=$(( digit + 1 ))
+    t=$(( q * 10 + digit ))
+    printf '%d.%d GiB' $((t / 10)) $((t % 10))
+  elif [ "$kb" -ge 1024 ]; then
+    unit=1024; q=$(( kb / unit )); r=$(( kb % unit ))
+    [ "$r" -gt 0 ] && q=$(( q + 1 ))
+    printf '%d MiB' "$q"
+  else
+    printf '%d KiB' "$kb"
   fi
 }
 

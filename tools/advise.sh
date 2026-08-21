@@ -405,8 +405,40 @@ function dom_json(d, prio,   i, out) {
   return out "]}"
 }
 function gib(kb) { return sprintf("%.1f GiB", kb / 1048576) }
-function valfmt(v, u) {
-  if (u == "kb")      return gib(v + 0)
+# Same display contract as disk_h_bound: a reclaim estimate is an upper bound,
+# so its human rendering must not round back below the KB value carried by the
+# finding. Quotient/remainder arithmetic also keeps the scaled intermediate
+# small for values near the shell integer ceiling.
+function boundfmt(kb,   unit, q, r, scaled, digit, t, whole) {
+  kb += 0
+  if (kb >= 1073741824) {
+    unit = 1073741824; q = int(kb / unit); r = kb - q * unit
+    scaled = r * 10; digit = int(scaled / unit)
+    if (scaled > digit * unit) digit++
+    t = q * 10 + digit; whole = int(t / 10)
+    return sprintf("%.0f.%.0f TiB", whole, t - whole * 10)
+  }
+  if (kb >= 104857600) {
+    unit = 1048576; q = int(kb / unit); r = kb - q * unit
+    if (r > 0) q++
+    return sprintf("%.0f GiB", q)
+  }
+  if (kb >= 1048576) {
+    unit = 1048576; q = int(kb / unit); r = kb - q * unit
+    scaled = r * 10; digit = int(scaled / unit)
+    if (scaled > digit * unit) digit++
+    t = q * 10 + digit; whole = int(t / 10)
+    return sprintf("%.0f.%.0f GiB", whole, t - whole * 10)
+  }
+  if (kb >= 1024) {
+    unit = 1024; q = int(kb / unit); r = kb - q * unit
+    if (r > 0) q++
+    return sprintf("%.0f MiB", q)
+  }
+  return sprintf("%.0f KiB", kb)
+}
+function valfmt(v, u, bound) {
+  if (u == "kb")      return bound ? boundfmt(v) : gib(v + 0)
   if (u == "pct")     return sprintf("%.1f%%", v + 0)
   if (u == "cores")   return sprintf("%.2f cores", v + 0)
   if (u == "seconds") return sprintf("%ds", v + 0)
@@ -425,7 +457,8 @@ function pfind(d, k, full,   act) {
     printf "      %s%s at %s — %s · is %s, %s of this domain%s\n", C_DIM,
            (fsev[d, k] == "critical" ? "critical" : fsev[d, k]),
            valfmt(fthr[d, k], funit[d, k]), ftname[d, k],
-           valfmt(fval[d, k], funit[d, k]), sprintf("%.1f%%", fshare[d, k] * 100), C_RST
+           valfmt(fval[d, k], funit[d, k], d == "disk" && fid[d, k] ~ /^disk\.reclaimable\./),
+           sprintf("%.1f%%", fshare[d, k] * 100), C_RST
   act = fact[d, k]
   # Quote-or-refuse, second layer (§3b): a command carrying a control byte is
   # never printed, however well quoted, because it is unreadable in a terminal

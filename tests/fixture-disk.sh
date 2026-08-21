@@ -89,6 +89,30 @@ bound_remedy_join() { # <desc> <complete|partial>
   esac
 }
 
+echo "upper-bound human sizes"
+while IFS=$'\t' read -r kb want; do
+  [ -n "$kb" ] || continue
+  eq "disk_h_bound $kb" "$(disk_h_bound "$kb")" "$want"
+done <<'EOF'
+0	0 KiB
+1	1 KiB
+1023	1023 KiB
+1024	1 MiB
+1025	2 MiB
+1048575	1024 MiB
+1048576	1.0 GiB
+1048577	1.1 GiB
+9049000	8.7 GiB
+104857599	100.0 GiB
+104857600	100 GiB
+104857601	101 GiB
+1073741823	1024 GiB
+1073741824	1.0 TiB
+1073741825	1.1 TiB
+922337203685477580	858993459.2 TiB
+9223372036854775807	8589934592.0 TiB
+EOF
+
 # =========================================================== volume severity ==
 echo "volume severity (AND, not or)"
 
@@ -317,6 +341,18 @@ if [ $(( ceil_tenths * 1048576 )) -ge $(( 9049000 * 10 )) ]; then
 else
   bad "  published ceiling bound is below 9049000 KB ($ceil_human)"
 fi
+
+# Exercise the real cache -> analyzer -> awk renderer path. The TSV assertions
+# above cannot catch the renderer independently rounding the same value down.
+render_cache="$TMP/render-bound.tsv"
+printf 'epoch\t-\t%s\t-\t-\nscan\t0\t0\t3\t3\nvol\t/System/Volumes/Data\t0\t%s\t%s\ngroup\trebuildable\t9049000\t1\t0\n' \
+  "$(date +%s)" "$V_TOTAL" "$V_DF" > "$render_cache"
+rendered=$(CLAUDE_WATCH_HOME="$TMP/render-home" \
+  CLAUDE_WATCH_DISK_CACHE="$render_cache" \
+  CLAUDE_WATCH_DISK_GROUP_WARN_PCT=100 \
+  "$REPO/claude-watch" disk 2>/dev/null)
+has "  human renderer keeps the reclaim ceiling" "$rendered" "is 8.7 GiB,"
+hasnt "  human renderer never rounds the reclaim bound down" "$rendered" "is 8.6 GiB,"
 
 # The plural summary has its own branch; pin the required payoff qualifier
 # directly so reverting it cannot hide behind the all-surfaces negative check.
