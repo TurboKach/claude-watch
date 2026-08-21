@@ -634,7 +634,7 @@ disk_findings() {
 
     local action detail
     action=$(disk_group_action "$lab" "$cage" "$sorted")
-    detail="$(disk_h "$sz") across ${cnt} directories, an upper bound on what deleting them returns. Measured with du: APFS clone extents are charged once per file, while each hard-linked inode is charged once per du invocation; because xargs may split a group across invocations, the same inode can be charged more than once. Deleting these directories returns at most this much space, and can return far less. Rebuild cost: $(disk_group_cost "$lab")."
+    detail="$(disk_h "$sz") across ${cnt} directories, an upper bound on what deleting them returns. Measured with du: APFS clone extents are charged once per file, while each hard-linked inode is charged once per du invocation; because xargs may split a group across invocations, the same inode can be charged more than once. When measured, deleting these directories could return at most this much space, possibly far less. Rebuild cost: $(disk_group_cost "$lab")."
     if [ "$lab" = transcripts ]; then
       detail="$detail $(disk_transcript_breakdown "$sorted")"
     else
@@ -673,7 +673,7 @@ disk_findings() {
       "$(disk_rank info)" "$bshare" disk.reclaimable.below_threshold \
       "$bshare" "$supkb" "$bthr" "$bthrname" "$supkb" \
       "$(disk_clean "$(disk_h "$supkb") suppressed below the group line across ${supn} groups (largest ${supbestlab} $(disk_h "$supbestkb")) — $(disk_pct "$supkb" "$total")% of the volume, an upper bound on what deleting them returns")" \
-      "$(disk_clean "${supn} groups sit individually below the ${DISK_GROUP_WARN_PCT}% / ${DISK_GROUP_WARN_GIB} GiB line but clear it summed; this names an amount, not a target, so no action is offered. Suppressed: ${supdetail}.")")$'\n'
+      "$(disk_clean "${supn} groups sit individually below the ${DISK_GROUP_WARN_PCT}% / ${DISK_GROUP_WARN_GIB} GiB line but clear it summed; this names an amount, not a target, so no action is offered. Suppressed (each an upper bound on what deleting that group returns): ${supdetail}.")")$'\n'
   fi
 
   # ---- summary ------------------------------------------------------------
@@ -698,7 +698,7 @@ disk_findings() {
   # finding will actually be there (the sum itself clears the bar); when the
   # sum stays under too, say so instead of pointing at data that isn't emitted.
   if [ "$supn" -gt 0 ]; then
-    base="$base; ${supn} groups below the line totalling $(disk_h "$supkb") (largest ${supbestlab} $(disk_h "$supbestkb"))"
+    base="$base; ${supn} groups below the line totalling $(disk_h "$supkb") (an upper bound on what deleting them returns; largest ${supbestlab} $(disk_h "$supbestkb"))"
     if disk_group_published "$supkb" "$total"; then
       base="$base — --json for the full per-group breakdown"
     else
@@ -765,7 +765,7 @@ disk_group_action() {
     else
       case $conf in
         confirmed)
-          item="$(disk_command_for "$p") — frees up to $(disk_h "$sz")"
+          item="$(disk_command_for "$p") — scan-time upper bound $(disk_h "$sz")"
           # The cache age prints beside every command regardless (§6 U4), and
           # says so out loud once it is past the 6h TTL.
           if disk_is_uint "$cage" && [ "$cage" -ge "$DISK_CACHE_TTL_S" ]; then

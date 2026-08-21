@@ -113,12 +113,13 @@ claude-watch advise  CRITICAL disk — 4.7% free — 19.8 GiB of 422 GiB on /Sys
       25.5 GiB across 57 directories, an upper bound on what deleting them returns.
       Measured with du: APFS clone extents are charged once per file, while each hard-linked
       inode is charged once per du invocation; xargs may split a group across invocations.
-      Deleting these directories can return far less. Rebuild cost: .next comes back in
+      When measured, deleting these directories could return at most this much space, possibly far
+      less. Rebuild cost: .next comes back in
       seconds; a Rust target takes minutes to tens of minutes; … Confidence: 2 confirmed,
       0 likely, 0 unverified (only confirmed hits get a command).
       critical at 5.0 GiB — CLAUDE_WATCH_DISK_GROUP_WARN_GIB · 25.5 GiB 6.0% of this domain
-      → cache is 2d old; rm -rf '/Users/you/Dev/engine/target' — frees up to 11.0 GiB ·
-        rm -rf '/Users/you/Dev/site/.next' — frees up to 1.2 GiB
+      → cache is 2d old; rm -rf '/Users/you/Dev/engine/target' — scan-time upper bound 11.0 GiB ·
+        rm -rf '/Users/you/Dev/site/.next' — scan-time upper bound 1.2 GiB
 
   LEAKS  INFO 2 removable worktrees (596 KiB reclaimable)
     INFO leaks.worktrees

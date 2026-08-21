@@ -345,9 +345,10 @@ globally it does the opposite, hiding a number it measured perfectly well behind
 somewhere else.
 
 Mechanically it is a **5th column on the cache's `group` row** (`affected ∈ 0|1`). The global
-`scan partial=1` still drives the summary banner and the "this is a floor" language; the per-group
-flag drives **severity capping only**. `disk.volume_low` is unaffected either way — it comes from
-`df`, which always completes.
+`scan partial=1` still drives the summary banner, which says the measurement is incomplete; the
+per-group flag drives **severity capping only**. Reclaim totals remain upper bounds on scan-time
+deletion payoff, independently of coverage. `disk.volume_low` is unaffected either way — it comes
+from `df`, which always completes.
 
 ---
 

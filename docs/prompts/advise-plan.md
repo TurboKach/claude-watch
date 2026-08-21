@@ -320,9 +320,12 @@ reassuring, wrong answer with no symptom.
 `containers` (`~/Library/Containers`, single total, no per-app breakdown).
 `dir` rows are the individual hits, capped to the top 20 per group by size.
 
-**Reclaim totals are always a floor**, labelled as such in every summary — not
-only on the `partial=1` path. Three independent reasons they undercount: the
-depth cap, skipped unrepresentable paths, and roots off the home volume.
+**Every published reclaim total is an upper bound on scan-time deletion payoff.**
+`du` can charge shared APFS clone extents and hard-linked inodes more than once,
+so deletion may return far less. Coverage is independent: the depth cap,
+unrepresentable paths, roots off the home volume, deadlines, and permission
+errors make the measurement incomplete; they do not turn reclaim totals into
+lower bounds.
 
 **Reclaim confidence** — per `dir` row. Two independent tests:
 
@@ -424,7 +427,7 @@ whole reason the field exists.
   "domains": [
     {"domain": "disk", "priority": 1, "severity": "critical", "severity_rank": 4,
      "measurement_state": "complete", "measurement_reasons": [], "partial_reason": null,
-     "summary": "4.7% free; 30.3 GiB of rebuildable build output (a floor)",
+     "summary": "4.7% free; 30.3 GiB of rebuildable build output (an upper bound on what deleting it returns)",
      "remedy": null,
      "findings": [
        {"id": "disk.volume_low", "severity": "critical", "severity_rank": 4,
@@ -903,7 +906,8 @@ without specifying:
    regardless. Partition the hits: representable paths are measured and emitted;
    the rest are counted into `note path_unrepresentable <count>` and `partial=1`,
    and never emitted. Combined with the depth cap and rule 4, this is why §3c
-   labels every reclaim total a floor unconditionally.
+   reports the measurement as incomplete while keeping deletion-payoff bounds
+   independent.
 
 Also: dedupe hits by resolved path prefix before summing, so pointing
 `CLAUDE_WATCH_REPO_ROOTS` at `$HOME` cannot double-count the fixed shortlist;
@@ -935,8 +939,8 @@ a `package.json` (→ `confirmed` when backdated, `likely` when just touched);
 `repo/target` with **no** `Cargo.toml` (→ `unverified`, no command); a decoy
 `repo/src`; a directory whose name contains a space and a `;`; a directory whose
 name contains a tab (→ counted in `note path_unrepresentable`, absent from `dir`
-rows, `partial=1`); a `node_modules` nested below the depth cap (→ absent, total
-labelled a floor). Asserts group totals, decoy absence, each confidence, and that
+rows, `partial=1`); a `node_modules` nested below the depth cap (→ absent,
+measurement labelled incomplete). Asserts group totals, decoy absence, each confidence, and that
 no removal command is emitted for the metacharacter path. Plus: a held lock →
 the second run exits without scanning; a stale lock with a dead pid → broken and
 scanned; a sleeping worker → deadline fires with `partial=1`, `deadline_hit=1`
@@ -1150,11 +1154,11 @@ the `--json` path**, where the machine-readable equivalent travels as `remedy`,
 | E2 | `--window` with no value | `claude-watch advise: --window needs a value. Accepted: 24h, week, month, or Nh/Nw/Nd. Try: claude-watch advise --window 24h` | stderr, exit 2 |
 | E3 | dead sampler | `sampler stopped — last sample 3d4h ago. CPU and memory data are not being recorded; disk and leaks below are current. Fix: claude-watch doctor` | stdout, directly under the headline, `C_RED`, exit 0; `sampler_stale` |
 | E4 | stale disk cache | `disk facts are 3d old (refreshed every 6h) — nothing has rescanned since. For current numbers: claude-watch disk --refresh (~10s, 120s cap)` | stdout, in the disk section, `C_DIM` |
-| E5 | scan deadline hit | `disk scan stopped at its 120s deadline after 12 of 40 roots — the sizes below are a floor, not a total. Narrow CLAUDE_WATCH_REPO_ROOTS, or re-run claude-watch disk --refresh when the machine is idle` | stdout, leads the disk section, `C_HOT`; `partial_reason: "deadline"` |
+| E5 | scan deadline hit | `disk scan stopped at its 120s deadline after 12 of 40 roots — the measurement below is incomplete. Narrow CLAUDE_WATCH_REPO_ROOTS, or re-run claude-watch disk --refresh when the machine is idle` | stdout, leads the disk section, `C_HOT`; `partial_reason: "deadline"` |
 | E6 | window longer than the data | `window: month (30d requested, 2d available — the sampler has only been recording since 2026-08-04). Nothing to fix; the window widens as data accumulates` | stdout, header, `C_DIM` |
 | E7 | cache write failure | `claude-watch disk: could not write /Users/x/.claude-watch/state/disk.tsv — the volume is 95% full or the path is read-only. The previous cache is unchanged and is now stale. Free space, then re-run: claude-watch disk --refresh` | stderr, exit 1 |
 | E8 | `gzcat` failure | `could not read raw/2026-07-30.tsv.gz — the archive is corrupt, so this window is short by one day. Remove that file to stop the warning; the day's data is not recoverable` | stderr, exit 0; domain `partial`, `window_read_failed`, `missing_or_failed_days` |
-| E9 | permission denied during a scan | `disk scan could not read 3 directories (permission denied) — the sizes below are a floor. Grant Full Disk Access to your terminal in System Settings > Privacy & Security, or narrow CLAUDE_WATCH_REPO_ROOTS` | stdout, disk section, `C_HOT`; `partial_reason: "permissions"` |
+| E9 | permission denied during a scan | `disk scan could not read 3 directories (permission denied) — the measurement below is incomplete. Grant Full Disk Access to your terminal in System Settings > Privacy & Security, or narrow CLAUDE_WATCH_REPO_ROOTS` | stdout, disk section, `C_HOT`; `partial_reason: "permissions"` |
 | E10 | never scanned (G7) | `disk: never scanned, so nothing here is measured. This takes about 10 seconds and is then cached for 6h. Run: claude-watch disk --refresh` | stdout as the domain summary + `remedy`; `unknown`, `cache_missing` |
 | E11 | lock lost / already scanning | `another disk scan is already running — using the cached facts from 3h ago. Re-run in a minute for fresh numbers.` (no cache: `... — nothing cached yet; re-run in a minute.`) | stderr, exit 0, **no second scan** |
 | E12 | `advise --refresh` | `claude-watch advise: advise never scans, so --refresh does nothing here. To rescan the disk: claude-watch disk --refresh` | stderr, exit 2 |
@@ -2696,6 +2700,11 @@ percentage stops screaming. Folds into open decision 1.
 
 ### E-F12 — MEDIUM (6/10) — `-maxdepth 4` silently undercounts; groups can double-count
 
+> **Superseded 2026-08-21.** The diagnosis and original fix below are retained as
+> review history. The current contract is that every group is an upper bound on
+> scan-time deletion payoff; partial coverage is reported separately as an
+> incomplete measurement.
+
 §6 U4's bounded walk stops at depth 4 below each repo root, so
 `repo/packages/app/services/node_modules` is invisible. That is defensible as a
 bound, but the resulting `reclaim_kb` is a **floor** and the output does not say so
@@ -3063,7 +3072,7 @@ goes live the instant it is written, against whatever `claude-watch` is on PATH.
 | E-D13 | Re-`stat` before printing a removal command (E-F9) | taste | **yes** | Bounded to a handful of `stat` calls; the alternative is authoring `rm -rf` on a 6h-old verdict |
 | E-D14 | Third sort key `id` (E-F10) | mechanical | **add** | One line; makes every fixture's expected output exact |
 | E-D15 | `disk.volume_low`: `or` → `and` (E-F11) | taste | **change** | `or` makes every large volume permanently critical — G1's deleted failure, returning |
-| E-D16 | Label reclaim totals a floor; dedupe overlapping roots (E-F12) | mechanical | **add** | Silent undercounts are the "confidently wrong" class |
+| E-D16 | Label reclaim totals a floor; dedupe overlapping roots (E-F12) | mechanical | **superseded 2026-08-21** | Historical decision; current guidance makes every group an upper bound on scan-time deletion payoff and reports incomplete coverage separately |
 | E-D17 | Analyzers sanitise before emitting (E-F14) | mechanical | **reverses §3b** | You cannot strip tabs after parsing a tab-separated stream |
 | E-D18 | Pin `scan_worktrees` / `scan_orphans` shapes in §3 (E-F15) | mechanical | **add** | Two units + one in-flight PR must agree on a shape nobody wrote down |
 | E-D19 | Reuse `status()`'s `age < 120` for `sampler_ok` | mechanical | **reuse** | DRY; two liveness definitions in one tool is how they drift |
@@ -3134,7 +3143,7 @@ chose the complete option.**
   - Surfaced by: E-F11
   - Files: plan §5, `tools/advise-disk.sh`, `tests/fixture-disk.sh`
   - Verify: 4TB-volume fixture at 399GiB free is not `critical`
-- [ ] **T14 (P2, human: ~45min / CC: ~10min)** — U4 — floor labelling, path dedupe, `sum(groups) <= used_kb`
+- [ ] **T14 (P2, human: ~45min / CC: ~10min)** — U4 — historical floor labelling (superseded 2026-08-21), path dedupe, `sum(groups) <= used_kb`
   - Surfaced by: E-F12
   - Files: `tools/disk-scan.sh`, `tools/advise-disk.sh`, `tests/fixture-disk-scan.sh`
   - Verify: nested-`node_modules` fixture; `REPO_ROOTS=$HOME` overlap fixture
@@ -3488,7 +3497,7 @@ one is problem, then cause, then fix.
 | 1 | Invalid `--window` | `claude-watch advise: --window "3 weeks" is not a duration. Accepted: 24h, week, month, or Nh/Nw/Nd (e.g. 6h, 2w, 14d). Try: claude-watch advise --window 24h` | stderr, exit 2 |
 | 2 | Dead sampler | `sampler stopped — last sample 3d4h ago. CPU and memory are unmeasured; disk and leaks below are current. Fix: claude-watch doctor` | stdout, first line, `C_RED`, exit 0 |
 | 3 | Stale disk cache | `disk facts are 3d old (refreshed every 6h) — nothing has rescanned since. For current numbers: claude-watch disk --refresh (~10s, 120s cap)` | stdout, in the disk section, `C_DIM` |
-| 4 | Scan deadline hit | `disk scan stopped at its 120s deadline after 12 of 40 roots — the sizes below are a floor, not a total. Narrow CLAUDE_WATCH_REPO_ROOTS, or re-run claude-watch disk --refresh when the machine is idle` | stdout, leads the disk section, `C_HOT` |
+| 4 | Scan deadline hit | `disk scan stopped at its 120s deadline after 12 of 40 roots — the measurement below is incomplete. Narrow CLAUDE_WATCH_REPO_ROOTS, or re-run claude-watch disk --refresh when the machine is idle` | stdout, leads the disk section, `C_HOT` |
 | 5 | Window longer than data | `window: month (30d requested, 2d available — the sampler has only been recording since 2026-08-04). Nothing to fix; the window widens as data accumulates` | stdout, header, `C_DIM` |
 | 6 | Cold scan starting / lock lost | `no disk scan yet — scanning ~/Dev now, up to 120s. This is cached for 6h; later runs are instant.` / `another disk scan is already running — using the cached facts from 3h ago. Re-run in a minute for fresh numbers.` | stderr, before the work |
 

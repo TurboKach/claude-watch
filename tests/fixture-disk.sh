@@ -226,7 +226,7 @@ has "  detail says the directory bound" "$(F disk.reclaimable.rebuildable 13)" "
 has "  detail gets clone accounting right" "$(F disk.reclaimable.rebuildable 13)" "APFS clone extents are charged once per file"
 has "  detail gets hard-link accounting right" "$(F disk.reclaimable.rebuildable 13)" "each hard-linked inode is charged once per du invocation"
 has "  detail names xargs splitting"   "$(F disk.reclaimable.rebuildable 13)" "xargs may split a group across invocations, the same inode can be charged more than once"
-has "  detail limits deletion payoff" "$(F disk.reclaimable.rebuildable 13)" "returns at most this much space, and can return far less"
+has "  detail scopes deletion payoff" "$(F disk.reclaimable.rebuildable 13)" "When measured, deleting these directories could return at most this much space, possibly far less"
 has "  detail carries the rebuild cost" "$(F disk.reclaimable.rebuildable 13)" "a Rust target takes minutes to tens of minutes"
 
 echo "reclaimable groups: deletion-payoff bounds"
@@ -244,7 +244,7 @@ for group in developer rebuildable node_modules containers downloads caches tran
   has "$group headline says upper bound" "$(F "disk.reclaimable.$group" 12)" "an upper bound"
   has "$group detail says upper bound" "$(F "disk.reclaimable.$group" 13)" "an upper bound"
   has "$group detail explains du sharing" "$(F "disk.reclaimable.$group" 13)" "APFS clone extents are charged once per file"
-  has "$group detail limits payoff" "$(F "disk.reclaimable.$group" 13)" "returns at most this much space, and can return far less"
+  has "$group detail scopes payoff to the scan" "$(F "disk.reclaimable.$group" 13)" "When measured, deleting these directories could return at most this much space, possibly far less"
   hasnt "$group never says a floor" "$(F "disk.reclaimable.$group" 12) $(F "disk.reclaimable.$group" 13)" "a floor"
 done
 
@@ -263,8 +263,13 @@ hasnt "no user-visible reclaimable surface calls bytes a floor" "$visible" "a fl
 has "  surface fixture includes group headline" "$visible" "8.6 GiB of rebuildable build output"
 has "  surface fixture includes matching summary" "$(S 6)" "8.6 GiB of rebuildable build output"
 has "  surface fixture includes below-threshold finding" "$visible" "suppressed below the group line across 2 groups"
-has "  surface fixture includes bounded action" "$visible" "— frees up to 8.6 GiB"
+has "  surface fixture includes scan-time-bounded action" "$visible" "— scan-time upper bound 8.6 GiB"
 hasnt "  no action promises exact freed bytes" "$visible" "— frees 8.6 GiB"
+
+# The plural summary has its own branch; pin the required payoff qualifier
+# directly so reverting it cannot hide behind the all-surfaces negative check.
+pure_body 0 "$V_TOTAL" "$V_DF" "$PAYOFF_BODY"
+has "multi-group summary states the upper bound" "$(S 6)" "42.0 GiB reclaimable across 7 groups (an upper bound on what deleting them returns)"
 
 echo "the 2026-08-19 incident, today's real numbers"
 # used 429435388 + avail 22902700 = 452338088 KB, matching the live cache in
@@ -290,7 +295,7 @@ eq "  node_modules (4.9 GiB) stays under the floor" "$(F disk.reclaimable.node_m
 eq "  five groups published, one volume finding" "$(nfind)" 6
 eq "  no below_threshold: the lone suppressed group doesn't clear the bar alone" \
   "$(F disk.reclaimable.below_threshold 3)" ""
-has "  but the summary still names it"   "$(S 6)" "1 groups below the line totalling 4.9 GiB (largest node_modules 4.9 GiB)"
+has "  but the summary still names and qualifies it" "$(S 6)" "1 groups below the line totalling 4.9 GiB (an upper bound on what deleting them returns; largest node_modules 4.9 GiB)"
 # No below_threshold finding fires here (the lone suppressed group's sum stays
 # under the bar too), so the JSON carries nothing more about it — the summary
 # must not promise "--json for all" data that was never emitted.
@@ -319,7 +324,8 @@ has "  suppressed total is an upper bound" "$(F disk.reclaimable.below_threshold
 hasnt "  suppressed total is never a floor" "$(F disk.reclaimable.below_threshold 12) $(F disk.reclaimable.below_threshold 13)" "a floor"
 eq "  action is empty, no target named" "$(F disk.reclaimable.below_threshold 14)" ""
 hasnt "  and detail never carries rm -rf" "$(F disk.reclaimable.below_threshold 13)" "rm -rf"
-has "  summary names all four"         "$(S 6)" "4 groups below the line totalling 23.4 GiB (largest caches 6.7 GiB)"
+has "  detail qualifies the whole suppressed list" "$(F disk.reclaimable.below_threshold 13)" "Suppressed (each an upper bound on what deleting that group returns)"
+has "  summary names and qualifies all four" "$(S 6)" "4 groups below the line totalling 23.4 GiB (an upper bound on what deleting them returns; largest caches 6.7 GiB)"
 eq "  containers + downloads + volume + aggregate = 4 findings" "$(nfind)" 4
 # The finding's own detail is the only place a JSON consumer can find the
 # suppressed groups; it must name every one of them, not just the largest, or
@@ -434,6 +440,26 @@ hasnt "  summary never claims no reason"  "$(S 6)" "no reason recorded"
 has "  and names the real reason"         "$(S 6)" "could not attribute 4 paths under \$HOME to a group, leaving the measurement incomplete"
 has "  coverage keeps its remedy"         "$(S 6)" "Re-run: claude-watch disk --refresh"
 
+# These three partial-reason branches have distinct user guidance. Positive
+# assertions are deliberate: merely banning the old floor wording lets a
+# reverted or empty replacement pass unnoticed.
+OFFVOL="scan	1	0	3	4
+note	root_off_home_volume	1	-	-"
+pure_body "$V_USED" "$V_AVAIL" "$V_DF" "$OFFVOL"
+has "root_off_home_volume states incomplete measurement" "$(S 6)" "sizes from another volume are not comparable against this one, so the measurement below is incomplete"
+has "  and keeps its remedy"            "$(S 6)" "Point CLAUDE_WATCH_REPO_ROOTS at paths on the home volume"
+
+UNREP="scan	1	0	3	3
+note	path_unrepresentable	2	-	-"
+pure_body "$V_USED" "$V_AVAIL" "$V_DF" "$UNREP"
+has "path_unrepresentable states incomplete measurement" "$(S 6)" "a tab-separated cache cannot carry them, so the measurement below is incomplete"
+has "  and keeps its remedy"            "$(S 6)" "Rename them, or accept the undercount"
+
+GENERIC="scan	1	0	3	3"
+pure_body "$V_USED" "$V_AVAIL" "$V_DF" "$GENERIC"
+has "generic partial states incomplete measurement" "$(S 6)" "disk scan reported itself partial with no reason recorded — the measurement below is incomplete"
+has "  and keeps its remedy"            "$(S 6)" "Re-run: claude-watch disk --refresh"
+
 # ============================================================ confidence gate ==
 echo "confidence gates the command"
 CONF="group	rebuildable	26738688	57	0
@@ -443,7 +469,7 @@ dir	/Users/x/Dev/ccc/.next	7000000	rebuildable	unverified"
 pure_body "$V_USED" "$V_AVAIL" "$V_DF" "$CONF"
 A=$(F disk.reclaimable.rebuildable 14)
 has "confirmed gets a removal command" "$A" "rm -rf '/Users/x/Dev/aaa/.next'"
-has "  command promises only an upper payoff" "$A" "rm -rf '/Users/x/Dev/aaa/.next' — frees up to 8.6 GiB"
+has "  command reports its scan-time upper bound" "$A" "rm -rf '/Users/x/Dev/aaa/.next' — scan-time upper bound 8.6 GiB"
 hasnt "  command never promises exact freed bytes" "$A" "— frees 8.6 GiB"
 hasnt "likely gets no command"         "$A" "rm -rf '/Users/x/Dev/bbb/.next'"
 has "  likely says why"                "$A" "in active use, rebuilt on next build"
