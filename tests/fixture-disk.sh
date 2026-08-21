@@ -219,8 +219,36 @@ eq "warn volume promotes group to warn" "$(F disk.reclaimable.rebuildable 4)" wa
 
 pure_body "$V_USED" "$V_AVAIL" "$V_DF" "group	rebuildable	26738688	57	0"
 has "reclaim total is always a floor"  "$(S 6)" "(a floor)"
-has "  headline says floor too"        "$(F disk.reclaimable.rebuildable 12)" "a floor"
+has "  shared-block headline is upper" "$(F disk.reclaimable.rebuildable 12)" "an upper bound"
+hasnt "  shared-block headline is not a floor" "$(F disk.reclaimable.rebuildable 12)" "a floor"
+has "  detail explains shared blocks"  "$(F disk.reclaimable.rebuildable 13)" "Measured with du, which counts APFS clone and hard-linked blocks once per file: deleting this frees at most this much, and can free far less."
+hasnt "  shared-block detail is not a floor" "$(F disk.reclaimable.rebuildable 13)" "a floor"
 has "  detail carries the rebuild cost" "$(F disk.reclaimable.rebuildable 13)" "a Rust target takes minutes to tens of minutes"
+
+echo "reclaimable groups: deletion-payoff bounds"
+# The matrix checks rendered findings rather than the classifier in isolation:
+# wiring the helper backwards must fail every row on both the headline and the
+# detail, while an accidental unconditional suffix is caught by the negative
+# assertions. Six GiB clears the absolute publication line for every group.
+PAYOFF_BODY="group	developer	6291456	1	0
+group	rebuildable	6291456	1	0
+group	node_modules	6291456	1	0
+group	containers	6291456	1	0
+group	downloads	6291456	1	0
+group	caches	6291456	1	0
+group	transcripts	6291456	1	0"
+pure_body 0 "$V_TOTAL" "$V_DF" "$PAYOFF_BODY"
+for group in developer rebuildable node_modules; do
+  has "$group headline says upper bound" "$(F "disk.reclaimable.$group" 12)" "an upper bound"
+  has "$group detail says upper bound" "$(F "disk.reclaimable.$group" 13)" "an upper bound"
+  has "$group detail explains du sharing" "$(F "disk.reclaimable.$group" 13)" "deleting this frees at most this much, and can free far less"
+  hasnt "$group never says a floor" "$(F "disk.reclaimable.$group" 12) $(F "disk.reclaimable.$group" 13)" "a floor"
+done
+for group in containers downloads caches transcripts; do
+  has "$group headline keeps a floor" "$(F "disk.reclaimable.$group" 12)" "a floor"
+  has "$group detail keeps a floor" "$(F "disk.reclaimable.$group" 13)" ", a floor. Rebuild cost:"
+  hasnt "$group never says upper bound" "$(F "disk.reclaimable.$group" 12) $(F "disk.reclaimable.$group" 13)" "an upper bound"
+done
 
 echo "the 2026-08-19 incident, today's real numbers"
 # used 429435388 + avail 22902700 = 452338088 KB, matching the live cache in

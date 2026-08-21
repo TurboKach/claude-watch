@@ -256,6 +256,19 @@ disk_group_cost() {
   esac
 }
 
+# Scan coverage and deletion payoff are independent bounds. The partial-scan
+# banner owns coverage; this classification owns the payoff distortion from
+# APFS clones and hard links, whose blocks `du` charges to every file even when
+# deleting one reference returns little or nothing. Unknown future groups keep
+# the historical floor wording until their storage behaviour is understood.
+disk_group_bound() {
+  case $1 in
+    developer|rebuildable|node_modules) printf 'upper' ;;
+    transcripts|downloads|caches|containers) printf 'floor' ;;
+    *)                                       printf 'floor' ;;
+  esac
+}
+
 # §6 U4 asks us to prefer the tool's own cleaner over rm -rf "since it cannot
 # mistake the directory". For Rust that turned out to be false: `(cd <parent>
 # && cargo clean)` is NOT bound to the target directory we measured — a
@@ -632,9 +645,16 @@ disk_findings() {
     # never hand an `IFS=$'\t' read` consumer an empty interior field.
     [ -n "$sorted" ] && sorted=$(printf '%s' "$sorted" | sort -t$'\t' -k1,1n -k2,2nr | cut -f2-)
 
-    local action detail
+    local action detail headline_bound bound
     action=$(disk_group_action "$lab" "$cage" "$sorted")
-    detail="$(disk_h "$sz") across ${cnt} directories, a floor. Rebuild cost: $(disk_group_cost "$lab")."
+    bound=$(disk_group_bound "$lab")
+    if [ "$bound" = upper ]; then
+      headline_bound='an upper bound'
+      detail="$(disk_h "$sz") across ${cnt} directories, an upper bound. Measured with du, which counts APFS clone and hard-linked blocks once per file: deleting this frees at most this much, and can free far less. Rebuild cost: $(disk_group_cost "$lab")."
+    else
+      headline_bound='a floor'
+      detail="$(disk_h "$sz") across ${cnt} directories, a floor. Rebuild cost: $(disk_group_cost "$lab")."
+    fi
     if [ "$lab" = transcripts ]; then
       detail="$detail $(disk_transcript_breakdown "$sorted")"
     else
@@ -645,7 +665,7 @@ disk_findings() {
     rows=$rows$(printf '%s\t%s\t%s\tF\tdisk\tdisk.reclaimable.%s\t%s\t%s\t%s\tkb\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$(disk_rank "$gsev")" "$gshare" "disk.reclaimable.$lab" \
       "$lab" "$gsev" "$gshare" "$sz" "$gthr" "$gthrname" "$sz" "$best" \
-      "$(disk_clean "$(disk_h "$sz") of $(disk_group_what "$lab") — $(disk_pct "$sz" "$total")% of the volume, a floor")" \
+      "$(disk_clean "$(disk_h "$sz") of $(disk_group_what "$lab") — $(disk_pct "$sz" "$total")% of the volume, $headline_bound")" \
       "$(disk_clean "$detail")" "$(disk_clean "$action")")$'\n'
     [ "$(disk_rank "$gsev")" -gt "$(disk_rank "$worst")" ] && worst=$gsev
   done
