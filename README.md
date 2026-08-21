@@ -97,7 +97,8 @@ The digest prints automatically on your first shell of a new day.
 claude-watch advise  CRITICAL disk — 4.7% free — 19.8 GiB of 422 GiB on /System/Volumes/Data
   24h · 5084 samples · 14h07m observed · interval 10s
 
-  DISK  CRITICAL 4.7% free (19.8 GiB of 422 GiB); 25.5 GiB of rebuildable build output (a floor)
+  DISK  CRITICAL 4.7% free (19.8 GiB of 422 GiB); 25.5 GiB of rebuildable build output
+    (an upper bound on what deleting it returns)
     disk facts are 2d07h old (refreshed every 6h) — nothing has rescanned since. For current
     numbers: claude-watch disk --refresh (~60-70s, 120s cap)
     CRITICAL disk.volume_low
@@ -108,13 +109,16 @@ claude-watch advise  CRITICAL disk — 4.7% free — 19.8 GiB of 422 GiB on /Sys
       critical at 25.0 GiB — CLAUDE_WATCH_DISK_CRIT_GIB · 19.8 GiB 95.3% of this domain
     CRITICAL disk.reclaimable.rebuildable
       25.5 GiB of rebuildable build output (.venv, venv, target, .next, DerivedData) — 6.0%
-      of the volume, a floor
-      25.5 GiB across 57 directories, a floor. Rebuild cost: .next comes back in seconds; a
-      Rust target takes minutes to tens of minutes; … Confidence: 2 confirmed, 0 likely,
-      0 unverified (only confirmed hits get a command).
+      of the volume, an upper bound on what deleting it returns
+      25.5 GiB across 57 directories, an upper bound on what deleting them returns.
+      Measured with du: APFS clone extents are charged once per file, while each hard-linked
+      inode is charged once per du invocation; xargs may split a group across invocations.
+      Deleting these directories can return far less. Rebuild cost: .next comes back in
+      seconds; a Rust target takes minutes to tens of minutes; … Confidence: 2 confirmed,
+      0 likely, 0 unverified (only confirmed hits get a command).
       critical at 5.0 GiB — CLAUDE_WATCH_DISK_GROUP_WARN_GIB · 25.5 GiB 6.0% of this domain
-      → cache is 2d old; (cd '/Users/you/Dev/engine' && cargo clean) — frees 11.0 GiB ·
-        rm -rf '/Users/you/Dev/site/.next' — frees 1.2 GiB
+      → cache is 2d old; rm -rf '/Users/you/Dev/engine/target' — frees up to 11.0 GiB ·
+        rm -rf '/Users/you/Dev/site/.next' — frees up to 1.2 GiB
 
   LEAKS  INFO 2 removable worktrees (596 KiB reclaimable)
     INFO leaks.worktrees
@@ -142,9 +146,9 @@ claude-watch disk --refresh             # the only thing here that scans
 
 **Window.** Default `24h`. `week` = `7d`, `month` = `30d`, and `Nh` / `Nd` / `Nw` are accepted; anything else exits 2 naming every accepted form. The window is clamped to `CLAUDE_WATCH_KEEP_DAYS` (30) and the output says so when it clamps. A month asked of two days of data reports two days and says which — a month heading over two days of evidence is a confidently wrong answer.
 
-**`advise` never scans.** It reads the disk facts cached by `claude-watch disk --refresh`, which are used silently for **6 hours**, then still used but flagged stale with their age. If nothing has ever scanned, the disk domain is reported `unknown` with the remedy — it will not go away and scan on its own, because the one thing this project never does is start work you did not ask for. A refresh sweeps the whole home directory, so it takes ~60-70s here, and is stopped at a hard **120-second deadline**; whatever landed by then is written and labelled a floor.
+**`advise` never scans.** It reads the disk facts cached by `claude-watch disk --refresh`, which are used silently for **6 hours**, then still used but flagged stale with their age. If nothing has ever scanned, the disk domain is reported `unknown` with the remedy — it will not go away and scan on its own, because the one thing this project never does is start work you did not ask for. A refresh sweeps the whole home directory, so it takes ~60-70s here, and is stopped at a hard **120-second deadline**; whatever landed by then is written and explicitly reported as an incomplete measurement.
 
-**Every reclaim total is a floor**, not a total, on every path — the scan is depth-capped, skips paths a TSV cannot carry, and skips roots on other volumes.
+**Every published reclaim total is an upper bound on what deleting it returns.** `du` can charge shared APFS clone extents and hard-linked inodes more than once, so the space actually returned can be far smaller. Scan coverage is a separate limitation: a deadline, depth cap, unrepresentable path, permission error, or root on another volume makes the measurement incomplete rather than turning the reclaim estimate into a lower bound.
 
 **Thresholds** are named constants with a `CLAUDE_WATCH_*` override each; `advise --show-thresholds` prints all of them with each value's source (`default`, or the variable that overrode it). Retune there rather than editing the installed script, which `git pull` will overwrite.
 

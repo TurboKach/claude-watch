@@ -218,18 +218,20 @@ pure_body $(( G300 - G300 * 15 / 100 )) $(( G300 * 15 / 100 )) 0 "group	rebuilda
 eq "warn volume promotes group to warn" "$(F disk.reclaimable.rebuildable 4)" warn
 
 pure_body "$V_USED" "$V_AVAIL" "$V_DF" "group	rebuildable	26738688	57	0"
-has "reclaim total is always a floor"  "$(S 6)" "(a floor)"
-has "  shared-block headline is upper" "$(F disk.reclaimable.rebuildable 12)" "an upper bound"
-hasnt "  shared-block headline is not a floor" "$(F disk.reclaimable.rebuildable 12)" "a floor"
-has "  detail explains shared blocks"  "$(F disk.reclaimable.rebuildable 13)" "Measured with du, which counts APFS clone and hard-linked blocks once per file: deleting this frees at most this much, and can free far less."
-hasnt "  shared-block detail is not a floor" "$(F disk.reclaimable.rebuildable 13)" "a floor"
+has "summary agrees on the same bytes" "$(S 6)" "25.5 GiB of rebuildable build output"
+has "  summary says the total is upper" "$(S 6)" "an upper bound on what deleting it returns"
+has "  group headline agrees on bytes" "$(F disk.reclaimable.rebuildable 12)" "25.5 GiB of rebuildable build output"
+has "  group headline agrees on bound" "$(F disk.reclaimable.rebuildable 12)" "an upper bound on what deleting it returns"
+has "  detail says the directory bound" "$(F disk.reclaimable.rebuildable 13)" "25.5 GiB across 57 directories, an upper bound on what deleting them returns"
+has "  detail gets clone accounting right" "$(F disk.reclaimable.rebuildable 13)" "APFS clone extents are charged once per file"
+has "  detail gets hard-link accounting right" "$(F disk.reclaimable.rebuildable 13)" "each hard-linked inode is charged once per du invocation"
+has "  detail names xargs splitting"   "$(F disk.reclaimable.rebuildable 13)" "xargs may split a group across invocations, the same inode can be charged more than once"
+has "  detail limits deletion payoff" "$(F disk.reclaimable.rebuildable 13)" "returns at most this much space, and can return far less"
 has "  detail carries the rebuild cost" "$(F disk.reclaimable.rebuildable 13)" "a Rust target takes minutes to tens of minutes"
 
 echo "reclaimable groups: deletion-payoff bounds"
-# The matrix checks rendered findings rather than the classifier in isolation:
-# wiring the helper backwards must fail every row on both the headline and the
-# detail, while an accidental unconditional suffix is caught by the negative
-# assertions. Six GiB clears the absolute publication line for every group.
+# Every group goes through the same rendering path. Six GiB clears the absolute
+# publication line, so this matrix fails if any old per-group split returns.
 PAYOFF_BODY="group	developer	6291456	1	0
 group	rebuildable	6291456	1	0
 group	node_modules	6291456	1	0
@@ -238,17 +240,31 @@ group	downloads	6291456	1	0
 group	caches	6291456	1	0
 group	transcripts	6291456	1	0"
 pure_body 0 "$V_TOTAL" "$V_DF" "$PAYOFF_BODY"
-for group in developer rebuildable node_modules; do
+for group in developer rebuildable node_modules containers downloads caches transcripts; do
   has "$group headline says upper bound" "$(F "disk.reclaimable.$group" 12)" "an upper bound"
   has "$group detail says upper bound" "$(F "disk.reclaimable.$group" 13)" "an upper bound"
-  has "$group detail explains du sharing" "$(F "disk.reclaimable.$group" 13)" "deleting this frees at most this much, and can free far less"
+  has "$group detail explains du sharing" "$(F "disk.reclaimable.$group" 13)" "APFS clone extents are charged once per file"
+  has "$group detail limits payoff" "$(F "disk.reclaimable.$group" 13)" "returns at most this much space, and can return far less"
   hasnt "$group never says a floor" "$(F "disk.reclaimable.$group" 12) $(F "disk.reclaimable.$group" 13)" "a floor"
 done
-for group in containers downloads caches transcripts; do
-  has "$group headline keeps a floor" "$(F "disk.reclaimable.$group" 12)" "a floor"
-  has "$group detail keeps a floor" "$(F "disk.reclaimable.$group" 13)" ", a floor. Rebuild cost:"
-  hasnt "$group never says upper bound" "$(F "disk.reclaimable.$group" 12) $(F "disk.reclaimable.$group" 13)" "an upper bound"
-done
+
+# Exercise every reclaim surface in one rendering: a published group, its
+# domain summary and action, plus an aggregate below-threshold finding.
+VISIBLE_BODY="group	rebuildable	9000000	1	0
+dir	/Users/x/Dev/aaa/.next	9000000	rebuildable	confirmed
+group	caches	3000000	1	0
+group	downloads	3000000	1	0"
+CLAUDE_WATCH_DISK_GROUP_WARN_PCT=100 pure_body 0 "$V_TOTAL" "$V_DF" "$VISIBLE_BODY"
+visible=$(printf '%s\n' "$OUT" | awk -F'\t' '
+  $1 == "S" { print $6 }
+  $1 == "F" && $3 ~ /^disk\.reclaimable\./ { print $12; print $13; print $14 }
+')
+hasnt "no user-visible reclaimable surface calls bytes a floor" "$visible" "a floor"
+has "  surface fixture includes group headline" "$visible" "8.6 GiB of rebuildable build output"
+has "  surface fixture includes matching summary" "$(S 6)" "8.6 GiB of rebuildable build output"
+has "  surface fixture includes below-threshold finding" "$visible" "suppressed below the group line across 2 groups"
+has "  surface fixture includes bounded action" "$visible" "— frees up to 8.6 GiB"
+hasnt "  no action promises exact freed bytes" "$visible" "— frees 8.6 GiB"
 
 echo "the 2026-08-19 incident, today's real numbers"
 # used 429435388 + avail 22902700 = 452338088 KB, matching the live cache in
@@ -299,6 +315,8 @@ eq "  pinned at info"                  "$(F disk.reclaimable.below_threshold 4)"
 eq "  reclaim_kb is the suppressed sum" "$(F disk.reclaimable.below_threshold 10)" 24513572
 has "  headline names the total"       "$(F disk.reclaimable.below_threshold 12)" "23.4 GiB"
 has "  and the largest suppressed group" "$(F disk.reclaimable.below_threshold 12)" "caches"
+has "  suppressed total is an upper bound" "$(F disk.reclaimable.below_threshold 12)" "an upper bound on what deleting them returns"
+hasnt "  suppressed total is never a floor" "$(F disk.reclaimable.below_threshold 12) $(F disk.reclaimable.below_threshold 13)" "a floor"
 eq "  action is empty, no target named" "$(F disk.reclaimable.below_threshold 14)" ""
 hasnt "  and detail never carries rm -rf" "$(F disk.reclaimable.below_threshold 13)" "rm -rf"
 has "  summary names all four"         "$(S 6)" "4 groups below the line totalling 23.4 GiB (largest caches 6.7 GiB)"
@@ -375,8 +393,9 @@ eq "  domain severity still critical"  "$(S 3)" critical
 eq "  unaffected group not capped"     "$(F disk.reclaimable.rebuildable 4)" critical
 eq "  affected group capped at info"   "$(F disk.reclaimable.caches 4)" info
 has "  capped group says why"          "$(F disk.reclaimable.caches 13)" "capped at info because the scan could not measure all of it"
-has "  summary leads with E9 verbatim" "$(S 6)" "disk scan could not read 3 directories (permission denied) — the sizes below are a floor. Grant Full Disk Access to your terminal in System Settings > Privacy & Security, or narrow CLAUDE_WATCH_REPO_ROOTS"
+has "  summary says measurement incomplete" "$(S 6)" "disk scan could not read 3 directories (permission denied) — the measurement below is incomplete"
 has "  remedy is the E9 string"        "$(S 7)" "Grant Full Disk Access to your terminal"
+has "  summary keeps permission remedy" "$(S 6)" "Grant Full Disk Access to your terminal in System Settings > Privacy & Security, or narrow CLAUDE_WATCH_REPO_ROOTS"
 case $(S 6) in "disk scan could not read"*) ok "  reason really leads" ;; *) bad "  reason really leads" ;; esac
 
 DEAD="scan	1	1	12	40
@@ -384,7 +403,8 @@ note	deadline	1	-	-
 group	rebuildable	26738688	57	1"
 pure_body "$V_USED" "$V_AVAIL" "$V_DF" "$DEAD"
 eq "deadline maps to scan_deadline"    "$(S 5)" scan_deadline
-has "  summary leads with E5 verbatim" "$(S 6)" "disk scan stopped at its 120s deadline after 12 of 40 roots — the sizes below are a floor, not a total. Narrow CLAUDE_WATCH_REPO_ROOTS, or re-run claude-watch disk --refresh when the machine is idle"
+has "  deadline says measurement incomplete" "$(S 6)" "disk scan stopped at its 120s deadline after 12 of 40 roots — the measurement below is incomplete"
+has "  deadline keeps its remedy"      "$(S 6)" "Narrow CLAUDE_WATCH_REPO_ROOTS, or re-run claude-watch disk --refresh when the machine is idle"
 eq "  affected group capped"           "$(F disk.reclaimable.rebuildable 4)" info
 
 # A 5th column of '-' is a cache from an older scanner: treat it as affected=0.
@@ -396,6 +416,8 @@ eq "missing affected flag = not capped" "$(F disk.reclaimable.rebuildable 4)" cr
 eq "  depth_capped has no enum value"  "$(S 5)" ""
 eq "  but the domain is still partial" "$(S 4)" partial
 has "  and the reason still leads"     "$(S 6)" "disk scan stopped at its depth cap in 2 places"
+has "  depth cap says incomplete"      "$(S 6)" "the measurement below is incomplete"
+has "  depth cap keeps its remedy"     "$(S 6)" "Narrow CLAUDE_WATCH_REPO_ROOTS to the trees you care about"
 
 # coverage_incomplete, like depth_capped, has no §3e enum value of its own —
 # but when it is the ONLY note present, disk_findings must not fall through to
@@ -409,7 +431,8 @@ pure_body "$V_USED" "$V_AVAIL" "$V_DF" "$COVINC"
 eq "coverage_incomplete has no enum value" "$(S 5)" ""
 eq "  but the domain is still partial"    "$(S 4)" partial
 hasnt "  summary never claims no reason"  "$(S 6)" "no reason recorded"
-has "  and names the real reason"         "$(S 6)" "leaving its coverage incomplete"
+has "  and names the real reason"         "$(S 6)" "could not attribute 4 paths under \$HOME to a group, leaving the measurement incomplete"
+has "  coverage keeps its remedy"         "$(S 6)" "Re-run: claude-watch disk --refresh"
 
 # ============================================================ confidence gate ==
 echo "confidence gates the command"
@@ -420,6 +443,8 @@ dir	/Users/x/Dev/ccc/.next	7000000	rebuildable	unverified"
 pure_body "$V_USED" "$V_AVAIL" "$V_DF" "$CONF"
 A=$(F disk.reclaimable.rebuildable 14)
 has "confirmed gets a removal command" "$A" "rm -rf '/Users/x/Dev/aaa/.next'"
+has "  command promises only an upper payoff" "$A" "rm -rf '/Users/x/Dev/aaa/.next' — frees up to 8.6 GiB"
+hasnt "  command never promises exact freed bytes" "$A" "— frees 8.6 GiB"
 hasnt "likely gets no command"         "$A" "rm -rf '/Users/x/Dev/bbb/.next'"
 has "  likely says why"                "$A" "in active use, rebuilt on next build"
 hasnt "unverified gets no command"     "$A" "rm -rf '/Users/x/Dev/ccc/.next'"

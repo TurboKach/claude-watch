@@ -256,19 +256,6 @@ disk_group_cost() {
   esac
 }
 
-# Scan coverage and deletion payoff are independent bounds. The partial-scan
-# banner owns coverage; this classification owns the payoff distortion from
-# APFS clones and hard links, whose blocks `du` charges to every file even when
-# deleting one reference returns little or nothing. Unknown future groups keep
-# the historical floor wording until their storage behaviour is understood.
-disk_group_bound() {
-  case $1 in
-    developer|rebuildable|node_modules) printf 'upper' ;;
-    transcripts|downloads|caches|containers) printf 'floor' ;;
-    *)                                       printf 'floor' ;;
-  esac
-}
-
 # §6 U4 asks us to prefer the tool's own cleaner over rm -rf "since it cannot
 # mistake the directory". For Rust that turned out to be false: `(cd <parent>
 # && cargo clean)` is NOT bound to the target directory we measured — a
@@ -510,27 +497,27 @@ disk_findings() {
     state=partial
     if [ "$n_deadline" != 0 ] || [ "$dhit" = 1 ]; then
       reasons=scan_deadline
-      lead="disk scan stopped at its ${DISK_SCAN_DEADLINE_S}s deadline after ${rscanned} of ${rtotal} roots — the sizes below are a floor, not a total. Narrow CLAUDE_WATCH_REPO_ROOTS, or re-run claude-watch disk --refresh when the machine is idle"
+      lead="disk scan stopped at its ${DISK_SCAN_DEADLINE_S}s deadline after ${rscanned} of ${rtotal} roots — the measurement below is incomplete. Narrow CLAUDE_WATCH_REPO_ROOTS, or re-run claude-watch disk --refresh when the machine is idle"
     fi
     if [ "$n_perm" != 0 ]; then
       [ -n "$reasons" ] && reasons="$reasons,scan_permission_denied" || reasons=scan_permission_denied
-      [ -n "$lead" ] || lead="disk scan could not read ${n_perm} directories (permission denied) — the sizes below are a floor. Grant Full Disk Access to your terminal in System Settings > Privacy & Security, or narrow CLAUDE_WATCH_REPO_ROOTS"
+      [ -n "$lead" ] || lead="disk scan could not read ${n_perm} directories (permission denied) — the measurement below is incomplete. Grant Full Disk Access to your terminal in System Settings > Privacy & Security, or narrow CLAUDE_WATCH_REPO_ROOTS"
     fi
     # The remaining §3c note reasons have no value in the closed §3e enum, so
     # they carry no measurement_reason — only the leading sentence.
     if [ -z "$lead" ] && [ "$n_offvol" != 0 ]; then
-      lead="disk scan skipped ${n_offvol} roots on another volume — sizes from another volume are not comparable against this one, so the totals below are a floor. Point CLAUDE_WATCH_REPO_ROOTS at paths on the home volume"
+      lead="disk scan skipped ${n_offvol} roots on another volume — sizes from another volume are not comparable against this one, so the measurement below is incomplete. Point CLAUDE_WATCH_REPO_ROOTS at paths on the home volume"
     fi
     if [ -z "$lead" ] && [ "$n_unrep" != 0 ]; then
-      lead="disk scan skipped ${n_unrep} paths whose names contain a tab or a newline — a tab-separated cache cannot carry them, so the totals below are a floor. Rename them, or accept the undercount"
+      lead="disk scan skipped ${n_unrep} paths whose names contain a tab or a newline — a tab-separated cache cannot carry them, so the measurement below is incomplete. Rename them, or accept the undercount"
     fi
     if [ -z "$lead" ] && [ "$n_depth" != 0 ]; then
-      lead="disk scan stopped at its depth cap in ${n_depth} places — anything nested below it is not counted, so the totals below are a floor. Narrow CLAUDE_WATCH_REPO_ROOTS to the trees you care about"
+      lead="disk scan stopped at its depth cap in ${n_depth} places — anything nested below it is not counted, so the measurement below is incomplete. Narrow CLAUDE_WATCH_REPO_ROOTS to the trees you care about"
     fi
     if [ -z "$lead" ] && [ "$n_covinc" != 0 ]; then
-      lead="disk scan could not attribute ${n_covinc} paths under \$HOME to a group, leaving its coverage incomplete — the totals below are a floor. Re-run: claude-watch disk --refresh"
+      lead="disk scan could not attribute ${n_covinc} paths under \$HOME to a group, leaving the measurement incomplete. Re-run: claude-watch disk --refresh"
     fi
-    [ -n "$lead" ] || lead="disk scan reported itself partial with no reason recorded — the totals below are a floor. Re-run: claude-watch disk --refresh"
+    [ -n "$lead" ] || lead="disk scan reported itself partial with no reason recorded — the measurement below is incomplete. Re-run: claude-watch disk --refresh"
     remedy=$lead
   fi
 
@@ -645,16 +632,9 @@ disk_findings() {
     # never hand an `IFS=$'\t' read` consumer an empty interior field.
     [ -n "$sorted" ] && sorted=$(printf '%s' "$sorted" | sort -t$'\t' -k1,1n -k2,2nr | cut -f2-)
 
-    local action detail headline_bound bound
+    local action detail
     action=$(disk_group_action "$lab" "$cage" "$sorted")
-    bound=$(disk_group_bound "$lab")
-    if [ "$bound" = upper ]; then
-      headline_bound='an upper bound'
-      detail="$(disk_h "$sz") across ${cnt} directories, an upper bound. Measured with du, which counts APFS clone and hard-linked blocks once per file: deleting this frees at most this much, and can free far less. Rebuild cost: $(disk_group_cost "$lab")."
-    else
-      headline_bound='a floor'
-      detail="$(disk_h "$sz") across ${cnt} directories, a floor. Rebuild cost: $(disk_group_cost "$lab")."
-    fi
+    detail="$(disk_h "$sz") across ${cnt} directories, an upper bound on what deleting them returns. Measured with du: APFS clone extents are charged once per file, while each hard-linked inode is charged once per du invocation; because xargs may split a group across invocations, the same inode can be charged more than once. Deleting these directories returns at most this much space, and can return far less. Rebuild cost: $(disk_group_cost "$lab")."
     if [ "$lab" = transcripts ]; then
       detail="$detail $(disk_transcript_breakdown "$sorted")"
     else
@@ -665,7 +645,7 @@ disk_findings() {
     rows=$rows$(printf '%s\t%s\t%s\tF\tdisk\tdisk.reclaimable.%s\t%s\t%s\t%s\tkb\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$(disk_rank "$gsev")" "$gshare" "disk.reclaimable.$lab" \
       "$lab" "$gsev" "$gshare" "$sz" "$gthr" "$gthrname" "$sz" "$best" \
-      "$(disk_clean "$(disk_h "$sz") of $(disk_group_what "$lab") — $(disk_pct "$sz" "$total")% of the volume, $headline_bound")" \
+      "$(disk_clean "$(disk_h "$sz") of $(disk_group_what "$lab") — $(disk_pct "$sz" "$total")% of the volume, an upper bound on what deleting it returns")" \
       "$(disk_clean "$detail")" "$(disk_clean "$action")")$'\n'
     [ "$(disk_rank "$gsev")" -gt "$(disk_rank "$worst")" ] && worst=$gsev
   done
@@ -692,7 +672,7 @@ disk_findings() {
     rows=$rows$(printf '%s\t%s\t%s\tF\tdisk\tdisk.reclaimable.below_threshold\tinfo\t%s\t%s\tkb\t%s\t%s\t%s\tn/a\t%s\t%s\t\n' \
       "$(disk_rank info)" "$bshare" disk.reclaimable.below_threshold \
       "$bshare" "$supkb" "$bthr" "$bthrname" "$supkb" \
-      "$(disk_clean "$(disk_h "$supkb") suppressed below the group line across ${supn} groups (largest ${supbestlab} $(disk_h "$supbestkb")) — $(disk_pct "$supkb" "$total")% of the volume, a floor")" \
+      "$(disk_clean "$(disk_h "$supkb") suppressed below the group line across ${supn} groups (largest ${supbestlab} $(disk_h "$supbestkb")) — $(disk_pct "$supkb" "$total")% of the volume, an upper bound on what deleting them returns")" \
       "$(disk_clean "${supn} groups sit individually below the ${DISK_GROUP_WARN_PCT}% / ${DISK_GROUP_WARN_GIB} GiB line but clear it summed; this names an amount, not a target, so no action is offered. Suppressed: ${supdetail}.")")$'\n'
   fi
 
@@ -703,11 +683,12 @@ disk_findings() {
     ngroups=$((ngroups + 1)); rtotalkb=$(( rtotalkb + ${gsize[$i]} )); onelabel=${glabel[$i]}
   done
   base="$(disk_pct "$avail" "$total")% free ($(disk_h "$avail") of $(disk_h "$total"))"
-  # Reclaim totals are ALWAYS labelled a floor, not only on the partial path.
+  # `du` totals are upper bounds on deletion payoff because shared storage can
+  # be charged more than once. Scan coverage is reported independently above.
   case $ngroups in
     0) base="$base; no group over ${DISK_GROUP_WARN_PCT}% of the volume or ${DISK_GROUP_WARN_GIB} GiB" ;;
-    1) base="$base; $(disk_h "$rtotalkb") of $(disk_group_what "$onelabel") (a floor)" ;;
-    *) base="$base; $(disk_h "$rtotalkb") reclaimable across ${ngroups} groups (a floor)" ;;
+    1) base="$base; $(disk_h "$rtotalkb") of $(disk_group_what "$onelabel") (an upper bound on what deleting it returns)" ;;
+    *) base="$base; $(disk_h "$rtotalkb") reclaimable across ${ngroups} groups (an upper bound on what deleting them returns)" ;;
   esac
   # Suppressed groups are always named here, whether or not their sum cleared
   # the bar for the below_threshold finding above — this is the "measured but
@@ -784,7 +765,7 @@ disk_group_action() {
     else
       case $conf in
         confirmed)
-          item="$(disk_command_for "$p") — frees $(disk_h "$sz")"
+          item="$(disk_command_for "$p") — frees up to $(disk_h "$sz")"
           # The cache age prints beside every command regardless (§6 U4), and
           # says so out loud once it is past the 6h TTL.
           if disk_is_uint "$cage" && [ "$cage" -ge "$DISK_CACHE_TTL_S" ]; then

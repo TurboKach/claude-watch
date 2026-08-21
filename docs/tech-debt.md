@@ -2,6 +2,16 @@
 
 Deliberately deferred findings, recorded at the time they were deferred so they stay actionable after the triggering context (session scratchpad, PR discussion) is gone. Each entry is self-contained: location, what's wrong, why it waited, and what "fixed" would require.
 
+## Disk advice: JSON does not encode the `reclaimable_kb` bound (P1, deferred 2026-08-21)
+
+**Where:** `tools/advise.sh`, where every finding is serialized with the existing `reclaimable_kb` field, and `tools/advise-disk.sh`, where disk findings explain the bound only in their human-readable headline and detail.
+
+**What's wrong.** For disk reclaim findings, `reclaimable_kb` is the measured `du` size and therefore an upper bound on what deletion returns: APFS clone extents can be charged once per file, and hard-linked inodes once per `du` invocation (potentially more than once across the `xargs` invocations used for one group). The JSON schema has no machine-readable field that identifies this bound. A consumer that reads only `reclaimable_kb` cannot distinguish an upper-bound disk estimate from another domain's reclaim value without parsing prose or hard-coding finding IDs.
+
+**Why deferred.** The user explicitly chose to keep the current field name and schema version, with no new JSON field, while correcting all published prose. This preserves the existing JSON contract at the cost of leaving the bound implicit for machine consumers.
+
+**What would need to be true to fix it.** Add an explicit bound/estimate-semantics field to findings, define its meaning across every domain, bump `schema_version`, and update contract fixtures and consumers together.
+
 ## Disk scanner: `du` stderr taint-matching does not converge (P2, deferred 2026-08-19)
 
 **Where:** `tools/disk-scan.sh`, the stderr-attribution block that classifies each `du` diagnostic line as belonging to a group, `RESIDUAL` (harmless/unattributable), or `FATAL` (wholesale-taint every sweep-fed group) — `:634-652` at HEAD `8462e0a`, plus the coverage-count consumer at `:690` and `tools/advise-disk.sh:517-518`.
