@@ -320,7 +320,7 @@ reassuring, wrong answer with no symptom.
 `containers` (`~/Library/Containers`, single total, no per-app breakdown).
 `dir` rows are the individual hits, capped to the top 20 per group by size.
 
-**Every published reclaim total is an upper bound on scan-time deletion payoff.**
+**Every published reclaim total is a scan-time upper bound on deletion payoff.**
 `du` can charge shared APFS clone extents and hard-linked inodes more than once,
 so deletion may return far less. Coverage is independent: the depth cap,
 unrepresentable paths, roots off the home volume, deadlines, and permission
@@ -427,8 +427,8 @@ whole reason the field exists.
   "domains": [
     {"domain": "disk", "priority": 1, "severity": "critical", "severity_rank": 4,
      "measurement_state": "complete", "measurement_reasons": [], "partial_reason": null,
-     "summary": "4.7% free; 30.3 GiB of rebuildable build output (an upper bound on what deleting it returns)",
-     "remedy": null,
+     "summary": "4.7% free; 30.3 GiB of rebuildable build output (scan-time upper bound on what deleting it returns)",
+     "remedy": "Measured with du: APFS clone extents are charged once per file, while each hard-linked inode is charged once per du invocation; because xargs may split a group across invocations, the same inode can be charged more than once. At scan time, deleting these directories could return at most the reported amount, possibly far less.",
      "findings": [
        {"id": "disk.volume_low", "severity": "critical", "severity_rank": 4,
         "share_of_domain": 0.953, "value": 20725496, "unit": "kb",

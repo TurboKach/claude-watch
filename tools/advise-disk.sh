@@ -181,6 +181,19 @@ disk_h() {
   fi
 }
 
+# Human sizes used as upper bounds must never round below their KB source.
+# Keep this separate from disk_h: free space, thresholds, and volume totals are
+# measurements where ordinary nearest-rounding is the truthful presentation.
+disk_h_bound() {
+  local kb=$1 t
+  if   [ "$kb" -ge 1073741824 ]; then t=$(( (kb * 10 + 1073741824 - 1) / 1073741824 )); printf '%d.%d TiB' $((t / 10)) $((t % 10))
+  elif [ "$kb" -ge 104857600 ];  then printf '%d GiB' $(( (kb + 1048576 - 1) / 1048576 ))
+  elif [ "$kb" -ge 1048576 ];    then t=$(( (kb * 10 + 1048576 - 1) / 1048576 ));       printf '%d.%d GiB' $((t / 10)) $((t % 10))
+  elif [ "$kb" -ge 1024 ];       then printf '%d MiB' $(( (kb + 1024 - 1) / 1024 ))
+  else                                  printf '%d KiB' "$kb"
+  fi
+}
+
 # One decimal percent, rounded. Denominator 0 prints 0.0 rather than dividing.
 disk_pct() {
   local num=$1 den=$2 t
@@ -570,7 +583,7 @@ disk_findings() {
     if ! disk_group_published "$sz" "$total"; then
       supn=$((supn + 1)); supkb=$(( supkb + sz ))
       [ "$sz" -gt "$supbestkb" ] && { supbestkb=$sz; supbestlab=$lab; }
-      supdetail="${supdetail:+$supdetail, }${lab} $(disk_h "$sz")"
+      supdetail="${supdetail:+$supdetail, }${lab} $(disk_h_bound "$sz")"
       continue
     fi
 
@@ -634,7 +647,7 @@ disk_findings() {
 
     local action detail
     action=$(disk_group_action "$lab" "$cage" "$sorted")
-    detail="$(disk_h "$sz") across ${cnt} directories, an upper bound on what deleting them returns. Measured with du: APFS clone extents are charged once per file, while each hard-linked inode is charged once per du invocation; because xargs may split a group across invocations, the same inode can be charged more than once. When measured, deleting these directories could return at most this much space, possibly far less. Rebuild cost: $(disk_group_cost "$lab")."
+    detail="$(disk_h_bound "$sz") across ${cnt} directories — scan-time upper bound. Rebuild cost: $(disk_group_cost "$lab")."
     if [ "$lab" = transcripts ]; then
       detail="$detail $(disk_transcript_breakdown "$sorted")"
     else
@@ -645,7 +658,7 @@ disk_findings() {
     rows=$rows$(printf '%s\t%s\t%s\tF\tdisk\tdisk.reclaimable.%s\t%s\t%s\t%s\tkb\t%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
       "$(disk_rank "$gsev")" "$gshare" "disk.reclaimable.$lab" \
       "$lab" "$gsev" "$gshare" "$sz" "$gthr" "$gthrname" "$sz" "$best" \
-      "$(disk_clean "$(disk_h "$sz") of $(disk_group_what "$lab") — $(disk_pct "$sz" "$total")% of the volume, an upper bound on what deleting it returns")" \
+      "$(disk_clean "$(disk_h_bound "$sz") of $(disk_group_what "$lab") — $(disk_pct "$sz" "$total")% of the volume; scan-time upper bound")" \
       "$(disk_clean "$detail")" "$(disk_clean "$action")")$'\n'
     [ "$(disk_rank "$gsev")" -gt "$(disk_rank "$worst")" ] && worst=$gsev
   done
@@ -672,8 +685,8 @@ disk_findings() {
     rows=$rows$(printf '%s\t%s\t%s\tF\tdisk\tdisk.reclaimable.below_threshold\tinfo\t%s\t%s\tkb\t%s\t%s\t%s\tn/a\t%s\t%s\t\n' \
       "$(disk_rank info)" "$bshare" disk.reclaimable.below_threshold \
       "$bshare" "$supkb" "$bthr" "$bthrname" "$supkb" \
-      "$(disk_clean "$(disk_h "$supkb") suppressed below the group line across ${supn} groups (largest ${supbestlab} $(disk_h "$supbestkb")) — $(disk_pct "$supkb" "$total")% of the volume, an upper bound on what deleting them returns")" \
-      "$(disk_clean "${supn} groups sit individually below the ${DISK_GROUP_WARN_PCT}% / ${DISK_GROUP_WARN_GIB} GiB line but clear it summed; this names an amount, not a target, so no action is offered. Suppressed (each an upper bound on what deleting that group returns): ${supdetail}.")")$'\n'
+      "$(disk_clean "$(disk_h_bound "$supkb") suppressed below the group line across ${supn} groups (largest ${supbestlab} $(disk_h_bound "$supbestkb")) — $(disk_pct "$supkb" "$total")% of the volume; scan-time upper bound")" \
+      "$(disk_clean "${supn} groups sit individually below the ${DISK_GROUP_WARN_PCT}% / ${DISK_GROUP_WARN_GIB} GiB line but clear it summed; this names an amount, not a target, so no action is offered. Suppressed (each a scan-time upper bound on what deleting that group returns): ${supdetail}.")")$'\n'
   fi
 
   # ---- summary ------------------------------------------------------------
@@ -683,12 +696,12 @@ disk_findings() {
     ngroups=$((ngroups + 1)); rtotalkb=$(( rtotalkb + ${gsize[$i]} )); onelabel=${glabel[$i]}
   done
   base="$(disk_pct "$avail" "$total")% free ($(disk_h "$avail") of $(disk_h "$total"))"
-  # `du` totals are upper bounds on deletion payoff because shared storage can
-  # be charged more than once. Scan coverage is reported independently above.
+  # `du` totals are scan-time upper bounds on deletion payoff because shared
+  # storage can be charged more than once. Scan coverage is independent.
   case $ngroups in
     0) base="$base; no group over ${DISK_GROUP_WARN_PCT}% of the volume or ${DISK_GROUP_WARN_GIB} GiB" ;;
-    1) base="$base; $(disk_h "$rtotalkb") of $(disk_group_what "$onelabel") (an upper bound on what deleting it returns)" ;;
-    *) base="$base; $(disk_h "$rtotalkb") reclaimable across ${ngroups} groups (an upper bound on what deleting them returns)" ;;
+    1) base="$base; $(disk_h_bound "$rtotalkb") of $(disk_group_what "$onelabel") (scan-time upper bound on what deleting it returns)" ;;
+    *) base="$base; $(disk_h_bound "$rtotalkb") reclaimable across ${ngroups} groups (scan-time upper bound on what deleting them returns)" ;;
   esac
   # Suppressed groups are always named here, whether or not their sum cleared
   # the bar for the below_threshold finding above — this is the "measured but
@@ -698,7 +711,7 @@ disk_findings() {
   # finding will actually be there (the sum itself clears the bar); when the
   # sum stays under too, say so instead of pointing at data that isn't emitted.
   if [ "$supn" -gt 0 ]; then
-    base="$base; ${supn} groups below the line totalling $(disk_h "$supkb") (an upper bound on what deleting them returns; largest ${supbestlab} $(disk_h "$supbestkb"))"
+    base="$base; ${supn} groups below the line totalling $(disk_h_bound "$supkb") (scan-time upper bound on what deleting them returns; largest ${supbestlab} $(disk_h_bound "$supbestkb"))"
     if disk_group_published "$supkb" "$total"; then
       base="$base — --json for the full per-group breakdown"
     else
@@ -718,6 +731,10 @@ disk_findings() {
     elif [ "$ccomplete" != 1 ] || ! disk_is_uint "$chome" || ! disk_is_uint "$cattr"; then
       base="$base; \$HOME coverage is incomplete, so the residual figure is unavailable"
     fi
+  fi
+  if [ "$ngroups" -gt 0 ] || [ "$supn" -gt 0 ]; then
+    local bound_note='Measured with du: APFS clone extents are charged once per file, while each hard-linked inode is charged once per du invocation; because xargs may split a group across invocations, the same inode can be charged more than once. At scan time, deleting these directories could return at most the reported amount, possibly far less.'
+    remedy="${remedy:+$remedy. }$bound_note"
   fi
   local summary=$base
   # §3c: on a partial scan the domain summary leads with the reason.
@@ -765,7 +782,7 @@ disk_group_action() {
     else
       case $conf in
         confirmed)
-          item="$(disk_command_for "$p") — scan-time upper bound $(disk_h "$sz")"
+          item="$(disk_command_for "$p") — scan-time upper bound $(disk_h_bound "$sz")"
           # The cache age prints beside every command regardless (§6 U4), and
           # says so out loud once it is past the 6h TTL.
           if disk_is_uint "$cage" && [ "$cage" -ge "$DISK_CACHE_TTL_S" ]; then
